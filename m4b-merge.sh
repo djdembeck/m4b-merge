@@ -201,40 +201,40 @@ function audibleparser() {
 	unset useoldmeta
 
 	# Check for multiple narrators
-	NARRCMD="$(grep "searchNarrator=" "$AUDMETAFILE" | grep c1_narrator | grep -o -P '(?<=>).*(?=<)' | sort -u | iconv -f utf8 -t ascii//TRANSLIT)"
+	NARRCMD="$(grep "searchNarrator=" "$AUDMETAFILE" | grep c1_narrator | grep -o -P '(?<=>).*(?=<)' | sort -u | iconv -f UTF-8 -t ascii//TRANSLIT)"
 	if [[ $(echo "$NARRCMD" | wc -l) -gt 1 ]]; then
 		notice "Correcting formatting for multiple narrators..."
 		NUM="$(echo "$NARRCMD" | wc -l)"
-		NARRCMD="$(cat "$AUDMETAFILE" | grep "searchNarrator=" | grep c1_narrator | grep -o -P '(?<=>).*(?=<)' | sort -u | sed -e "2,${NUM}{s#^#, #}" | tr -d '\n' | iconv -f utf8 -t ascii//TRANSLIT)"
+		NARRCMD="$(cat "$AUDMETAFILE" | grep "searchNarrator=" | grep c1_narrator | grep -o -P '(?<=>).*(?=<)' | sort -u | sed -e "2,${NUM}{s#^#, #}" | tr -d '\n' | iconv -f UTF-8 -t ascii//TRANSLIT)"
 	fi
-	AUTHORCMD="$(grep "/author/" "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=<)' | head -n1 | iconv -f utf8 -t ascii//TRANSLIT)"
+	AUTHORCMD="$(grep "/author/" "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=<)' | head -n1 | iconv -f UTF-8 -t ascii//TRANSLIT)"
 	# Prefer being strict about authors, unless we can't find them.
 	if [[ -z $AUTHORCMD ]]; then
 		notice "Could not find author using default method. Trying backup method..."
-		AUTHORCMD="$(cat "$AUDMETAFILE" | grep "author" | grep -o -P '(?<=>).*(?=<)' | head -n1 | iconv -f utf8 -t ascii//TRANSLIT)"
+		AUTHORCMD="$(cat "$AUDMETAFILE" | grep "author" | grep -o -P '(?<=>).*(?=<)' | head -n1 | iconv -f UTF-8 -t ascii//TRANSLIT)"
 	fi
-	TICTLECMD="$(grep "title"  "$AUDMETAFILE" | grep "content=" -m 1 | head -n1 | grep -o -P '(?<=content=").*(?=")' | sed -e 's/[[:space:]]*$//' | iconv -f utf8 -t ascii//TRANSLIT)"
-	SERIESCMD="$(grep "/series" "$AUDMETAFILE" -m 1 | grep -o -P '(?<=>).*(?=<)' | iconv -f utf8 -t ascii//TRANSLIT)"
+	TICTLECMD="$(grep "title"  "$AUDMETAFILE" | grep "content=" -m 1 | head -n1 | grep -o -P '(?<=content=").*(?=")' | sed -e 's/[[:space:]]*$//' | iconv -f UTF-8 -t ascii//TRANSLIT)"
+	SERIESCMD="$(grep "/series" "$AUDMETAFILE" -m 1 | grep -o -P '(?<=>).*(?=<)' | iconv -f UTF-8 -t ascii//TRANSLIT)"
 	if [[ $(echo "$SERIESCMD" | grep "chronological" | wc -l) -ge 1 ]]; then
 		notice "Detected 2 book orders. Using Chronological order."
-		SERIESCMD="$(grep "chronological" -m 1 "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=,)' | sed -e 's#</a>##' | iconv -f utf8 -t ascii//TRANSLIT)"
+		SERIESCMD="$(grep "chronological" -m 1 "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=,)' | sed -e 's#</a>##' | iconv -f UTF-8 -t ascii//TRANSLIT)"
 		if [[ $(echo "$SERIESCMD" | grep "Book" | wc -l) -lt 1 ]]; then
 			notice "Detected possible issue with Book number missing. Being less strict to retrieve it."
-			SERIESCMD="$(grep "chronological" -m 1 "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=)' | sed -e 's#</a>##' | iconv -f utf8 -t ascii//TRANSLIT)"
+			SERIESCMD="$(grep "chronological" -m 1 "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=)' | sed -e 's#</a>##' | iconv -f UTF-8 -t ascii//TRANSLIT)"
 		fi
 	fi
-	BOOKNUM="$(grep "/series" -A 1 -m 1 "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=)' | cut -d ',' -f 2 | sed -e 's/^[[:space:]]*//' | iconv -f utf8 -t ascii//TRANSLIT)"
+	BOOKNUM="$(grep "/series" -A 1 -m 1 "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=)' | cut -d ',' -f 2 | sed -e 's/^[[:space:]]*//' | iconv -f UTF-8 -t ascii//TRANSLIT)"
 	# Don't include book number, if it doesn't actually say which book it is
 	if [[ $(echo "$BOOKNUM" | grep "Book" | wc -l ) -lt 1 ]] || [[ $(echo "$BOOKNUM" | grep "Book" | wc -l ) -gt 1 ]]; then
 		notice "Detected either no book number, or more than 1 book number."
 		BOOKNUM=""
 	fi
-	SUBTITLE="$(grep "subtitle" -m 1 -A 5 "$AUDMETAFILE" | tail -n1 | sed -e 's/^[[:space:]]*//' | iconv -f utf8 -t ascii//TRANSLIT | tr -dc '[:print:]')"
-	if [[ ! -z "$SERIESCMD" && $(echo "$SUBTITLE" | grep "$(echo "$SERIESCMD" | cut -d ' ' -f 1-2)" | wc -l) -ge 1 ]]; then
+	SUBTITLE="$(grep "subtitle" -m 1 -A 5 "$AUDMETAFILE" | tail -n1 | sed -e 's/^[[:space:]]*//' | iconv -f UTF-8 -t ascii//TRANSLIT | tr -dc '[:print:]')"
+	if [[ -n "$SERIESCMD" && $(echo "$SUBTITLE" | grep "$(echo "$SERIESCMD" | cut -d ' ' -f 1-2)" | wc -l) -ge 1 ]]; then
 		notice "Subtitle appears to be the same or similar to series name. Excluding the subtitle."
 		SUBTITLE=""
 	fi
-	BKDATE1="$(grep "releaseDateLabel" -A 3 "$AUDMETAFILE" | tail -n1 | sed -e 's/^[[:space:]]*//' | tr '-' '/' | iconv -f utf8 -t ascii//TRANSLIT)"
+	BKDATE1="$(grep "releaseDateLabel" -A 3 "$AUDMETAFILE" | tail -n1 | sed -e 's/^[[:space:]]*//' | tr '-' '/' | iconv -f UTF-8 -t ascii//TRANSLIT)"
 	BKDATE="$(date -d "$BKDATE1" +%Y-%m-%d)"
 	# Extract plain number from Book number
 	SERIESNUMBER="$(echo "$BOOKNUM" | sed 's|[^0-9]||g')"
@@ -395,7 +395,6 @@ function batchprocess() {
 		# Basename of array values
 		BASESELDIR="$(basename "$SELDIR")"
 		M4BSELFILE="/tmp/.m4bmerge.$BASESELDIR.txt"
-		METADATA="/tmp/.m4bmeta.$BASESELDIR.txt"
 
 		# Import metadata into an array, so we can use it.
 		importmetadata
