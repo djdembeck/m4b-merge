@@ -175,7 +175,6 @@ RUN apt-get update && \
   php-common \
   php-mbstring \
   pv \
-  tar \
   wget && \
   rm -rf /var/lib/apt/lists/*
 
@@ -193,7 +192,7 @@ RUN wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/libmp4v2-2_2.0.0
     dpkg -i mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
     rm *.deb
 
-RUN apt-get remove -y tar wget
+RUN apt-get remove -y wget
 
 COPY ./m4b-merge.sh /app/m4b-merge.sh
 
