@@ -177,16 +177,21 @@ ARG M4B_TOOL_DOWNLOAD_LINK="https://github.com/sandreas/m4b-tool/releases/latest
 RUN apt-get update && \
   apt-get install -y \
   fdkaac \
-  mp4v2-utils \
-  python-mutagen \
+  python3-mutagen \
   php-cli \
-  php7.2-common \
-  php7.2-mbstring \
+  php-common \
+  php-mbstring \
   pv \
   wget && \
   rm -rf /var/lib/apt/lists/*
 
 RUN wget "$M4B_TOOL_DOWNLOAD_LINK" -O /usr/local/bin/m4b-tool && chmod +x /usr/local/bin/m4b-tool
+
+RUN wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
+    wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
+    dpkg -i libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
+    dpkg -i mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
+    rm *.deb
 
 RUN apt-get remove -y wget
 
