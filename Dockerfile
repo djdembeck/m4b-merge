@@ -246,8 +246,11 @@ RUN \
 RUN apk del \
   tar \
   wget
+  
+RUN addgroup -S 100 && \
+  adduser --home /app --shell /bin/bash --uid 99 -S -G 100 abc
 
-COPY ./m4b-merge.sh /app/m4b-merge.sh
+COPY --chown=99:100 ./m4b-merge.sh /app/m4b-merge.sh
 
 COPY --from=ffbuild /opt/ffmpeg/bin/ffmpeg /usr/local/bin
 COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /usr/local/bin
@@ -258,8 +261,8 @@ COPY --from=build /usr/local/lib/libmp4v2* /usr/local/lib/
 RUN printf '#!/bin/bash \n /app/m4b-merge.sh "$@"' > /usr/bin/m4b-merge && \
     chmod +x /usr/bin/m4b-merge
 
-RUN addgroup -S 100 && adduser -S 99 -G 100
-
 USER 99:100
+
+WORKDIR /app
 
 CMD tail -f /dev/null
