@@ -1,15 +1,34 @@
 FROM alpine:3.10 AS ffbase
 
-RUN apk add --no-cache \
-  ca-certificates \
-  expat \
+RUN buildDeps="autoconf \
+  automake \
+  bash \
+  binutils \
+  build-base \
+  bzip2 \
+  cmake \
+  curl \
+  coreutils \
+  diffutils \
+  expat-dev \
+  file \
+  findutils \
   g++ \
-  gcc \
-  git \
+  gperf \
+  libarchive-tools \
   libgomp \
-  musl-dev
+  libtool \
+  nasm \
+  python3 \
+  openssl \
+  openssl-dev \
+  tar \
+  util-linux-dev \
+  yasm \
+  zlib-dev" && \
+  apk add --no-cache ${buildDeps}
 
-FROM base AS ffbuild
+FROM ffbase AS ffbuild
 
 WORKDIR /tmp/workdir
 
@@ -23,37 +42,12 @@ ENV FFMPEG_VERSION=snapshot \
   LAME_VERSION=3.100 \
   OPUS_VERSION=1.3.1 \
   X264_VERSION=x264-master \
-  X265_VERSION=3.3 \
+  X265_VERSION=3.4 \
   ZIMG_VERSION=2.9.3 \
   SRC=/usr/local
 
 ARG FREETYPE_SHA256SUM="3a60d391fd579440561bf0e7f31af2222bc610ad6ce4d9d7bd2165bca8669110 freetype-${FREETYPE_VERSION}.tar.gz"
 ARG OPUS_SHA256SUM="65b58e1e25b2a114157014736a3d9dfeaad8d41be1c8179866f144a2fb44ff9d opus-${OPUS_VERSION}.tar.gz"
-
-RUN buildDeps="autoconf \
-  automake \
-  bash \
-  binutils \
-  bzip2 \
-  cmake \
-  curl \
-  coreutils \
-  diffutils \
-  expat-dev \
-  file \
-  findutils \
-  gperf \
-  libarchive-tools \
-  libtool \
-  make \
-  nasm \
-  python \
-  openssl-dev \
-  tar \
-  util-linux-dev \
-  yasm \
-  zlib-dev" && \
-  apk add --no-cache ${buildDeps}
 
 ### fdk-aac https://github.com/mstorsjo/fdk-aac
 RUN \
@@ -84,7 +78,7 @@ RUN \
         DIR=/tmp/x265 && \
         mkdir -p ${DIR} && \
         cd ${DIR} && \
-        curl -sL https://bitbucket.org/multicoreware/x265/downloads/x265_${X265_VERSION}.tar.gz  | \
+        curl -sL http://anduin.linuxfromscratch.org/BLFS/x265/x265_${X265_VERSION}.tar.gz  | \
         tar -zx && \
         cd x265_${X265_VERSION}/build/linux && \
         find . -mindepth 1 ! -name 'make-Makefiles.bash' -and ! -name 'multilib.sh' -exec rm -r {} + && \
@@ -144,7 +138,7 @@ RUN  \
 ## ffmpeg https://ffmpeg.org/
 RUN  \
         DIR=/tmp/ffmpeg && mkdir -p ${DIR} && cd ${DIR} && \
-        curl -sLO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.bz2 && \
+        curl -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.bz2 && \
         tar -jx --strip-components=1 -f ffmpeg-${FFMPEG_VERSION}.tar.bz2
 
 RUN \
@@ -161,6 +155,7 @@ RUN \
         --enable-libx265 \
         --enable-libzimg \
         --enable-nonfree \
+        --enable-openssl \
         --pkg-config-flags="--static" \
         --extra-cflags="-I$PREFIX/include" \
         --extra-ldflags="-L$PREFIX/lib" \
@@ -170,7 +165,7 @@ RUN \
         make && \
         make install
 
-FROM alpine:3.10 AS ffmpeg
+FROM ffbuild AS ffmpeg
 
 COPY --from=ffbuild /opt/ffmpeg/bin/ffmpeg /app/
 COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /app/
@@ -182,20 +177,25 @@ ARG M4B_TOOL_DOWNLOAD_LINK="https://github.com/sandreas/m4b-tool/releases/latest
 RUN apt-get update && \
   apt-get install -y \
   fdkaac \
-  mp4v2-utils \
-  python-mutagen \
+  python3-mutagen \
   php-cli \
-  php7.2-common \
-  php7.2-mbstring \
+  php-common \
+  php-mbstring \
   pv \
   wget && \
   rm -rf /var/lib/apt/lists/*
 
 RUN wget "$M4B_TOOL_DOWNLOAD_LINK" -O /usr/local/bin/m4b-tool && chmod +x /usr/local/bin/m4b-tool
 
+RUN wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
+    wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
+    dpkg -i libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
+    dpkg -i mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
+    rm *.deb
+
 RUN apt-get remove -y wget
 
-COPY /m4b-merge/m4b-merge.sh /app/m4b-merge.sh
+COPY ./m4b-merge.sh /app/m4b-merge.sh
 
 COPY --from=ffmpeg /app/ffmpeg /usr/bin
 COPY --from=ffmpeg /app/ffprobe /usr/bin
