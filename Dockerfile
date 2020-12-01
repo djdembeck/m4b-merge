@@ -195,7 +195,7 @@ RUN wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/libmp4v2-2_2.0.0
 
 RUN apt-get remove -y wget
 
-COPY /m4b-merge/m4b-merge.sh /app/m4b-merge.sh
+COPY ./m4b-merge.sh /app/m4b-merge.sh
 
 COPY --from=ffmpeg /app/ffmpeg /usr/bin
 COPY --from=ffmpeg /app/ffprobe /usr/bin
