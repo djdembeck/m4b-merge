@@ -194,7 +194,9 @@ RUN wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/libmp4v2-2_2.0.0
 
 RUN apt-get remove -y wget
 
-COPY ./m4b-merge.sh /app/m4b-merge.sh
+RUN useradd -rm -d /app -m -s /bin/bash -g 100 -u 99 abc
+
+COPY --chown=99:100 ./m4b-merge.sh /app/m4b-merge.sh
 
 COPY --from=ffbuild /opt/ffmpeg/bin/ffmpeg /usr/bin
 COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /usr/bin
@@ -202,8 +204,9 @@ COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /usr/bin
 RUN printf '#!/bin/bash \n /app/m4b-merge.sh "$@"' > /usr/bin/m4b-merge && \
     chmod +x /usr/bin/m4b-merge
 
-RUN useradd -r -u 99 -g 100 99
 
 USER 99:100
+
+WORKDIR /app
 
 CMD tail -f /dev/null
