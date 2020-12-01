@@ -165,14 +165,7 @@ RUN \
         make && \
         make install
 
-FROM ffbuild AS ffmpeg
-
-COPY --from=ffbuild /opt/ffmpeg/bin/ffmpeg /app/
-COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /app/
-
 FROM ubuntu:latest
-
-ARG M4B_TOOL_DOWNLOAD_LINK="https://github.com/sandreas/m4b-tool/releases/latest/download/m4b-tool.phar"
 
 RUN apt-get update && \
   apt-get install -y \
@@ -182,10 +175,17 @@ RUN apt-get update && \
   php-common \
   php-mbstring \
   pv \
+  tar \
   wget && \
   rm -rf /var/lib/apt/lists/*
 
-RUN wget "$M4B_TOOL_DOWNLOAD_LINK" -O /usr/local/bin/m4b-tool && chmod +x /usr/local/bin/m4b-tool
+RUN \
+  M4B_TOOL_PRE_RELEASE_LINK="$(wget -q -O - https://github.com/sandreas/m4b-tool/releases/tag/latest | grep M4B_TOOL_DOWNLOAD_LINK | cut -d '=' -f 2 | cut -d ' ' -f 1)" && \
+  wget "$M4B_TOOL_PRE_RELEASE_LINK" -O /tmp/m4b-tool.tar.gz && \
+  tar -xf /tmp/m4b-tool.tar.gz -C /tmp && \
+  rm /tmp/m4b-tool.tar.gz && \
+  mv /tmp/m4b-tool.phar /usr/local/bin/m4b-tool && \
+  chmod +x /usr/local/bin/m4b-tool
 
 RUN wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
     wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
@@ -193,12 +193,12 @@ RUN wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/libmp4v2-2_2.0.0
     dpkg -i mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
     rm *.deb
 
-RUN apt-get remove -y wget
+RUN apt-get remove -y tar wget
 
 COPY ./m4b-merge.sh /app/m4b-merge.sh
 
-COPY --from=ffmpeg /app/ffmpeg /usr/bin
-COPY --from=ffmpeg /app/ffprobe /usr/bin
+COPY --from=ffbuild /opt/ffmpeg/bin/ffmpeg /usr/bin
+COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /usr/bin
 
 RUN printf '#!/bin/bash \n /app/m4b-merge.sh "$@"' > /usr/bin/m4b-merge && \
     chmod +x /usr/bin/m4b-merge
