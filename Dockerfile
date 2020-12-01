@@ -9,7 +9,7 @@ RUN apk add --no-cache \
   libgomp \
   musl-dev
 
-FROM base AS ffbuild
+FROM ffbase AS ffbuild
 
 WORKDIR /tmp/workdir
 
