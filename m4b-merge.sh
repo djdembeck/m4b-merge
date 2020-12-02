@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to use m4b-tool to merge audiobooks, easily.
-## REQUIRES: bash, curl, GNU grep, GNU date, GNU iconv, mediainfo, pv, https://github.com/sandreas/m4b-tool
-VER=1.5.1
+## REQUIRES: bash, curl, GNU grep, GNU iconv, mediainfo, pv, https://github.com/sandreas/m4b-tool
+VER=1.5.2
 
 ### USER EDITABLE VARIABLES ###
 
@@ -61,7 +61,6 @@ fi
 # If no manual override for jobs, use number of available CPU threads
 if [[ -z $JOBCOUNT ]]; then
 	JOBCOUNT="$(grep -c ^processor /proc/cpuinfo)"
-	notice "Got $JOBCOUNT processors to use"
 fi
 
 # -h help text to print
@@ -376,14 +375,19 @@ function collectmeta() {
 		# Convert inputs to accepted format
 		if [[ $FNDSAMPLERATE == "44.1" ]]; then
 			FNLSAMPLERATE="44100"
-			notice "Audio samplerate set to ${FNDSAMPLERATE}khz"
+		elif [[ $FNDSAMPLERATE == "32.0" ]]; then
+			FNLSAMPLERATE="32000"
 		elif [[ $FNDSAMPLERATE == "22.05" ]]; then
 			FNLSAMPLERATE="22050"
-			notice "Audio samplerate set to ${FNDSAMPLERATE}khz"
+		elif [[ $FNDSAMPLERATE == "16.0" ]]; then
+			FNLSAMPLERATE="16000"
+		elif [[ $FNDSAMPLERATE == "12.0" ]]; then
+			FNLSAMPLERATE="12000"
 		else
 			error "Non-standard Samplerate: ${FNDSAMPLERATE}"
 		fi
 
+		notice "Audio samplerate set to ${FNDSAMPLERATE}khz"
 		# Final variable for array
 		samplerate="--audio-samplerate=${FNLSAMPLERATE}"
 
@@ -572,6 +576,7 @@ elif [[ -n $($M4BPATH -h) ]]; then
 		exit 1
 	fi
 fi
+notice "Got $JOBCOUNT processors to use"
 #### End checks ####
 
 # Gather metadata from user (Audible/manual input prompt)
