@@ -204,7 +204,6 @@ COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /usr/bin
 RUN printf '#!/bin/bash \n /app/m4b-merge.sh "$@"' > /usr/bin/m4b-merge && \
     chmod +x /usr/bin/m4b-merge
 
-
 USER 99:100
 
 WORKDIR /app
