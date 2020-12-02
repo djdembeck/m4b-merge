@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to use m4b-tool to merge audiobooks, easily.
-## REQUIRES: mutagen, pv, https://github.com/sandreas/m4b-tool
-VER=1.4.2
+## REQUIRES: bash, curl, GNU grep, GNU date, GNU iconv, mediainfo, pv, https://github.com/sandreas/m4b-tool
+VER=1.5.0
 
 ### USER EDITABLE VARIABLES ###
 
@@ -9,8 +9,20 @@ VER=1.4.2
 OUTPUT=""
 
 # Desired bitrate, e.g. 64k, 128k, ... [default: ""]
-# Default is no conversion (keep source bitrate)
-GLOBALBITRATE=""
+# Default will scan and keep source bitrate
+# Script will use this value if no environment variable is detected.
+if [[ -z $GLOBALBITRATE ]]; then
+	# EDIT THIS
+	GLOBALBITRATE=""
+fi
+
+# Desired samplerate, e.g. 22.05 or 44.1
+# Default will scan and keep source samplerate
+# Script will use this value if no environment variable is detected.
+if [[ -z $GLOBALSAMPLERATE ]]; then
+	# EDIT THIS
+	GLOBALSAMPLERATE=""
+fi
 
 # Command for m4b-tool, can be full path or just alias/command.
 M4BPATH=""
@@ -41,13 +53,6 @@ if [[ -z $M4BPATH ]]; then
 	M4BPATH="$(which m4b-tool)"
 fi
 
-# Get bitrate data/command
-if [[ -z $GLOBALBITRATE ]]; then
-	bitrate="--no-conversion"
-else
-	bitrate="--audio-bitrate='$GLOBALBITRATE'"
-fi
-
 # If no path is set for cookies, set default
 if [[ -z $AUDCOOKIES ]]; then
 	AUDCOOKIES="/tmp/aud-cookies.txt"
@@ -59,18 +64,20 @@ if [[ -z $JOBCOUNT ]]; then
 fi
 
 # -h help text to print
-usage="	$(basename "$0") $VER [-b] [-f] [-h] [-m] [-v] [-y]
+usage="	$(basename "$0") $VER [-b] [-f] [-h] [-m] [-r] [-s] [-v] [-y]
 
 	'-b' Batch mode. File input is used for 1 folder only.
 	'-f' File or folder to run from. Enter multiple files if you need, as: -f file1 -f file2 -f file3
 	'-h' This help text.
 	'-m' Use manual metadata mode instead of Audible metadata fetching.
+	'-r' Bitrate (64k, 128k, etc).
+	'-s' Samplerate (22.05 or 44.1).
 	'-v' Verbose mode.
 	'-y' Answer 'yes' to all prompts.
 	"
 
 # Flags for this script
-	while getopts ":bf:hmvy" option; do
+	while getopts ":bf:hmr:s:vy" option; do
  case "${option}" in
 	b) BATCHMODE=true
 		;;
@@ -80,6 +87,10 @@ usage="	$(basename "$0") $VER [-b] [-f] [-h] [-m] [-v] [-y]
  		exit
 		;;
 	m) AUDIBLEMETA=false
+		;;
+	r) LOCALBITRATE="$OPTARG"
+		;;
+	s) LOCALSAMPLERATE="$OPTARG"
 		;;
 	v) VERBOSE=true
 		;;
@@ -100,21 +111,9 @@ function preprocess() {
 	# Let's first check that the input folder, actually should be merged.
 	# Import metadata into an array, so we can use it.
 	importmetadata
-	# Common extensions for audiobooks.
-	# Check input for each of the above file types, ensuring we are not dealing with a pre-merged input.
-	EXT1="m4a"
-	EXT2="mp3"
-	EXT3="m4b"
-	EXT4="flac"
-	EXTARRAY=($EXT1 $EXT2 $EXT3 $EXT4)
-	for EXTENSION in ${EXTARRAY[@]}; do
-		if [[ $(grep -i -r --include \*.$EXTENSION '*' "$SELDIR" | wc -l) -ge 1 ]]; then
-			EXT="$EXTENSION"
-		fi
-	done
 
 	# Check whether directory has multiple audio files or not
-	if [[ -d $SELDIR && $(find "$SELDIR" -name "*.$EXT" | wc -l) -gt 1 ]]; then
+	if [[ -d $SELDIR && $(find "$SELDIR" -name "*.$EXT" | wc -l) -gt 1 ]] || [[ -f $SELDIR && $EXT == "mp3" ]]; then
 		# After we verify the input needs to be merged, lets run the merge command.
 		pipe "$M4BPATH" merge \
 		--output-file="$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b \
@@ -148,9 +147,6 @@ function preprocess() {
 		"${M4BSEL[@]//$'\n'/}" \
 		"$SELDIR"
 		cp "$SELDIR" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
-	elif [[ -f $SELDIR && $EXT == "mp3" ]]; then
-		sfile="true"
-		singlefile
 	elif [[ -z $EXT ]]; then
 		error "No recognized filetypes found for $namevar."
 		warn "Skipping..."
@@ -270,30 +266,6 @@ function audibleparser() {
 	unset m4bvar1 m4bvar2 m4bvar3 m4bvar4
 }
 
-function tageditor() {
-	if [[ $VERBOSE == "true" ]]; then
-		OPT="--verbose"
-	fi
-	notice "Editing file metadata tags..."
-	mid3v2 --track="1/1" --song="$namevar" --album="$albumvar" --TPE2="$albumartistvar" --artist="$artistvar" --date="$BKDATE" $OPT "$(dirname "$SELDIR")"/"$BASESELDIR"
-}
-
-function singlefile() {
-	if [[ $VERBOSE == "true" ]]; then
-		OPT="--verbose"
-	fi
-	if [[ $sfile == "true" && -n $EXT ]]; then
-		if [[ -f $SELDIR ]]; then
-			EXT="${SELDIR: -4}"
-			tageditor
-			mv "$(dirname "$SELDIR")"/"$BASESELDIR" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar""$EXT" $OPT
-		elif [[ -d $SELDIR ]]; then
-			mv "$(dirname "$SELDIR")"/"$BASESELDIR"/*.$EXT "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar"."$EXT" $OPT
-		fi
-	fi
-	color_highlight "Processed single input file for $namevar."
-}
-
 function makearray() {
 	# Put all values into an array
 	M4BARR=(
@@ -310,6 +282,7 @@ function makearray() {
 	"--series-part"
 	"${SERIESNUMBER// /_}"
 	"$bitrate"
+	"$samplerate"
 	"$mbid"
 	)
 
@@ -326,6 +299,51 @@ function collectmeta() {
 		# Basename of array values
 		BASESELDIR="$(basename "$SELDIR")"
 		M4BSELFILE="/tmp/.m4bmerge.$BASESELDIR.txt"
+
+		# Common extensions for audiobooks.
+		# Check input for each of the above file types, ensuring we are not dealing with a pre-merged input.
+		EXT1="m4a"
+		EXT2="mp3"
+		EXT3="m4b"
+		EXT4="flac"
+		EXTARRAY=($EXT1 $EXT2 $EXT3 $EXT4)
+		for EXTENSION in ${EXTARRAY[@]}; do
+			if [[ $(grep -i -r --include \*.$EXTENSION '*' "$SELDIR" | wc -l) -ge 1 ]]; then
+				EXT="$EXTENSION"
+			fi
+		done
+
+		# Get bitrate data/command
+		# Prefer order: Bitrate from flag -r->Global Bitrate-> None specified
+		if [[ -n $LOCALBITRATE ]]; then
+			bitrate="--audio-bitrate=$LOCALBITRATE"
+		elif [[ -n $GLOBALBITRATE ]]; then
+			bitrate="--audio-bitrate=$GLOBALBITRATE"
+		elif [[ -z $GLOBALBITRATE ]]; then
+			FNDFIRST="$(find "$SELDIR" -name "*.$EXT" | sort | head -1)"
+			FNDBITRATE="$(mediainfo "$FNDFIRST" | grep 'Overall bit rate                         : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1 | cut -d '.' -f 1)"
+			bitrate="--audio-bitrate=${FNDBITRATE}k"
+		fi
+
+		# Get origin samplerate to match
+		# Prefer order: Bitrate from flag -r->Global Bitrate-> None specified
+		if [[ -n $LOCALSAMPLERATE ]]; then
+			FNDSAMPLERATE="$LOCALSAMPLERATE"
+		elif [[ -n $GLOBALSAMPLERATE ]]; then
+			FNDSAMPLERATE="$GLOBALSAMPLERATE"
+		elif [[ -z $GLOBALSAMPLERATE ]]; then
+			FNDSAMPLERATE="$(mediainfo "$FNDFIRST" | grep 'Sampling rate                            : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1)"
+		fi
+
+		# Convert inputs to accepted format
+		if [[ $FNDSAMPLERATE == "44.1" ]]; then
+			FNLSAMPLERATE="44100"
+		elif [[ $FNDSAMPLERATE == "22.05" ]]; then
+			FNLSAMPLERATE="22050"
+		fi
+
+		# Final variable for array
+		samplerate="--audio-samplerate=${FNLSAMPLERATE}"
 
 		if [[ $AUDIBLEMETA != "false" ]]; then
 			audibleparser
@@ -455,12 +473,7 @@ function pipe() {
 	if [[ $VERBOSE == "true" ]]; then
 		"$@"
 	else
-		SCRIPTDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-		if [[ ! -f "$SCRIPTDIR"/.pv.lock ]]; then
-			"$@"
-		else
-			"$@" 2> /dev/null | pv -l -p -t -N "Processing" > /dev/null
-		fi
+		"$@" 2> /dev/null | pv -l -p -t -N "Processing" > /dev/null
 	fi
 }
 
@@ -476,34 +489,34 @@ function silenterror() {
 notice "NOTICE: Verbose mode is ON"
 
 #### Checks ####
-# Small one time check for 'pv'
-SCRIPTDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-if [[ ! -f "$SCRIPTDIR"/.pv.lock ]]; then
-	if [[ -z $(which pv) ]]; then
-		error "The program for progress bar is missing."
-		read -e -p 'Install it now? y/n: ' pvvar
-		if [[ $pvvar == "y" ]]; then
-			color_action "Installing pv..."
-			sudo apt-get -y install pv
-			if [ $? -eq 0 ]; then
-				color_highlight "Done installing."
-				touch "$SCRIPTDIR"/.pv.lock
-			else
-				error "Something went wrong during pv install."
-			fi
-		fi
-	else
-		notice "pv installation detected, making lock file"
-		touch "$SCRIPTDIR"/.pv.lock
-	fi
-fi
-
 # Make sure user gave usable INPUT
 if [[ -z "${FILEIN[@]}" ]]; then
 	error "No file inputs given."
 	echo "$usage"
 	exit 1
 fi
+
+## Check dependencies
+if [[ -z $(which bash) ]]; then
+	error "Bash is not installed"
+	exit 1
+fi
+
+if [[ -z $(which curl) ]]; then
+	error "Curl is not installed"
+	exit 1
+fi
+
+if [[ -z $(which mediainfo) ]]; then
+	error "Mediainfo is not installed"
+	exit 1
+fi
+
+if [[ -z $(which pv) ]]; then
+	error "PV is not installed"
+	exit 1
+fi
+## End dependencies check
 
 # verify m4b command works properly
 if [[ -z $M4BPATH ]]; then
