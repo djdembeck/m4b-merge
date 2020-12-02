@@ -61,6 +61,7 @@ fi
 # If no manual override for jobs, use number of available CPU threads
 if [[ -z $JOBCOUNT ]]; then
 	JOBCOUNT="$(grep -c ^processor /proc/cpuinfo)"
+	notice "Got $JOBCOUNT processors to use"
 fi
 
 # -h help text to print
@@ -128,28 +129,36 @@ function preprocess() {
 		SELDIR="$(find "$SELDIR" -name "*.$EXT")"
 		# After we verify the type of input is a single m4b in a folder
 		# Create chapter file
+		notice "Exporting chapterfile"
 		"$M4BPATH" meta \
 		--export-chapters="" \
 		"$SELDIR"
 		# run meta change commands only, then copy
+		notice "Making backup file"
         cp "$SELDIR" "${SELDIR::-4}.new.m4b"
 		"$M4BPATH" meta \
 		"${M4BSEL[@]//$'\n'/}" \
 		"${SELDIR::-4}.new.m4b"
+		notice "Moving chapter file"
 		mv "${SELDIR::-4}".chapters.txt "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".chapters.txt
+		notice "Moving modified file to final output"
 		mv "${SELDIR::-4}.new.m4b" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
 	elif [[ -f $SELDIR && $EXT == "m4b" ]]; then
 		# After we verify the type of input is a single m4b
 		# Create chapter file
+		notice "Exporting chapterfile"
 		"$M4BPATH" meta \
 		--export-chapters="" \
 		"$SELDIR"
+		notice "Moving chapter file"
 		mv "${SELDIR::-4}".chapters.txt "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".chapters.txt
 		# run meta change commands only, then copy
+		notice "Making backup file"
         cp "$SELDIR" "${SELDIR::-4}.new.m4b"
 		"$M4BPATH" meta \
 		"${M4BSEL[@]//$'\n'/}" \
 		"${SELDIR::-4}.new.m4b"
+		notice "Moving modified file to final output"
 		mv "${SELDIR::-4}.new.m4b" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
 	elif [[ -z $EXT ]]; then
 		error "No recognized filetypes found for $namevar."
@@ -234,8 +243,7 @@ function audibleparser() {
 		notice "Subtitle appears to be the same or similar to series name. Excluding the subtitle."
 		SUBTITLE=""
 	fi
-	BKDATE1="$(grep "releaseDateLabel" -A 3 "$AUDMETAFILE" | tail -n1 | sed -e 's/^[[:space:]]*//' | tr '-' '/' | iconv -f UTF-8 -t ascii//TRANSLIT)"
-	BKDATE="$(date -d "$BKDATE1" +%Y-%m-%d)"
+
 	# Extract plain number from Book number
 	SERIESNUMBER="$(echo "$BOOKNUM" | sed 's|[^0-9]||g')"
 
@@ -284,8 +292,9 @@ function makearray() {
 	"$mbid"
 	)
 
-    # Check that seris value exists and add to array
+    # Check that series value exists and add to array
     if [[ -n $SERIESCMD ]]; then
+		notice "Series being set"
         M4BARR+=(
         "--series"
         "${SERIESCMD// /_}"
@@ -293,6 +302,7 @@ function makearray() {
     fi
 
     if [[ -n $SERIESNUMBER ]]; then
+		notice "Series part being set"
         M4BARR+=(
         "--series-part"
         "${SERIESNUMBER// /_}"
@@ -305,6 +315,7 @@ function makearray() {
 
 function makearray2() {
     # Put all values into an array
+	notice "Adding bitrate/samplerate commands"
     M4BARR2=(
     "$bitrate"
     "$samplerate"
@@ -341,12 +352,15 @@ function collectmeta() {
 		# Prefer order: Bitrate from flag -r->Global Bitrate-> None specified
 		if [[ -n $LOCALBITRATE ]]; then
 			bitrate="--audio-bitrate=$LOCALBITRATE"
+			notice "Using flag-defined bitrate of $LOCALBITRATE"
 		elif [[ -n $GLOBALBITRATE ]]; then
 			bitrate="--audio-bitrate=$GLOBALBITRATE"
+			notice "Using global bitrate of $GLOBALBITRATE"
 		elif [[ -z $GLOBALBITRATE ]]; then
 			FNDFIRST="$(find "$SELDIR" -name "*.$EXT" | sort | head -1)"
 			FNDBITRATE="$(mediainfo "$FNDFIRST" | grep 'Overall bit rate                         : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1 | cut -d '.' -f 1)"
 			bitrate="--audio-bitrate=${FNDBITRATE}k"
+			notice "Audio bitrate set to ${FNDBITRATE}k"
 		fi
 
 		# Get origin samplerate to match
@@ -362,8 +376,12 @@ function collectmeta() {
 		# Convert inputs to accepted format
 		if [[ $FNDSAMPLERATE == "44.1" ]]; then
 			FNLSAMPLERATE="44100"
+			notice "Audio samplerate set to ${FNDSAMPLERATE}khz"
 		elif [[ $FNDSAMPLERATE == "22.05" ]]; then
 			FNLSAMPLERATE="22050"
+			notice "Audio samplerate set to ${FNDSAMPLERATE}khz"
+		else
+			error "Non-standard Samplerate: ${FNDSAMPLERATE}"
 		fi
 
 		# Final variable for array
@@ -509,7 +527,7 @@ function silenterror() {
 }
 #### End functions ####
 
-notice "NOTICE: Verbose mode is ON"
+notice "Verbose mode is ON"
 
 #### Checks ####
 # Make sure user gave usable INPUT
@@ -520,6 +538,8 @@ if [[ -z "${FILEIN[@]}" ]]; then
 fi
 
 ## Check dependencies
+notice "Begin dependencies check"
+
 if [[ -z $(which bash) ]]; then
 	error "Bash is not installed"
 	exit 1
@@ -539,6 +559,7 @@ if [[ -z $(which pv) ]]; then
 	error "PV is not installed"
 	exit 1
 fi
+notice "End dependencies check"
 ## End dependencies check
 
 # verify m4b command works properly
