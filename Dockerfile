@@ -1,3 +1,4 @@
+# Must be 3.10 as compile fails on 3.11+
 FROM alpine:3.10 AS ffbase
 
 RUN buildDeps="autoconf \
@@ -165,46 +166,103 @@ RUN \
         make && \
         make install
 
-FROM ffbuild AS ffmpeg
+FROM alpine:3.12 AS base
 
-COPY --from=ffbuild /opt/ffmpeg/bin/ffmpeg /app/
-COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /app/
+RUN buildDeps="autoconf \
+  automake \
+  boost-dev \
+  build-base \
+  libtool \
+  tar \
+  unzip \
+  wget" && \
+  apk add --no-cache ${buildDeps}
 
-FROM ubuntu:latest
+FROM base AS build
 
-ARG M4B_TOOL_DOWNLOAD_LINK="https://github.com/sandreas/m4b-tool/releases/latest/download/m4b-tool.phar"
+WORKDIR /tmp/workdir
 
-RUN apt-get update && \
-  apt-get install -y \
-  fdkaac \
-  python3-mutagen \
-  php-cli \
-  php-common \
-  php-mbstring \
+# Compile Sandreas mp4v2
+RUN \
+  wget https://github.com/sandreas/mp4v2/archive/master.zip && \
+  unzip master.zip && \
+  cd mp4v2-master && \
+  ./configure && \
+  make -j4 && \
+  make install && make distclean
+
+ARG FDK_AAC_VERSION=2.0.1
+ARG FDK_AAC_URL="https://github.com/mstorsjo/fdk-aac/archive/v$FDK_AAC_VERSION.tar.gz"
+
+# Compile fdkaac
+RUN \
+  wget -O fdk-aac.tar.gz "$FDK_AAC_URL" && \
+  tar xfz fdk-aac.tar.gz && \
+  cd fdk-aac-* && ./autogen.sh && ./configure --enable-static --disable-shared && \
+  make -j$(nproc) install && \
+  cd /tmp/workdir && \
+  wget https://github.com/nu774/fdkaac/archive/1.0.0.tar.gz && \
+  tar xzf 1.0.0.tar.gz && \
+  cd fdkaac-1.0.0 && \
+  autoreconf -i && ./configure --enable-static --disable-shared && \
+  make -j4 && make install
+
+FROM alpine:3.12
+
+WORKDIR /tmp/workdir
+
+RUN apk add --no-cache --update \
+  bash \
+  curl \
+  grep \
+  libstdc++ \
+  mutagen \
+  php7-cli \
+  php7-dom \
+  php7-json \
+  php7-xml \
+  php7-mbstring \
+  php7-phar \
+  php7-tokenizer \
+  php7-xmlwriter \
+  php7-openssl \
   pv \
+  tar \
   wget && \
-  rm -rf /var/lib/apt/lists/*
+  echo "date.timezone = UTC" >> /etc/php7/php.ini
 
-RUN wget "$M4B_TOOL_DOWNLOAD_LINK" -O /usr/local/bin/m4b-tool && chmod +x /usr/local/bin/m4b-tool
+RUN apk add --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/edge/community/ --allow-untrusted gnu-libiconv
 
-RUN wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
-    wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
-    dpkg -i libmp4v2-2_2.0.0~dfsg0-6_amd64.deb && \
-    dpkg -i mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
-    rm *.deb
+ENV LD_PRELOAD /usr/lib/preloadable_libiconv.so php
 
-RUN apt-get remove -y wget
+RUN \
+  M4B_TOOL_PRE_RELEASE_LINK="$(wget -q -O - https://github.com/sandreas/m4b-tool/releases/tag/latest | grep M4B_TOOL_DOWNLOAD_LINK | cut -d '=' -f 2 | cut -d ' ' -f 1)" && \
+  wget "$M4B_TOOL_PRE_RELEASE_LINK" -O /tmp/m4b-tool.tar.gz && \
+  tar -xf /tmp/m4b-tool.tar.gz -C /tmp && \
+  rm /tmp/m4b-tool.tar.gz && \
+  mv /tmp/m4b-tool.phar /usr/local/bin/m4b-tool && \
+  chmod +x /usr/local/bin/m4b-tool
 
-COPY ./m4b-merge.sh /app/m4b-merge.sh
+RUN apk del \
+  tar \
+  wget
+  
+RUN addgroup -S 100 && \
+  adduser --home /app --shell /bin/bash --uid 99 -S -G 100 abc
 
-COPY --from=ffmpeg /app/ffmpeg /usr/bin
-COPY --from=ffmpeg /app/ffprobe /usr/bin
+COPY --chown=99:100 ./m4b-merge.sh /app/m4b-merge.sh
+
+COPY --from=ffbuild /opt/ffmpeg/bin/ffmpeg /usr/local/bin
+COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /usr/local/bin
+
+COPY --from=build /usr/local/bin/mp4* /usr/local/bin/fdkaac /usr/local/bin/
+COPY --from=build /usr/local/lib/libmp4v2* /usr/local/lib/
 
 RUN printf '#!/bin/bash \n /app/m4b-merge.sh "$@"' > /usr/bin/m4b-merge && \
     chmod +x /usr/bin/m4b-merge
 
-RUN useradd -r -u 99 -g 100 99
-
 USER 99:100
+
+WORKDIR /app
 
 CMD tail -f /dev/null
