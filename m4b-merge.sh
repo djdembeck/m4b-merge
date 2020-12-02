@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to use m4b-tool to merge audiobooks, easily.
 ## REQUIRES: bash, curl, GNU grep, GNU date, GNU iconv, mediainfo, pv, https://github.com/sandreas/m4b-tool
-VER=1.5.0
+VER=1.5.1
 
 ### USER EDITABLE VARIABLES ###
 
@@ -114,7 +114,9 @@ function preprocess() {
 
 	# Check whether directory has multiple audio files or not
 	if [[ -d $SELDIR && $(find "$SELDIR" -name "*.$EXT" | wc -l) -gt 1 ]] || [[ -f $SELDIR && $EXT == "mp3" ]]; then
-		# After we verify the input needs to be merged, lets run the merge command.
+        # Add bitrate/samplerate commands to command pool, since we are merging
+        makearray2
+        # After we verify the input needs to be merged, lets run the merge command.
 		pipe "$M4BPATH" merge \
 		--output-file="$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b \
 		"${M4BSEL[@]//$'\n'/}" \
@@ -130,11 +132,12 @@ function preprocess() {
 		--export-chapters="" \
 		"$SELDIR"
 		# run meta change commands only, then copy
+        cp "$SELDIR" "${SELDIR::-4}.new.m4b"
 		"$M4BPATH" meta \
 		"${M4BSEL[@]//$'\n'/}" \
-		"$SELDIR"
+		"${SELDIR::-4}.new.m4b"
 		mv "${SELDIR::-4}".chapters.txt "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".chapters.txt
-		cp "$SELDIR" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
+		mv "${SELDIR::-4}.new.m4b" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
 	elif [[ -f $SELDIR && $EXT == "m4b" ]]; then
 		# After we verify the type of input is a single m4b
 		# Create chapter file
@@ -143,10 +146,11 @@ function preprocess() {
 		"$SELDIR"
 		mv "${SELDIR::-4}".chapters.txt "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".chapters.txt
 		# run meta change commands only, then copy
+        cp "$SELDIR" "${SELDIR::-4}.new.m4b"
 		"$M4BPATH" meta \
 		"${M4BSEL[@]//$'\n'/}" \
-		"$SELDIR"
-		cp "$SELDIR" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
+		"${SELDIR::-4}.new.m4b"
+		mv "${SELDIR::-4}.new.m4b" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
 	elif [[ -z $EXT ]]; then
 		error "No recognized filetypes found for $namevar."
 		warn "Skipping..."
@@ -277,17 +281,37 @@ function makearray() {
 	"${m4bvar3// /_}"
 	"--albumartist"
 	"${m4bvar4// /_}"
-	"--series"
-	"${SERIESCMD// /_}"
-	"--series-part"
-	"${SERIESNUMBER// /_}"
-	"$bitrate"
-	"$samplerate"
 	"$mbid"
 	)
 
+    # Check that seris value exists and add to array
+    if [[ -n $SERIESCMD ]]; then
+        M4BARR+=(
+        "--series"
+        "${SERIESCMD// /_}"
+        )
+    fi
+
+    if [[ -n $SERIESNUMBER ]]; then
+        M4BARR+=(
+        "--series-part"
+        "${SERIESNUMBER// /_}"
+        )
+    fi
+
 	# Make array into file
-	echo "${M4BARR[*]}" > "$M4BSELFILE"
+	echo -n "${M4BARR[*]}" > "$M4BSELFILE"
+}
+
+function makearray2() {
+    # Put all values into an array
+    M4BARR2=(
+    "$bitrate"
+    "$samplerate"
+    )
+
+    # Append array into file
+    echo "${M4BARR2[*]}" >> "$M4BSELFILE"
 }
 
 function collectmeta() {
@@ -425,7 +449,6 @@ function batchprocess() {
 
 			# Process input, and determine if we need to run merge, or just cleanup the metadata a bit.
 			preprocess
-			unset sfile
 			((COUNTER++))
 
 			# Check if m4b-tool made leftover files
