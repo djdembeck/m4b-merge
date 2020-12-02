@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to use m4b-tool to merge audiobooks, easily.
-## REQUIRES: mutagen, pv, https://github.com/sandreas/m4b-tool
-VER=1.4.2
+## REQUIRES: bash, curl, GNU grep, GNU date, GNU iconv, mediainfo, pv, https://github.com/sandreas/m4b-tool
+VER=1.5.1
 
 ### USER EDITABLE VARIABLES ###
 
@@ -9,8 +9,20 @@ VER=1.4.2
 OUTPUT=""
 
 # Desired bitrate, e.g. 64k, 128k, ... [default: ""]
-# Default is no conversion (keep source bitrate)
-GLOBALBITRATE=""
+# Default will scan and keep source bitrate
+# Script will use this value if no environment variable is detected.
+if [[ -z $GLOBALBITRATE ]]; then
+	# EDIT THIS
+	GLOBALBITRATE=""
+fi
+
+# Desired samplerate, e.g. 22.05 or 44.1
+# Default will scan and keep source samplerate
+# Script will use this value if no environment variable is detected.
+if [[ -z $GLOBALSAMPLERATE ]]; then
+	# EDIT THIS
+	GLOBALSAMPLERATE=""
+fi
 
 # Command for m4b-tool, can be full path or just alias/command.
 M4BPATH=""
@@ -41,13 +53,6 @@ if [[ -z $M4BPATH ]]; then
 	M4BPATH="$(which m4b-tool)"
 fi
 
-# Get bitrate data/command
-if [[ -z $GLOBALBITRATE ]]; then
-	bitrate="--no-conversion"
-else
-	bitrate="--audio-bitrate='$GLOBALBITRATE'"
-fi
-
 # If no path is set for cookies, set default
 if [[ -z $AUDCOOKIES ]]; then
 	AUDCOOKIES="/tmp/aud-cookies.txt"
@@ -56,21 +61,24 @@ fi
 # If no manual override for jobs, use number of available CPU threads
 if [[ -z $JOBCOUNT ]]; then
 	JOBCOUNT="$(grep -c ^processor /proc/cpuinfo)"
+	notice "Got $JOBCOUNT processors to use"
 fi
 
 # -h help text to print
-usage="	$(basename "$0") $VER [-b] [-f] [-h] [-m] [-v] [-y]
+usage="	$(basename "$0") $VER [-b] [-f] [-h] [-m] [-r] [-s] [-v] [-y]
 
 	'-b' Batch mode. File input is used for 1 folder only.
 	'-f' File or folder to run from. Enter multiple files if you need, as: -f file1 -f file2 -f file3
 	'-h' This help text.
 	'-m' Use manual metadata mode instead of Audible metadata fetching.
+	'-r' Bitrate (64k, 128k, etc).
+	'-s' Samplerate (22.05 or 44.1).
 	'-v' Verbose mode.
 	'-y' Answer 'yes' to all prompts.
 	"
 
 # Flags for this script
-	while getopts ":bf:hmvy" option; do
+	while getopts ":bf:hmr:s:vy" option; do
  case "${option}" in
 	b) BATCHMODE=true
 		;;
@@ -80,6 +88,10 @@ usage="	$(basename "$0") $VER [-b] [-f] [-h] [-m] [-v] [-y]
  		exit
 		;;
 	m) AUDIBLEMETA=false
+		;;
+	r) LOCALBITRATE="$OPTARG"
+		;;
+	s) LOCALSAMPLERATE="$OPTARG"
 		;;
 	v) VERBOSE=true
 		;;
@@ -100,22 +112,12 @@ function preprocess() {
 	# Let's first check that the input folder, actually should be merged.
 	# Import metadata into an array, so we can use it.
 	importmetadata
-	# Common extensions for audiobooks.
-	# Check input for each of the above file types, ensuring we are not dealing with a pre-merged input.
-	EXT1="m4a"
-	EXT2="mp3"
-	EXT3="m4b"
-	EXT4="flac"
-	EXTARRAY=($EXT1 $EXT2 $EXT3 $EXT4)
-	for EXTENSION in ${EXTARRAY[@]}; do
-		if [[ $(grep -i -r --include \*.$EXTENSION '*' "$SELDIR" | wc -l) -ge 1 ]]; then
-			EXT="$EXTENSION"
-		fi
-	done
 
 	# Check whether directory has multiple audio files or not
-	if [[ -d $SELDIR && $(find "$SELDIR" -name "*.$EXT" | wc -l) -gt 1 ]]; then
-		# After we verify the input needs to be merged, lets run the merge command.
+	if [[ -d $SELDIR && $(find "$SELDIR" -name "*.$EXT" | wc -l) -gt 1 ]] || [[ -f $SELDIR && $EXT == "mp3" ]]; then
+        # Add bitrate/samplerate commands to command pool, since we are merging
+        makearray2
+        # After we verify the input needs to be merged, lets run the merge command.
 		pipe "$M4BPATH" merge \
 		--output-file="$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b \
 		"${M4BSEL[@]//$'\n'/}" \
@@ -127,30 +129,37 @@ function preprocess() {
 		SELDIR="$(find "$SELDIR" -name "*.$EXT")"
 		# After we verify the type of input is a single m4b in a folder
 		# Create chapter file
+		notice "Exporting chapterfile"
 		"$M4BPATH" meta \
 		--export-chapters="" \
 		"$SELDIR"
 		# run meta change commands only, then copy
+		notice "Making backup file"
+        cp "$SELDIR" "${SELDIR::-4}.new.m4b"
 		"$M4BPATH" meta \
 		"${M4BSEL[@]//$'\n'/}" \
-		"$SELDIR"
+		"${SELDIR::-4}.new.m4b"
+		notice "Moving chapter file"
 		mv "${SELDIR::-4}".chapters.txt "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".chapters.txt
-		cp "$SELDIR" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
+		notice "Moving modified file to final output"
+		mv "${SELDIR::-4}.new.m4b" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
 	elif [[ -f $SELDIR && $EXT == "m4b" ]]; then
 		# After we verify the type of input is a single m4b
 		# Create chapter file
+		notice "Exporting chapterfile"
 		"$M4BPATH" meta \
 		--export-chapters="" \
 		"$SELDIR"
+		notice "Moving chapter file"
 		mv "${SELDIR::-4}".chapters.txt "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".chapters.txt
 		# run meta change commands only, then copy
+		notice "Making backup file"
+        cp "$SELDIR" "${SELDIR::-4}.new.m4b"
 		"$M4BPATH" meta \
 		"${M4BSEL[@]//$'\n'/}" \
-		"$SELDIR"
-		cp "$SELDIR" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
-	elif [[ -f $SELDIR && $EXT == "mp3" ]]; then
-		sfile="true"
-		singlefile
+		"${SELDIR::-4}.new.m4b"
+		notice "Moving modified file to final output"
+		mv "${SELDIR::-4}.new.m4b" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
 	elif [[ -z $EXT ]]; then
 		error "No recognized filetypes found for $namevar."
 		warn "Skipping..."
@@ -201,41 +210,40 @@ function audibleparser() {
 	unset useoldmeta
 
 	# Check for multiple narrators
-	NARRCMD="$(grep "searchNarrator=" "$AUDMETAFILE" | grep c1_narrator | grep -o -P '(?<=>).*(?=<)' | sort -u | iconv -f utf8 -t ascii//TRANSLIT)"
+	NARRCMD="$(grep "searchNarrator=" "$AUDMETAFILE" | grep c1_narrator | grep -o -P '(?<=>).*(?=<)' | sort -u | iconv -f UTF-8 -t ascii//TRANSLIT)"
 	if [[ $(echo "$NARRCMD" | wc -l) -gt 1 ]]; then
 		notice "Correcting formatting for multiple narrators..."
 		NUM="$(echo "$NARRCMD" | wc -l)"
-		NARRCMD="$(cat "$AUDMETAFILE" | grep "searchNarrator=" | grep c1_narrator | grep -o -P '(?<=>).*(?=<)' | sort -u | sed -e "2,${NUM}{s#^#, #}" | tr -d '\n' | iconv -f utf8 -t ascii//TRANSLIT)"
+		NARRCMD="$(cat "$AUDMETAFILE" | grep "searchNarrator=" | grep c1_narrator | grep -o -P '(?<=>).*(?=<)' | sort -u | sed -e "2,${NUM}{s#^#, #}" | tr -d '\n' | iconv -f UTF-8 -t ascii//TRANSLIT)"
 	fi
-	AUTHORCMD="$(grep "/author/" "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=<)' | head -n1 | iconv -f utf8 -t ascii//TRANSLIT)"
+	AUTHORCMD="$(grep "/author/" "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=<)' | head -n1 | iconv -f UTF-8 -t ascii//TRANSLIT)"
 	# Prefer being strict about authors, unless we can't find them.
 	if [[ -z $AUTHORCMD ]]; then
 		notice "Could not find author using default method. Trying backup method..."
-		AUTHORCMD="$(cat "$AUDMETAFILE" | grep "author" | grep -o -P '(?<=>).*(?=<)' | head -n1 | iconv -f utf8 -t ascii//TRANSLIT)"
+		AUTHORCMD="$(cat "$AUDMETAFILE" | grep "author" | grep -o -P '(?<=>).*(?=<)' | head -n1 | iconv -f UTF-8 -t ascii//TRANSLIT)"
 	fi
-	TICTLECMD="$(grep "title"  "$AUDMETAFILE" | grep "content=" -m 1 | head -n1 | grep -o -P '(?<=content=").*(?=")' | sed -e 's/[[:space:]]*$//' | iconv -f utf8 -t ascii//TRANSLIT)"
-	SERIESCMD="$(grep "/series" "$AUDMETAFILE" -m 1 | grep -o -P '(?<=>).*(?=<)' | iconv -f utf8 -t ascii//TRANSLIT)"
+	TICTLECMD="$(grep "title"  "$AUDMETAFILE" | grep "content=" -m 1 | head -n1 | grep -o -P '(?<=content=").*(?=")' | sed -e 's/[[:space:]]*$//' | iconv -f UTF-8 -t ascii//TRANSLIT)"
+	SERIESCMD="$(grep "/series" "$AUDMETAFILE" -m 1 | grep -o -P '(?<=>).*(?=<)' | iconv -f UTF-8 -t ascii//TRANSLIT)"
 	if [[ $(echo "$SERIESCMD" | grep "chronological" | wc -l) -ge 1 ]]; then
 		notice "Detected 2 book orders. Using Chronological order."
-		SERIESCMD="$(grep "chronological" -m 1 "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=,)' | sed -e 's#</a>##' | iconv -f utf8 -t ascii//TRANSLIT)"
+		SERIESCMD="$(grep "chronological" -m 1 "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=,)' | sed -e 's#</a>##' | iconv -f UTF-8 -t ascii//TRANSLIT)"
 		if [[ $(echo "$SERIESCMD" | grep "Book" | wc -l) -lt 1 ]]; then
 			notice "Detected possible issue with Book number missing. Being less strict to retrieve it."
-			SERIESCMD="$(grep "chronological" -m 1 "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=)' | sed -e 's#</a>##' | iconv -f utf8 -t ascii//TRANSLIT)"
+			SERIESCMD="$(grep "chronological" -m 1 "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=)' | sed -e 's#</a>##' | iconv -f UTF-8 -t ascii//TRANSLIT)"
 		fi
 	fi
-	BOOKNUM="$(grep "/series" -A 1 -m 1 "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=)' | cut -d ',' -f 2 | sed -e 's/^[[:space:]]*//' | iconv -f utf8 -t ascii//TRANSLIT)"
+	BOOKNUM="$(grep "/series" -A 1 -m 1 "$AUDMETAFILE" | grep -o -P '(?<=>).*(?=)' | cut -d ',' -f 2 | sed -e 's/^[[:space:]]*//' | iconv -f UTF-8 -t ascii//TRANSLIT)"
 	# Don't include book number, if it doesn't actually say which book it is
 	if [[ $(echo "$BOOKNUM" | grep "Book" | wc -l ) -lt 1 ]] || [[ $(echo "$BOOKNUM" | grep "Book" | wc -l ) -gt 1 ]]; then
 		notice "Detected either no book number, or more than 1 book number."
 		BOOKNUM=""
 	fi
-	SUBTITLE="$(grep "subtitle" -m 1 -A 5 "$AUDMETAFILE" | tail -n1 | sed -e 's/^[[:space:]]*//' | iconv -f utf8 -t ascii//TRANSLIT | tr -dc '[:print:]')"
-	if [[ ! -z "$SERIESCMD" && $(echo "$SUBTITLE" | grep "$(echo "$SERIESCMD" | cut -d ' ' -f 1-2)" | wc -l) -ge 1 ]]; then
+	SUBTITLE="$(grep "subtitle" -m 1 -A 5 "$AUDMETAFILE" | tail -n1 | sed -e 's/^[[:space:]]*//' | iconv -f UTF-8 -t ascii//TRANSLIT | tr -dc '[:print:]')"
+	if [[ -n "$SERIESCMD" && $(echo "$SUBTITLE" | grep "$(echo "$SERIESCMD" | cut -d ' ' -f 1-2)" | wc -l) -ge 1 ]]; then
 		notice "Subtitle appears to be the same or similar to series name. Excluding the subtitle."
 		SUBTITLE=""
 	fi
-	BKDATE1="$(grep "releaseDateLabel" -A 3 "$AUDMETAFILE" | tail -n1 | sed -e 's/^[[:space:]]*//' | tr '-' '/' | iconv -f utf8 -t ascii//TRANSLIT)"
-	BKDATE="$(date -d "$BKDATE1" +%Y-%m-%d)"
+
 	# Extract plain number from Book number
 	SERIESNUMBER="$(echo "$BOOKNUM" | sed 's|[^0-9]||g')"
 
@@ -270,30 +278,6 @@ function audibleparser() {
 	unset m4bvar1 m4bvar2 m4bvar3 m4bvar4
 }
 
-function tageditor() {
-	if [[ $VERBOSE == "true" ]]; then
-		OPT="--verbose"
-	fi
-	notice "Editing file metadata tags..."
-	mid3v2 --track="1/1" --song="$namevar" --album="$albumvar" --TPE2="$albumartistvar" --artist="$artistvar" --date="$BKDATE" $OPT "$(dirname "$SELDIR")"/"$BASESELDIR"
-}
-
-function singlefile() {
-	if [[ $VERBOSE == "true" ]]; then
-		OPT="--verbose"
-	fi
-	if [[ $sfile == "true" && -n $EXT ]]; then
-		if [[ -f $SELDIR ]]; then
-			EXT="${SELDIR: -4}"
-			tageditor
-			mv "$(dirname "$SELDIR")"/"$BASESELDIR" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar""$EXT" $OPT
-		elif [[ -d $SELDIR ]]; then
-			mv "$(dirname "$SELDIR")"/"$BASESELDIR"/*.$EXT "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar"."$EXT" $OPT
-		fi
-	fi
-	color_highlight "Processed single input file for $namevar."
-}
-
 function makearray() {
 	# Put all values into an array
 	M4BARR=(
@@ -305,16 +289,40 @@ function makearray() {
 	"${m4bvar3// /_}"
 	"--albumartist"
 	"${m4bvar4// /_}"
-	"--series"
-	"${SERIESCMD// /_}"
-	"--series-part"
-	"${SERIESNUMBER// /_}"
-	"$bitrate"
 	"$mbid"
 	)
 
+    # Check that series value exists and add to array
+    if [[ -n $SERIESCMD ]]; then
+		notice "Series being set"
+        M4BARR+=(
+        "--series"
+        "${SERIESCMD// /_}"
+        )
+    fi
+
+    if [[ -n $SERIESNUMBER ]]; then
+		notice "Series part being set"
+        M4BARR+=(
+        "--series-part"
+        "${SERIESNUMBER// /_}"
+        )
+    fi
+
 	# Make array into file
-	echo "${M4BARR[*]}" > "$M4BSELFILE"
+	echo -n "${M4BARR[*]}" > "$M4BSELFILE"
+}
+
+function makearray2() {
+    # Put all values into an array
+	notice "Adding bitrate/samplerate commands"
+    M4BARR2=(
+    "$bitrate"
+    "$samplerate"
+    )
+
+    # Append array into file
+    echo "${M4BARR2[*]}" >> "$M4BSELFILE"
 }
 
 function collectmeta() {
@@ -326,6 +334,58 @@ function collectmeta() {
 		# Basename of array values
 		BASESELDIR="$(basename "$SELDIR")"
 		M4BSELFILE="/tmp/.m4bmerge.$BASESELDIR.txt"
+
+		# Common extensions for audiobooks.
+		# Check input for each of the above file types, ensuring we are not dealing with a pre-merged input.
+		EXT1="m4a"
+		EXT2="mp3"
+		EXT3="m4b"
+		EXT4="flac"
+		EXTARRAY=($EXT1 $EXT2 $EXT3 $EXT4)
+		for EXTENSION in ${EXTARRAY[@]}; do
+			if [[ $(grep -i -r --include \*.$EXTENSION '*' "$SELDIR" | wc -l) -ge 1 ]]; then
+				EXT="$EXTENSION"
+			fi
+		done
+
+		# Get bitrate data/command
+		# Prefer order: Bitrate from flag -r->Global Bitrate-> None specified
+		if [[ -n $LOCALBITRATE ]]; then
+			bitrate="--audio-bitrate=$LOCALBITRATE"
+			notice "Using flag-defined bitrate of $LOCALBITRATE"
+		elif [[ -n $GLOBALBITRATE ]]; then
+			bitrate="--audio-bitrate=$GLOBALBITRATE"
+			notice "Using global bitrate of $GLOBALBITRATE"
+		elif [[ -z $GLOBALBITRATE ]]; then
+			FNDFIRST="$(find "$SELDIR" -name "*.$EXT" | sort | head -1)"
+			FNDBITRATE="$(mediainfo "$FNDFIRST" | grep 'Overall bit rate                         : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1 | cut -d '.' -f 1)"
+			bitrate="--audio-bitrate=${FNDBITRATE}k"
+			notice "Audio bitrate set to ${FNDBITRATE}k"
+		fi
+
+		# Get origin samplerate to match
+		# Prefer order: Bitrate from flag -r->Global Bitrate-> None specified
+		if [[ -n $LOCALSAMPLERATE ]]; then
+			FNDSAMPLERATE="$LOCALSAMPLERATE"
+		elif [[ -n $GLOBALSAMPLERATE ]]; then
+			FNDSAMPLERATE="$GLOBALSAMPLERATE"
+		elif [[ -z $GLOBALSAMPLERATE ]]; then
+			FNDSAMPLERATE="$(mediainfo "$FNDFIRST" | grep 'Sampling rate                            : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1)"
+		fi
+
+		# Convert inputs to accepted format
+		if [[ $FNDSAMPLERATE == "44.1" ]]; then
+			FNLSAMPLERATE="44100"
+			notice "Audio samplerate set to ${FNDSAMPLERATE}khz"
+		elif [[ $FNDSAMPLERATE == "22.05" ]]; then
+			FNLSAMPLERATE="22050"
+			notice "Audio samplerate set to ${FNDSAMPLERATE}khz"
+		else
+			error "Non-standard Samplerate: ${FNDSAMPLERATE}"
+		fi
+
+		# Final variable for array
+		samplerate="--audio-samplerate=${FNLSAMPLERATE}"
 
 		if [[ $AUDIBLEMETA != "false" ]]; then
 			audibleparser
@@ -395,7 +455,6 @@ function batchprocess() {
 		# Basename of array values
 		BASESELDIR="$(basename "$SELDIR")"
 		M4BSELFILE="/tmp/.m4bmerge.$BASESELDIR.txt"
-		METADATA="/tmp/.m4bmeta.$BASESELDIR.txt"
 
 		# Import metadata into an array, so we can use it.
 		importmetadata
@@ -408,7 +467,6 @@ function batchprocess() {
 
 			# Process input, and determine if we need to run merge, or just cleanup the metadata a bit.
 			preprocess
-			unset sfile
 			((COUNTER++))
 
 			# Check if m4b-tool made leftover files
@@ -456,12 +514,7 @@ function pipe() {
 	if [[ $VERBOSE == "true" ]]; then
 		"$@"
 	else
-		SCRIPTDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-		if [[ ! -f "$SCRIPTDIR"/.pv.lock ]]; then
-			"$@"
-		else
-			"$@" 2> /dev/null | pv -l -p -t -N "Processing" > /dev/null
-		fi
+		"$@" 2> /dev/null | pv -l -p -t -N "Processing" > /dev/null
 	fi
 }
 
@@ -474,37 +527,40 @@ function silenterror() {
 }
 #### End functions ####
 
-notice "NOTICE: Verbose mode is ON"
+notice "Verbose mode is ON"
 
 #### Checks ####
-# Small one time check for 'pv'
-SCRIPTDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-if [[ ! -f "$SCRIPTDIR"/.pv.lock ]]; then
-	if [[ -z $(which pv) ]]; then
-		error "The program for progress bar is missing."
-		read -e -p 'Install it now? y/n: ' pvvar
-		if [[ $pvvar == "y" ]]; then
-			color_action "Installing pv..."
-			sudo apt-get -y install pv
-			if [ $? -eq 0 ]; then
-				color_highlight "Done installing."
-				touch "$SCRIPTDIR"/.pv.lock
-			else
-				error "Something went wrong during pv install."
-			fi
-		fi
-	else
-		notice "pv installation detected, making lock file"
-		touch "$SCRIPTDIR"/.pv.lock
-	fi
-fi
-
 # Make sure user gave usable INPUT
 if [[ -z "${FILEIN[@]}" ]]; then
 	error "No file inputs given."
 	echo "$usage"
 	exit 1
 fi
+
+## Check dependencies
+notice "Begin dependencies check"
+
+if [[ -z $(which bash) ]]; then
+	error "Bash is not installed"
+	exit 1
+fi
+
+if [[ -z $(which curl) ]]; then
+	error "Curl is not installed"
+	exit 1
+fi
+
+if [[ -z $(which mediainfo) ]]; then
+	error "Mediainfo is not installed"
+	exit 1
+fi
+
+if [[ -z $(which pv) ]]; then
+	error "PV is not installed"
+	exit 1
+fi
+notice "End dependencies check"
+## End dependencies check
 
 # verify m4b command works properly
 if [[ -z $M4BPATH ]]; then
