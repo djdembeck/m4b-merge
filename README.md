@@ -16,7 +16,7 @@
     - [m4b-tool's list of dependencies](https://github.com/sandreas/m4b-tool#ubuntu)
 - `bash` (Script language)
 - `curl` (Fetching metadata)
-- GNU versions of `date`, `grep`, and `iconv` (Parsing metadata)
+- `coreutils` or GNU versions of `grep`, `iconv`, and `tr` (Parsing metadata)
 - `mediainfo` (Detecting bitrate and samplerates)
 - `pv` (Piping conversion to keep it pretty)
 
