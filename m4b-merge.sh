@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to use m4b-tool to merge audiobooks, easily.
 ## REQUIRES: bash, curl, GNU grep, GNU iconv, mediainfo, pv, https://github.com/sandreas/m4b-tool
-VER=1.5.2
+VER=1.5.3
 
 ### USER EDITABLE VARIABLES ###
 
@@ -288,7 +288,6 @@ function makearray() {
 	"${m4bvar3// /_}"
 	"--albumartist"
 	"${m4bvar4// /_}"
-	"$mbid"
 	)
 
     # Check that series value exists and add to array
@@ -307,6 +306,13 @@ function makearray() {
         "${SERIESNUMBER// /_}"
         )
     fi
+
+	if [[ -n $mbid ]]; then
+		notice "MBID being set"
+		M4BARR+=(
+		"$mbid"
+		)
+	fi
 
 	# Make array into file
 	echo -n "${M4BARR[*]}" > "$M4BSELFILE"
