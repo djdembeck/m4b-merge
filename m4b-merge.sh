@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to use m4b-tool to merge audiobooks, easily.
 ## REQUIRES: bash, curl, GNU grep, GNU iconv, mediainfo, pv, https://github.com/sandreas/m4b-tool
-VER=1.5.5
+VER=1.5.6
 
 ### USER EDITABLE VARIABLES ###
 
@@ -312,7 +312,6 @@ function audibleparser() {
 	color_highlight "Metadata parsed as ( Title | Album | Narrator | Author ):"
 	color_highlight "$m4bvar1 | $m4bvar2 | $m4bvar3 | $m4bvar4"
 	echo ""
-	unset m4bvar1 m4bvar2 m4bvar3 m4bvar4
 }
 
 function makearray() {
@@ -380,6 +379,7 @@ function collectmeta() {
 
 		# Common extensions for audiobooks.
 		# Check input for each of the above file types, ensuring we are not dealing with a pre-merged input.
+		EXT=""
 		EXT1="m4a"
 		EXT2="mp3"
 		EXT3="m4b"
@@ -391,85 +391,115 @@ function collectmeta() {
 			fi
 		done
 
-		# Get bitrate data/command
-		# Prefer order: Bitrate from flag -r->Global Bitrate-> None specified
-		if [[ -n $LOCALBITRATE ]]; then
-			bitrate="--audio-bitrate=$LOCALBITRATE"
-			notice "Using flag-defined bitrate of $LOCALBITRATE"
-		elif [[ -n $GLOBALBITRATE ]]; then
-			bitrate="--audio-bitrate=$GLOBALBITRATE"
-			notice "Using global bitrate of $GLOBALBITRATE"
-		elif [[ -z $GLOBALBITRATE ]]; then
-			FNDFIRST="$(find "$SELDIR" -name "*.$EXT" | sort | head -1)"
-			FNDBITRATE="$(mediainfo "$FNDFIRST" | grep 'Overall bit rate                         : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1 | cut -d '.' -f 1)"
-			bitrate="--audio-bitrate=${FNDBITRATE}k"
-			notice "Audio bitrate set to ${FNDBITRATE}k"
-		fi
-
-		# Get origin samplerate to match
-		# Prefer order: Bitrate from flag -r->Global Bitrate-> None specified
-		if [[ -n $LOCALSAMPLERATE ]]; then
-			FNDSAMPLERATE="$LOCALSAMPLERATE"
-		elif [[ -n $GLOBALSAMPLERATE ]]; then
-			FNDSAMPLERATE="$GLOBALSAMPLERATE"
-		elif [[ -z $GLOBALSAMPLERATE ]]; then
-			FNDSAMPLERATE="$(mediainfo "$FNDFIRST" | grep 'Sampling rate                            : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1)"
-		fi
-
-		# Convert inputs to accepted format
-		if [[ $FNDSAMPLERATE == "44.1" ]]; then
-			FNLSAMPLERATE="44100"
-		elif [[ $FNDSAMPLERATE == "32.0" ]]; then
-			FNLSAMPLERATE="32000"
-		elif [[ $FNDSAMPLERATE == "22.05" ]]; then
-			FNLSAMPLERATE="22050"
-		elif [[ $FNDSAMPLERATE == "16.0" ]]; then
-			FNLSAMPLERATE="16000"
-		elif [[ $FNDSAMPLERATE == "12.0" ]]; then
-			FNLSAMPLERATE="12000"
+		if [[ -z $EXT ]]; then
+			error "File extension unkown for $BASESELDIR
+			"
 		else
-			error "Non-standard Samplerate: ${FNDSAMPLERATE}"
-		fi
+			notice "---- START RATE INFO ----"
 
-		notice "Audio samplerate set to ${FNDSAMPLERATE}khz"
-		# Final variable for array
-		samplerate="--audio-samplerate=${FNLSAMPLERATE}"
-
-		if [[ $AUDIBLEMETA != "false" ]]; then
-			audibleparser
-		else
-			if [[ $YPROMPT == "true" ]]; then
-				useoldmeta="y"
-			elif [[ -s $M4BSELFILE ]]; then # Check if we can use an existing metadata entry
-				color_highlight "Metadata for $BASESELDIR exists"
-				read -e -p 'Use existing metadata? y/n: ' useoldmeta
-			elif [[ ! -f $M4BSELFILE ]]; then # Check if we can use an existing metadata entry
-				useoldmeta="n"
+			# Get bitrate data/command
+			# Prefer order: Bitrate from flag -r->Global Bitrate-> None specified
+			if [[ -n $LOCALBITRATE ]]; then
+				bitrate="--audio-bitrate=$LOCALBITRATE"
+				notice "Using flag-defined bitrate of $LOCALBITRATE"
+			elif [[ -n $GLOBALBITRATE ]]; then
+				bitrate="--audio-bitrate=$GLOBALBITRATE"
+				notice "Using global bitrate of $GLOBALBITRATE"
+			elif [[ -z $GLOBALBITRATE ]]; then
+				FNDFIRST="$(find "$SELDIR" -name "*.$EXT" | sort | head -1)"
+				FNDBITRATE="$(mediainfo "$FNDFIRST" | grep 'Overall bit rate                         : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1 | cut -d '.' -f 1)"
+				bitrate="--audio-bitrate=${FNDBITRATE}k"
+				notice "Audio bitrate set to ${FNDBITRATE}k"
 			fi
 
-			if [[ $useoldmeta == "n" ]]; then
-				color_highlight "Enter metadata for $BASESELDIR"
-				# Each line has a line after input, adding that value to an array.
-				read -e -p 'Enter name: ' m4bvar1
-				read -e -p 'Enter Albumname: ' m4bvar2
-				read -e -p 'Enter artist (Narrator): ' m4bvar3
-				read -e -p 'Enter albumartist (Author): ' m4bvar4
-				read -e -p 'Enter Musicbrainz ID, if any (leave blank for none): ' m4bvar6
+			# Get origin samplerate to match
+			# Prefer order: Bitrate from flag -r->Global Bitrate-> None specified
+			if [[ -n $LOCALSAMPLERATE ]]; then
+				FNDSAMPLERATE="$LOCALSAMPLERATE"
+			elif [[ -n $GLOBALSAMPLERATE ]]; then
+				FNDSAMPLERATE="$GLOBALSAMPLERATE"
+			elif [[ -z $GLOBALSAMPLERATE ]]; then
+				FNDSAMPLERATE="$(mediainfo "$FNDFIRST" | grep 'Sampling rate                            : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1)"
+			fi
 
-				# Check if we need to include optional arguments in the array
-				if [[ -z $m4bvar6 ]]; then
-					mbid=""
-				else
-					mbid="--musicbrainz-id='$m4bvar6'"
+			# Get samplerate
+			# If no samplerate, throw error
+			if [[ -z $FNDSAMPLERATE ]]; then
+				error "No Samplerate could be determined"
+				NORATE=true
+			else
+				# Multiply by 1000 to get khz value
+				FNLSAMPLERATE=$(echo "1000 * $FNDSAMPLERATE" | bc -l | cut -d '.' -f 1)
+			fi
+
+			if [[ $NORATE != "true" ]]; then
+				notice "Audio samplerate set to ${FNDSAMPLERATE}khz"
+				# Final variable for array
+				samplerate="--audio-samplerate=${FNLSAMPLERATE}"
+			fi
+			NORATE=false
+
+			notice "---- END OF RATE INFO----
+			"
+
+			if [[ $AUDIBLEMETA != "false" ]]; then
+				audibleparser
+			else
+				if [[ $YPROMPT == "true" ]]; then
+					useoldmeta="y"
+				elif [[ -s $M4BSELFILE ]]; then # Check if we can use an existing metadata entry
+					color_highlight "Metadata for $BASESELDIR exists"
+					read -e -p 'Use existing metadata? y/n: ' useoldmeta
+				elif [[ ! -f $M4BSELFILE ]]; then # Check if we can use an existing metadata entry
+					useoldmeta="n"
 				fi
 
-				# Call array function
-				makearray
-				makearray2
-			elif [[ -s $M4BSELFILE && $useoldmeta == "y" ]]; then
-				color_highlight "Using this metadata then:"
-				color_highlight "$(cat "$M4BSELFILE" | tr '_' ' ')"
-				echo ""
+				if [[ $useoldmeta == "n" ]]; then
+					color_highlight "Enter metadata for $BASESELDIR"
+					# Each line has a line after input, adding that value to an array.
+					read -e -p 'Enter name: ' m4bvar1
+					read -e -p 'Enter Albumname: ' m4bvar2
+					read -e -p 'Enter artist (Narrator): ' m4bvar3
+					read -e -p 'Enter albumartist (Author): ' m4bvar4
+					read -e -p 'Enter Musicbrainz ID, if any (leave blank for none): ' m4bvar6
+
+					# Check if we need to include optional arguments in the array
+					if [[ -z $m4bvar6 ]]; then
+						mbid=""
+					else
+						mbid="--musicbrainz-id='$m4bvar6'"
+					fi
+
+					# Call array function
+					makearray
+					makearray2
+				elif [[ -s $M4BSELFILE && $useoldmeta == "y" ]]; then
+					color_highlight "Using this metadata then:"
+					color_highlight "$(cat "$M4BSELFILE" | tr '_' ' ')"
+					echo ""
+				fi
+			fi
+			# Warn user (without input to stop) if destination exists, and give some stats
+			if [[ -d "$OUTPUT"/"$m4bvar4"/"$m4bvar2" ]]; then
+				warn "^^^^ START DUPLICATE NOTICE ^^^^"
+				FNDDUPES="$(find "$OUTPUT"/"$m4bvar4"/"$m4bvar2" -maxdepth 1 -not -name '*.txt' -type f)"
+				if [[ "$(echo "$FNDDUPES" | wc -l)" -eq 1 ]]; then
+					warn "Destination file exists (and will be overwritten) for $m4bvar2"
+					OLDSAMPLERATE="$(mediainfo "$OUTPUT"/"$m4bvar4"/"$m4bvar2"/* | grep 'Sampling rate                            : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1)"
+					OLDBITRATE="$(mediainfo "$OUTPUT"/"$m4bvar4"/"$m4bvar2"/* | grep 'Overall bit rate                         : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1 | cut -d '.' -f 1)"
+
+					warn "Existing bitrate: ${OLDBITRATE}k"
+					warn "Existing samplerate: ${OLDSAMPLERATE}khz"
+				elif [[ "$(echo "$FNDDUPES" | wc -l)" -gt 1 ]]; then
+					warn "Multiple destination files exist for $m4bvar2"
+					warn "This can happen if metadata changes or multiple versions of a book exist."
+					notice "Logging duplicate books to $OUTPUT/dupes.txt"
+					echo "$FNDDUPES" >> "$OUTPUT"/dupes.txt
+					sort -u "$OUTPUT"/dupes.txt > "$OUTPUT"/dupes.txt.new
+					mv "$OUTPUT"/dupes.txt.new "$OUTPUT"/dupes.txt
+				fi
+				warn "---- END OF DUPLICATE NOTICE ----
+				"
 			fi
 		fi
 	done
@@ -510,7 +540,6 @@ function batchprocess() {
 
 		# Make sure output file exists as expected
 		if [[ -s $M4BSELFILE ]]; then
-			#echo "Starting conversion of "$namevar""
 			mkdir -p "$OUTPUT"/"$albumartistvar"/"$albumvar"
 			color_action  "($COUNTER of $INPUTNUM): Processing $albumvar..."
 
