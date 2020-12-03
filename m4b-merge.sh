@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to use m4b-tool to merge audiobooks, easily.
 ## REQUIRES: bash, curl, GNU grep, GNU iconv, mediainfo, pv, https://github.com/sandreas/m4b-tool
-VER=1.5.3
+VER=1.5.5
 
 ### USER EDITABLE VARIABLES ###
 
@@ -112,45 +112,59 @@ function preprocess() {
 	# Import metadata into an array, so we can use it.
 	importmetadata
 
+	#Final chapter path to use
+	ENDCHPTFILE="${OUTPUT}/${albumartistvar}/${albumvar}/${namevar}.chapters.txt"
+
 	# Check whether directory has multiple audio files or not
 	if [[ -d $SELDIR && $(find "$SELDIR" -name "*.$EXT" | wc -l) -gt 1 ]] || [[ -f $SELDIR && $EXT == "mp3" ]]; then
         # Add bitrate/samplerate commands to command pool, since we are merging
-        makearray2
         # After we verify the input needs to be merged, lets run the merge command.
 		pipe "$M4BPATH" merge \
 		--output-file="$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b \
 		"${M4BSEL[@]//$'\n'/}" \
 		--force \
+		--no-chapter-reindexing \
+		--no-cleanup \
 		--jobs="$JOBCOUNT" \
 		"$SELDIR"
+
+		# Standardize chapters
+		processchapters
+
 		color_highlight "Merge completed for $namevar."
+
+	# Folders with single m4b files
 	elif [[ -d $SELDIR && $(find "$SELDIR" -name "*.$EXT" | wc -l) -eq 1 && $EXT == "m4b" ]]; then
 		SELDIR="$(find "$SELDIR" -name "*.$EXT")"
 		# After we verify the type of input is a single m4b in a folder
-		# Create chapter file
 		notice "Exporting chapterfile"
+		# Get chapters from existing m4b file
 		"$M4BPATH" meta \
-		--export-chapters="" \
+		--export-chapters="$ENDCHPTFILE" \
 		"$SELDIR"
+
 		# run meta change commands only, then copy
 		notice "Making backup file"
         cp "$SELDIR" "${SELDIR::-4}.new.m4b"
 		"$M4BPATH" meta \
 		"${M4BSEL[@]//$'\n'/}" \
 		"${SELDIR::-4}.new.m4b"
-		notice "Moving chapter file"
-		mv "${SELDIR::-4}".chapters.txt "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".chapters.txt
+
 		notice "Moving modified file to final output"
 		mv "${SELDIR::-4}.new.m4b" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
+
+		# Fix chapters and re-import them
+		processchapters
+
+	# Single m4b files
 	elif [[ -f $SELDIR && $EXT == "m4b" ]]; then
 		# After we verify the type of input is a single m4b
-		# Create chapter file
 		notice "Exporting chapterfile"
+		# Get chapters from existing m4b file
 		"$M4BPATH" meta \
-		--export-chapters="" \
+		--export-chapters="$ENDCHPTFILE" \
 		"$SELDIR"
-		notice "Moving chapter file"
-		mv "${SELDIR::-4}".chapters.txt "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".chapters.txt
+
 		# run meta change commands only, then copy
 		notice "Making backup file"
         cp "$SELDIR" "${SELDIR::-4}.new.m4b"
@@ -159,9 +173,32 @@ function preprocess() {
 		"${SELDIR::-4}.new.m4b"
 		notice "Moving modified file to final output"
 		mv "${SELDIR::-4}.new.m4b" "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
+
+		# Fix chapters and re-import them
+		processchapters
 	elif [[ -z $EXT ]]; then
 		error "No recognized filetypes found for $namevar."
 		warn "Skipping..."
+	fi
+}
+
+function processchapters() {
+	# Working around chapter re-indexing being broken:
+	# https://github.com/sandreas/m4b-tool/issues/105#issuecomment-730825979
+
+	# Verify chapter file exists and has data
+	if [[ -s $ENDCHPTFILE ]]; then
+		# Run after merge, then re-import new chapters
+		notice "Standardizing chapter file"
+
+		# Don't modify first line of chapter file
+		# Replace everything after spaces->endline with 'Chapter 01-9999'
+		awk 'NR>1 { gsub(/ .*/, " Chapter " sprintf("%02d",++i)) } 1' "$ENDCHPTFILE" > "${ENDCHPTFILE::-3}1.txt" || error "Failed to standardize chapters"
+		mv "${ENDCHPTFILE::-3}1.txt" "$ENDCHPTFILE"
+
+		# Edit meta of newly merged m4b in-place
+		mp4chaps -i \
+		"$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
 	fi
 }
 
@@ -270,6 +307,7 @@ function audibleparser() {
 	m4bvar4="$AUTHORCMD"
 
 	makearray
+	makearray2
 
 	color_highlight "Metadata parsed as ( Title | Album | Narrator | Author ):"
 	color_highlight "$m4bvar1 | $m4bvar2 | $m4bvar3 | $m4bvar4"
@@ -427,6 +465,7 @@ function collectmeta() {
 
 				# Call array function
 				makearray
+				makearray2
 			elif [[ -s $M4BSELFILE && $useoldmeta == "y" ]]; then
 				color_highlight "Using this metadata then:"
 				color_highlight "$(cat "$M4BSELFILE" | tr '_' ' ')"
