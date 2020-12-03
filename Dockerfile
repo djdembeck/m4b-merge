@@ -213,10 +213,11 @@ WORKDIR /tmp/workdir
 
 RUN apk add --no-cache --update \
   bash \
+  coreutils \
   curl \
   grep \
   libstdc++ \
-  mutagen \
+  mediainfo \
   php7-cli \
   php7-dom \
   php7-json \
