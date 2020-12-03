@@ -120,7 +120,7 @@ function preprocess() {
         # Add bitrate/samplerate commands to command pool, since we are merging
         # After we verify the input needs to be merged, lets run the merge command.
 		pipe "$M4BPATH" merge \
-		--output-file="$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b \
+		--output-file "$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b \
 		"${M4BSEL[@]//$'\n'/}" \
 		--force \
 		--no-chapter-reindexing \
@@ -140,7 +140,7 @@ function preprocess() {
 		notice "Exporting chapterfile"
 		# Get chapters from existing m4b file
 		"$M4BPATH" meta \
-		--export-chapters="$ENDCHPTFILE" \
+		--export-chapters "$ENDCHPTFILE" \
 		"$SELDIR"
 
 		# run meta change commands only, then copy
@@ -162,7 +162,7 @@ function preprocess() {
 		notice "Exporting chapterfile"
 		# Get chapters from existing m4b file
 		"$M4BPATH" meta \
-		--export-chapters="$ENDCHPTFILE" \
+		--export-chapters "$ENDCHPTFILE" \
 		"$SELDIR"
 
 		# run meta change commands only, then copy
@@ -197,7 +197,7 @@ function processchapters() {
 		mv "${ENDCHPTFILE::-3}1.txt" "$ENDCHPTFILE"
 
 		# Edit meta of newly merged m4b in-place
-		mp4chaps -i \
+		mp4chaps --quiet -i \
 		"$OUTPUT"/"$albumartistvar"/"$albumvar"/"$namevar".m4b
 	fi
 }
@@ -347,7 +347,8 @@ function makearray() {
 	if [[ -n $mbid ]]; then
 		notice "MBID being set"
 		M4BARR+=(
-		"$mbid"
+		"--musicbrainz-id"
+		"${mbid// /_}"
 		)
 	fi
 
@@ -359,12 +360,15 @@ function makearray2() {
     # Put all values into an array
 	notice "Adding bitrate/samplerate commands"
     M4BARR2=(
-    "$bitrate"
-    "$samplerate"
+	"--audio-bitrate"
+    "${bitrate// /_}"
+	"--audio-samplerate"
+    "${samplerate// /_}"
     )
 
     # Append array into file
-    echo "${M4BARR2[*]}" >> "$M4BSELFILE"
+	# Space is intentional
+    echo " ${M4BARR2[*]}" >> "$M4BSELFILE"
 }
 
 function collectmeta() {
@@ -400,15 +404,15 @@ function collectmeta() {
 			# Get bitrate data/command
 			# Prefer order: Bitrate from flag -r->Global Bitrate-> None specified
 			if [[ -n $LOCALBITRATE ]]; then
-				bitrate="--audio-bitrate=$LOCALBITRATE"
+				bitrate="$LOCALBITRATE"
 				notice "Using flag-defined bitrate of $LOCALBITRATE"
 			elif [[ -n $GLOBALBITRATE ]]; then
-				bitrate="--audio-bitrate=$GLOBALBITRATE"
+				bitrate="$GLOBALBITRATE"
 				notice "Using global bitrate of $GLOBALBITRATE"
 			elif [[ -z $GLOBALBITRATE ]]; then
 				FNDFIRST="$(find "$SELDIR" -name "*.$EXT" | sort | head -1)"
 				FNDBITRATE="$(mediainfo "$FNDFIRST" | grep 'Overall bit rate                         : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1 | cut -d '.' -f 1)"
-				bitrate="--audio-bitrate=${FNDBITRATE}k"
+				bitrate="${FNDBITRATE}k"
 				notice "Audio bitrate set to ${FNDBITRATE}k"
 			fi
 
@@ -435,7 +439,7 @@ function collectmeta() {
 			if [[ $NORATE != "true" ]]; then
 				notice "Audio samplerate set to ${FNDSAMPLERATE}khz"
 				# Final variable for array
-				samplerate="--audio-samplerate=${FNLSAMPLERATE}"
+				samplerate="${FNLSAMPLERATE}"
 			fi
 			NORATE=false
 
@@ -467,7 +471,7 @@ function collectmeta() {
 					if [[ -z $m4bvar6 ]]; then
 						mbid=""
 					else
-						mbid="--musicbrainz-id='$m4bvar6'"
+						mbid="$m4bvar6"
 					fi
 
 					# Call array function
