@@ -41,7 +41,7 @@ JOBCOUNT=""
 if [[ ! -d /output ]]; then
 	# Check if output env var is empty
 	if [[ -z $OUTPUT ]]; then
-		error "Output is not set. Exiting."
+		echo "Output is not set. Exiting."
 		exit 1
 	fi
 else
