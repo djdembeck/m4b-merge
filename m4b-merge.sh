@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to use m4b-tool to merge audiobooks, easily.
 ## REQUIRES: bash, curl, GNU grep, GNU iconv, mediainfo, pv, https://github.com/sandreas/m4b-tool
-VER=1.5.6
+VER=1.5.7
 
 ### USER EDITABLE VARIABLES ###
 
@@ -115,8 +115,15 @@ function preprocess() {
 	#Final chapter path to use
 	ENDCHPTFILE="${OUTPUT}/${albumartistvar}/${albumvar}/${namevar}.chapters.txt"
 
+	# Common extensions for audiobooks.
+	EXTENSION="$(find "$SELDIR" -maxdepth 2 -type f -regex ".*\.\(m4a\|mp3\|m4b\)" | sort | head -n1)"
+	EXT="${EXTENSION##*.}"
+
 	# Check whether directory has multiple audio files or not
 	if [[ -d $SELDIR && $(find "$SELDIR" -name "*.$EXT" | wc -l) -gt 1 ]] || [[ -f $SELDIR && $EXT == "mp3" ]]; then
+		notice "Directory with multiple files"
+
+		makearray2
         # Add bitrate/samplerate commands to command pool, since we are merging
         # After we verify the input needs to be merged, lets run the merge command.
 		pipe "$M4BPATH" merge \
@@ -135,13 +142,15 @@ function preprocess() {
 
 	# Folders with single m4b files
 	elif [[ -d $SELDIR && $(find "$SELDIR" -name "*.$EXT" | wc -l) -eq 1 && $EXT == "m4b" ]]; then
+		notice "Single m4b in a folder"
 		SELDIR="$(find "$SELDIR" -name "*.$EXT")"
 		# After we verify the type of input is a single m4b in a folder
 		notice "Exporting chapterfile"
 		# Get chapters from existing m4b file
 		"$M4BPATH" meta \
-		--export-chapters "$ENDCHPTFILE" \
+		--export-chapters "" \
 		"$SELDIR"
+		mv "${SELDIR::-4}".chapters.txt "$ENDCHPTFILE"
 
 		# run meta change commands only, then copy
 		notice "Making backup file"
@@ -158,12 +167,14 @@ function preprocess() {
 
 	# Single m4b files
 	elif [[ -f $SELDIR && $EXT == "m4b" ]]; then
+		notice "Single m4b file"
 		# After we verify the type of input is a single m4b
 		notice "Exporting chapterfile"
 		# Get chapters from existing m4b file
 		"$M4BPATH" meta \
-		--export-chapters "$ENDCHPTFILE" \
+		--export-chapters "" \
 		"$SELDIR"
+		mv "${SELDIR::-4}".chapters.txt "$ENDCHPTFILE"
 
 		# run meta change commands only, then copy
 		notice "Making backup file"
@@ -205,16 +216,9 @@ function processchapters() {
 function audibleparser() {
 	AUDMETAFILE="/tmp/.audmeta.$BASESELDIR.txt"
 
-	if [[ $YPROMPT == "true" && -f $AUDMETAFILE ]]; then
-		useoldmeta="y"
-	elif [[ -s $AUDMETAFILE ]]; then # Check if we can use existing audible data
-		color_highlight "Cached Audible metadata for $BASESELDIR exists"
-		read -e -p 'Use existing metadata? y/n: ' useoldmeta
-	elif [[ ! -f $AUDMETAFILE ]]; then # Check if we can use an existing metadata entry
-		useoldmeta="n"
-	fi
-
-	if [[ $useoldmeta == "n" ]]; then
+	if [[ -s $AUDMETAFILE ]]; then # Check if we can use existing audible data
+		color_highlight "Using cached Audible metadata for $BASESELDIR"
+	elif [[ ! -s $AUDMETAFILE ]]; then # Check if we can use an existing metadata entry
 		RET=1
 		until [[ $RET -eq 0 ]]; do
 			echo ""
@@ -234,8 +238,6 @@ function audibleparser() {
 				RET=0
 			fi
 		done
-	fi
-	if [[ ! -s $AUDMETAFILE ]] || [[ -s $AUDMETAFILE && $useoldmeta == "n" ]]; then
 		if [[ ! -s $AUDCOOKIES ]]; then
 			error "Cookie file missing. This may lead to certain elements not working (like series and book numbering)"
 		fi
@@ -307,7 +309,6 @@ function audibleparser() {
 	m4bvar4="$AUTHORCMD"
 
 	makearray
-	makearray2
 
 	color_highlight "Metadata parsed as ( Title | Album | Narrator | Author ):"
 	color_highlight "$m4bvar1 | $m4bvar2 | $m4bvar3 | $m4bvar4"
@@ -353,22 +354,34 @@ function makearray() {
 	fi
 
 	# Make array into file
-	echo -n "${M4BARR[*]}" > "$M4BSELFILE"
+	echo "${M4BARR[*]}" > "$M4BSELFILE"
 }
 
 function makearray2() {
     # Put all values into an array
-	notice "Adding bitrate/samplerate commands"
-    M4BARR2=(
-	"--audio-bitrate"
-    "${bitrate// /_}"
-	"--audio-samplerate"
-    "${samplerate// /_}"
-    )
+		notice "Adding bitrate/samplerate commands"
+		if [[ -n $bitrate ]]; then
+		    M4BARR2=(
+			"--audio-bitrate"
+		    "${bitrate// /_}"
+			)
+		fi
+		if [[ -n $samplerate ]]; then
+			M4BARR2+=(
+			"--audio-samplerate"
+		    "${samplerate// /_}"
+		    )
+		fi
 
-    # Append array into file
-	# Space is intentional
-    echo " ${M4BARR2[*]}" >> "$M4BSELFILE"
+	    # Append array into file
+		# Space is intentional
+	    #echo "${M4BARR2[*]}" > "${M4BSELFILE::-4}".bit.txt
+
+		# Import values from file into array.
+		readarray M4BARR <<<"$(cat "$M4BSELFILE" | tr ' ' '\n' | tr '_' ' ')"
+		M4BSEL=("${M4BARR[@]}" "${M4BARR2[@]}")
+		echo "${M4BSEL[*]}" > "$M4BSELFILE"
+		unset bitrate samplerate
 }
 
 function collectmeta() {
@@ -382,18 +395,8 @@ function collectmeta() {
 		M4BSELFILE="/tmp/.m4bmerge.$BASESELDIR.txt"
 
 		# Common extensions for audiobooks.
-		# Check input for each of the above file types, ensuring we are not dealing with a pre-merged input.
-		EXT=""
-		EXT1="m4a"
-		EXT2="mp3"
-		EXT3="m4b"
-		EXT4="flac"
-		EXTARRAY=($EXT1 $EXT2 $EXT3 $EXT4)
-		for EXTENSION in ${EXTARRAY[@]}; do
-			if [[ $(grep -i -r --include \*.$EXTENSION '*' "$SELDIR" | wc -l) -ge 1 ]]; then
-				EXT="$EXTENSION"
-			fi
-		done
+		EXTENSION="$(find "$SELDIR" -maxdepth 2 -type f -regex ".*\.\(m4a\|mp3\|m4b\)" | sort | head -n1)"
+		EXT="${EXTENSION##*.}"
 
 		if [[ -z $EXT ]]; then
 			error "File extension unkown for $BASESELDIR
@@ -476,7 +479,6 @@ function collectmeta() {
 
 					# Call array function
 					makearray
-					makearray2
 				elif [[ -s $M4BSELFILE && $useoldmeta == "y" ]]; then
 					color_highlight "Using this metadata then:"
 					color_highlight "$(cat "$M4BSELFILE" | tr '_' ' ')"
@@ -539,26 +541,34 @@ function batchprocess() {
 		BASESELDIR="$(basename "$SELDIR")"
 		M4BSELFILE="/tmp/.m4bmerge.$BASESELDIR.txt"
 
-		# Import metadata into an array, so we can use it.
-		importmetadata
+		# Common extensions for audiobooks.
+		EXTENSION="$(find "$SELDIR" -maxdepth 2 -type f -regex ".*\.\(m4a\|mp3\|m4b\)" | sort | head -n1)"
+		EXT="${EXTENSION##*.}"
 
-		# Make sure output file exists as expected
-		if [[ -s $M4BSELFILE ]]; then
-			mkdir -p "$OUTPUT"/"$albumartistvar"/"$albumvar"
-			color_action  "($COUNTER of $INPUTNUM): Processing $albumvar..."
-
-			# Process input, and determine if we need to run merge, or just cleanup the metadata a bit.
-			preprocess
-			((COUNTER++))
-
-			# Check if m4b-tool made leftover files
-			if [[ "$(find "$OUTPUT"/"$albumartistvar"/"$albumvar" -maxdepth 1 -name '*-tmpfiles' -type d | wc -l)" -eq 1 ]]; then
-				rm -rf "$OUTPUT"/"$albumartistvar"/"$albumvar"/*-tmpfiles
-			fi
-			unset namevar albumvar artistvar albumartistvar
+		if [[ -z $EXT ]]; then
+			error "File extension unkown for $BASESELDIR
+			"
 		else
-			error "metadata file for $BASESELDIR does not exist"
-			exit 1
+			# Import metadata into an array, so we can use it.
+			importmetadata
+
+			# Make sure output file exists as expected
+			if [[ -s $M4BSELFILE ]]; then
+				mkdir -p "$OUTPUT"/"$albumartistvar"/"$albumvar"
+				color_action  "($COUNTER of $INPUTNUM): Processing $albumvar..."
+
+				# Process input, and determine if we need to run merge, or just cleanup the metadata a bit.
+				preprocess
+				((COUNTER++))
+
+				# Check if m4b-tool made leftover files
+				if [[ "$(find "$OUTPUT"/"$albumartistvar"/"$albumvar" -maxdepth 1 -name '*-tmpfiles' -type d | wc -l)" -eq 1 ]]; then
+					rm -rf "$OUTPUT"/"$albumartistvar"/"$albumvar"/*-tmpfiles
+				fi
+			else
+				error "metadata file for $BASESELDIR does not exist"
+				exit 1
+			fi
 		fi
 	done
 }
