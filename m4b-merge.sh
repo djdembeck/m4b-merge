@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to use m4b-tool to merge audiobooks, easily.
 ## REQUIRES: bash, curl, GNU grep, GNU iconv, mediainfo, pv, https://github.com/sandreas/m4b-tool
-VER=1.5.7
+VER=1.5.8
 
 ### USER EDITABLE VARIABLES ###
 
@@ -41,7 +41,7 @@ JOBCOUNT=""
 if [[ ! -d /output ]]; then
 	# Check if output env var is empty
 	if [[ -z $OUTPUT ]]; then
-		echo "Output is not set. Exiting."
+		error "Output is not set. Exiting."
 		exit 1
 	fi
 else
@@ -123,7 +123,7 @@ function preprocess() {
 	if [[ -d $SELDIR && $(find "$SELDIR" -name "*.$EXT" | wc -l) -gt 1 ]] || [[ -f $SELDIR && $EXT == "mp3" ]]; then
 		notice "Directory with multiple files"
 
-		makearray2
+		readarray M4BSEL <<<"$(cat "${M4BSELFILE::-4}".bit.txt | tr ' ' '\n' | tr '_' ' ')"
         # Add bitrate/samplerate commands to command pool, since we are merging
         # After we verify the input needs to be merged, lets run the merge command.
 		pipe "$M4BPATH" merge \
@@ -309,6 +309,7 @@ function audibleparser() {
 	m4bvar4="$AUTHORCMD"
 
 	makearray
+	makearray2
 
 	color_highlight "Metadata parsed as ( Title | Album | Narrator | Author ):"
 	color_highlight "$m4bvar1 | $m4bvar2 | $m4bvar3 | $m4bvar4"
@@ -354,7 +355,7 @@ function makearray() {
 	fi
 
 	# Make array into file
-	echo "${M4BARR[*]}" > "$M4BSELFILE"
+	echo -n "${M4BARR[*]}" > "$M4BSELFILE"
 }
 
 function makearray2() {
@@ -374,14 +375,7 @@ function makearray2() {
 		fi
 
 	    # Append array into file
-		# Space is intentional
-	    #echo "${M4BARR2[*]}" > "${M4BSELFILE::-4}".bit.txt
-
-		# Import values from file into array.
-		readarray M4BARR <<<"$(cat "$M4BSELFILE" | tr ' ' '\n' | tr '_' ' ')"
-		M4BSEL=("${M4BARR[@]}" "${M4BARR2[@]}")
-		echo "${M4BSEL[*]}" > "$M4BSELFILE"
-		unset bitrate samplerate
+	    echo "${M4BARR2[*]}" > "${M4BSELFILE::-4}".bit.txt
 }
 
 function collectmeta() {
