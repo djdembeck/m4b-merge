@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to use m4b-tool to merge audiobooks, easily.
 ## REQUIRES: bash, curl, GNU grep, GNU iconv, mediainfo, pv, https://github.com/sandreas/m4b-tool
-VER=1.5.8
+VER=1.5.7
 
 ### USER EDITABLE VARIABLES ###
 
@@ -36,32 +36,6 @@ AUDCOOKIES=""
 JOBCOUNT=""
 
 ### END USER EDITABLE VARIABLES ###
-
-# Check if there's no /output folder from docker
-if [[ ! -d /output ]]; then
-	# Check if output env var is empty
-	if [[ -z $OUTPUT ]]; then
-		echo "Output is not set. Exiting."
-		exit 1
-	fi
-else
-	OUTPUT="/output"
-fi
-
-# If nothing is set, assume default m4b-tool location
-if [[ -z $M4BPATH ]]; then
-	M4BPATH="$(which m4b-tool)"
-fi
-
-# If no path is set for cookies, set default
-if [[ -z $AUDCOOKIES ]]; then
-	AUDCOOKIES="/tmp/aud-cookies.txt"
-fi
-
-# If no manual override for jobs, use number of available CPU threads
-if [[ -z $JOBCOUNT ]]; then
-	JOBCOUNT="$(grep -c ^processor /proc/cpuinfo)"
-fi
 
 # -h help text to print
 usage="	$(basename "$0") $VER [-b] [-f] [-h] [-m] [-r] [-s] [-v] [-y]
@@ -123,7 +97,7 @@ function preprocess() {
 	if [[ -d $SELDIR && $(find "$SELDIR" -name "*.$EXT" | wc -l) -gt 1 ]] || [[ -f $SELDIR && $EXT == "mp3" ]]; then
 		notice "Directory with multiple files"
 
-		readarray M4BSEL <<<"$(cat "${M4BSELFILE::-4}".bit.txt | tr ' ' '\n' | tr '_' ' ')"
+		makearray2
         # Add bitrate/samplerate commands to command pool, since we are merging
         # After we verify the input needs to be merged, lets run the merge command.
 		pipe "$M4BPATH" merge \
@@ -309,7 +283,6 @@ function audibleparser() {
 	m4bvar4="$AUTHORCMD"
 
 	makearray
-	makearray2
 
 	color_highlight "Metadata parsed as ( Title | Album | Narrator | Author ):"
 	color_highlight "$m4bvar1 | $m4bvar2 | $m4bvar3 | $m4bvar4"
@@ -355,7 +328,7 @@ function makearray() {
 	fi
 
 	# Make array into file
-	echo -n "${M4BARR[*]}" > "$M4BSELFILE"
+	echo "${M4BARR[*]}" > "$M4BSELFILE"
 }
 
 function makearray2() {
@@ -375,7 +348,14 @@ function makearray2() {
 		fi
 
 	    # Append array into file
-	    echo "${M4BARR2[*]}" > "${M4BSELFILE::-4}".bit.txt
+		# Space is intentional
+	    #echo "${M4BARR2[*]}" > "${M4BSELFILE::-4}".bit.txt
+
+		# Import values from file into array.
+		readarray M4BARR <<<"$(cat "$M4BSELFILE" | tr ' ' '\n' | tr '_' ' ')"
+		M4BSEL=("${M4BARR[@]}" "${M4BARR2[@]}")
+		echo "${M4BSEL[*]}" > "$M4BSELFILE"
+		unset bitrate samplerate
 }
 
 function collectmeta() {
@@ -647,6 +627,32 @@ if [[ -z $(which pv) ]]; then
 fi
 notice "End dependencies check"
 ## End dependencies check
+
+# Check if there's no /output folder from docker
+if [[ ! -d /output ]]; then
+	# Check if output env var is empty
+	if [[ -z $OUTPUT ]]; then
+		error "Output is not set. Exiting."
+		exit 1
+	fi
+else
+	OUTPUT="/output"
+fi
+
+# If nothing is set, assume default m4b-tool location
+if [[ -z $M4BPATH ]]; then
+	M4BPATH="$(which m4b-tool)"
+fi
+
+# If no path is set for cookies, set default
+if [[ -z $AUDCOOKIES ]]; then
+	AUDCOOKIES="/tmp/aud-cookies.txt"
+fi
+
+# If no manual override for jobs, use number of available CPU threads
+if [[ -z $JOBCOUNT ]]; then
+	JOBCOUNT="$(grep -c ^processor /proc/cpuinfo)"
+fi
 
 # verify m4b command works properly
 if [[ -z $M4BPATH ]]; then
