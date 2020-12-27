@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to use m4b-tool to merge audiobooks, easily.
 ## REQUIRES: bash, curl, GNU grep, GNU iconv, mediainfo, pv, https://github.com/sandreas/m4b-tool
-VER=1.5.9
+VER=1.5.10
 
 ### USER EDITABLE VARIABLES ###
 
@@ -94,7 +94,7 @@ function preprocess() {
 	EXT="${EXTENSION##*.}"
 
 	# Check whether directory has multiple audio files or not
-	if [[ -d $SELDIR && $(find "$SELDIR" -name "*.$EXT" | wc -l) -gt 1 ]] || [[ -f $SELDIR && $EXT == "mp3" ]]; then
+	if [[ -d $SELDIR && $(find "$SELDIR" -name "*.$EXT" | wc -l) -gt 1 ]] || [[ $EXT == "mp3" ]]; then
 		notice "Directory with multiple files or single mp3"
 
 		readarray M4BSELBIT <<<"$(cat "${M4BSELFILE::-4}".bit.txt | tr ' ' '\n' | tr '_' ' ')"
@@ -457,15 +457,16 @@ function collectmeta() {
 			# Warn user (without input to stop) if destination exists, and give some stats
 			if [[ -d "$OUTPUT"/"$m4bvar4"/"$m4bvar2" ]]; then
 				warn "^^^^ START DUPLICATE NOTICE ^^^^"
-				FNDDUPES="$(find "$OUTPUT"/"$m4bvar4"/"$m4bvar2" -maxdepth 1 -not -name '*.txt' -type f)"
-				if [[ "$(echo "$FNDDUPES" | wc -l)" -eq 1 ]]; then
+				FNDDUPES="$(find "$OUTPUT"/"$m4bvar4"/"$m4bvar2" -maxdepth 1 -type f ! -name '*.txt')"
+				DUPECOUNT="$(find "$OUTPUT"/"$m4bvar4"/"$m4bvar2" -maxdepth 1 -type f ! -name '*.txt' | wc -l)"
+				if [[ $DUPECOUNT -eq 1 ]]; then
 					warn "Destination file exists (and will be overwritten) for $m4bvar2"
 					OLDSAMPLERATE="$(mediainfo "$OUTPUT"/"$m4bvar4"/"$m4bvar2"/* | grep 'Sampling rate                            : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1)"
 					OLDBITRATE="$(mediainfo "$OUTPUT"/"$m4bvar4"/"$m4bvar2"/* | grep 'Overall bit rate                         : ' | cut -d ':' -f 2 | tr -d ' ' | cut -d 'k' -f 1 | cut -d '.' -f 1)"
 
 					warn "Existing bitrate: ${OLDBITRATE}k"
 					warn "Existing samplerate: ${OLDSAMPLERATE}khz"
-				elif [[ "$(echo "$FNDDUPES" | wc -l)" -gt 1 ]]; then
+				elif [[ $DUPECOUNT -gt 1 ]]; then
 					warn "Multiple destination files exist for $m4bvar2"
 					warn "This can happen if metadata changes or multiple versions of a book exist."
 					notice "Logging duplicate books to $OUTPUT/dupes.txt"
