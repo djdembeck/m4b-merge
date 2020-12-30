@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to use m4b-tool to merge audiobooks, easily.
 ## REQUIRES: bash, curl, GNU grep, GNU iconv, mediainfo, pv, https://github.com/sandreas/m4b-tool
-VER=1.5.10
+VER=1.5.11
 
 ### USER EDITABLE VARIABLES ###
 
@@ -181,6 +181,10 @@ function processchapters() {
 		# Replace everything after spaces->endline with 'Chapter 01-9999'
 		awk 'NR>1 { gsub(/ .*/, " Chapter " sprintf("%02d",++i)) } 1' "$ENDCHPTFILE" > "${ENDCHPTFILE::-3}1.txt" || error "Failed to standardize chapters"
 		mv "${ENDCHPTFILE::-3}1.txt" "$ENDCHPTFILE"
+
+		if [[ "$(cat "$ENDCHPTFILE" | wc -l)" -le 2 ]]; then
+			error "Not many chapters exist, this is probably an issue with source files"
+		fi
 
 		# Edit meta of newly merged m4b in-place
 		mp4chaps --quiet -i \
