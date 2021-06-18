@@ -1,4 +1,4 @@
-
+# Deprecated. Use Python-based successor: [Bragi Books](https://github.com/djdembeck/bragibooks)
 ## Usage
 `m4b-merge.sh [-b] [-f] [-h] [-m] [-r] [-s] [-v] [-y]`
 
