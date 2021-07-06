@@ -4,6 +4,7 @@ from datetime import datetime
 # Local imports
 import config
 
+# Authenticates user if already setup or registers the user if not
 class AudibleAuth:
     auth_file = Path(config.dir_path, ".aud_auth.txt")
 
@@ -40,7 +41,8 @@ class AudibleAuth:
         # Authenticate now that we have generated auth file
         self.authenticate()
 
-class AudibleData:
+# Checks validity of asin, then gathers json response into a return object
+class BookData:
     def __init__(self, asin):
         self.auth = AudibleAuth()
         self.asin = asin

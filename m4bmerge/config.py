@@ -1,9 +1,9 @@
 from pathlib import Path
-import os
+import os, shutil
 
 ### User editable variables
 # for non-default m4b-tool install path
-m4bpath = "m4b-tool"
+m4b_tool_bin = "m4b-tool"
 
 # output directory for cleaned metadata/folder structure
 # leaving blank uses /output for docker or $USER/output for anything else
@@ -45,4 +45,20 @@ else:
 	parents=True,
 	exist_ok=True
 	)
+
+	# Find path to m4b-tool binary
+	# Check that binary actually exists
+	if not m4b_tool_bin:
+		# try to automatically recover
+		if shutil.which('m4b-tool'):
+			m4b_tool_bin = shutil.which('m4b-tool')
+		else:
+			raise SystemExit(
+				'Error: Cannot find m4b-tool binary.'
+				)
+	# If no response from binary, exit
+	if not m4b_tool_bin:
+		raise SystemExit(
+			'Error: Could not successfully run m4b-tool, exiting.'
+			)
 ###
