@@ -5,18 +5,6 @@ from pydub.utils import mediainfo
 # Local imports
 import audiblehelper, config, helpers
 
-### User editable variables
-# for non-default m4b-tool install path
-m4bpath = "m4b-tool"
-
-# output directory for cleaned metadata/folder structure
-# leaving blank uses /output for docker or $USER/output for anything else
-output = ""
-
-# Number of cpus to use for jobs
-cpus_to_use = ""
-###
-
 def find_extension(dirpath):
 	EXTENSIONS=['mp3', 'm4a', 'm4b']
 
@@ -75,10 +63,10 @@ def get_directory(input_take):
 	logging.debug(f"Number of files: {num_of_files}")
 	return Path(dirpath), USE_EXT, num_of_files
 
-def m4b_data(input_data, metadata, output):
+def m4b_data(input_data, metadata):
 	## Checks
 	# Find path to m4b-tool binary
-	m4b_tool = shutil.which(m4bpath)
+	m4b_tool = shutil.which(config.m4bpath)
 
 	# Check that binary actually exists
 	if not m4b_tool:
@@ -94,31 +82,6 @@ def m4b_data(input_data, metadata, output):
 		raise SystemExit(
 			'Error: Could not successfully run m4b-tool, exiting.'
 			)
-
-	# Setup output folder defaults
-	if not output:
-		# If using docker, default to /output folder, else $USER/output
-		if Path('/output').is_dir():
-			logging.debug("Output is set to docker directory")
-			output = Path('/output')
-		else:
-			logging.debug("Output is set to home directory")
-			default_output = Path.home()
-			output = Path(f"{default_output}/output")
-
-	# If using docker, default to /input/done folder, else $USER/input/done
-	if Path('/input').is_dir():
-		logging.debug("Input/Junk is set to docker directory")
-		junk_dir = Path('/input/done')
-	else:
-		logging.debug("Input/Junk is set to home directory")
-		default_input = Path.home()
-		junk_dir = Path(f"{default_input}/input/done")
-	
-	Path(junk_dir).mkdir(
-		parents=True,
-		exist_ok=True
-	)
 
 	## Metadata variables
 	# Only use subtitle in case of metadata, not file name
@@ -147,7 +110,7 @@ def m4b_data(input_data, metadata, output):
 	year = metadata['release_date'].year
 
 	book_output = (
-		f"{output}/{sanitize_filename(path_author)}/"
+		f"{config.output}/{sanitize_filename(path_author)}/"
 		f"{sanitize_filename(path_title)}"
 	)
 	file_title = sanitize_filename(title)
@@ -159,15 +122,15 @@ def m4b_data(input_data, metadata, output):
 	num_of_files = input_data[2]
 	##
 
-	# Available CPU cores to use
-	if not cpus_to_use:
-		num_cpus = os.cpu_count()
-	else:
-		num_cpus = cpus_to_use
-
 	## Make necessary directories
 	# Final output folder
 	Path(book_output).mkdir(
+		parents=True,
+		exist_ok=True
+	)
+
+	# Folder to move original input into
+	Path(config.junk_dir).mkdir(
 		parents=True,
 		exist_ok=True
 	)
@@ -188,7 +151,7 @@ def m4b_data(input_data, metadata, output):
 		'--force',
 		'--no-chapter-reindexing',
 		'--no-cleanup',
-		f'--jobs={num_cpus}'
+		f'--jobs={config.num_cpus}'
 	]
 
 	# Set logging level of m4b-tool depending upon log_level
@@ -273,7 +236,7 @@ def m4b_data(input_data, metadata, output):
 		# Move obsolete input to processed folder
 		shutil.move(
 			f"{in_dir}",
-			f"{junk_dir}"
+			f"{config.junk_dir}"
 		)
 
 		m4b_fix_chapters(
@@ -340,10 +303,10 @@ def m4b_data(input_data, metadata, output):
 		)
 
 		# Move obsolete input to processed folder
-		if Path(in_dir.parent, 'done') == junk_dir:
+		if Path(in_dir.parent, 'done') == config.junk_dir:
 			logging.debug("Junk dir is direct parent")
 			move_dir = in_dir
-		elif Path(in_dir.parents[1], 'done') == junk_dir:
+		elif Path(in_dir.parents[1], 'done') == config.junk_dir:
 			logging.debug("Junk dir is double parent")
 			move_dir = in_dir.parent
 		else:
@@ -352,7 +315,7 @@ def m4b_data(input_data, metadata, output):
 		if move_dir:
 			shutil.move(
 				f"{move_dir}",
-				f"{junk_dir}"
+				f"{config.junk_dir}"
 			)
 
 		m4b_fix_chapters(
@@ -404,10 +367,10 @@ def m4b_data(input_data, metadata, output):
 		os.system(m4b_cmd)
 
 		# Move obsolete input to processed folder
-		if Path(in_dir.parent, 'done') == junk_dir:
+		if Path(in_dir.parent, 'done') == config.junk_dir:
 			logging.debug("Junk dir is direct parent")
 			move_dir = in_dir
-		elif Path(in_dir.parents[1], 'done') == junk_dir:
+		elif Path(in_dir.parents[1], 'done') == config.junk_dir:
 			logging.debug("Junk dir is double parent")
 			move_dir = in_dir.parent
 		else:
@@ -416,7 +379,7 @@ def m4b_data(input_data, metadata, output):
 		if move_dir:
 			shutil.move(
 				f"{move_dir}",
-				f"{junk_dir}"
+				f"{config.junk_dir}"
 			)
 
 		logging.warning(f"Not processing chapters for  {title}, since it's an mp3")
@@ -464,7 +427,7 @@ def main(inputs):
 	asin = input("Audiobook ASIN: ")
 	aud = audiblehelper.AudibleData(asin)
 	metadata = aud.parser()
-	m4b_data(input_data, metadata, output)
+	m4b_data(input_data, metadata)
 
 # Only run call if using CLI directly
 if __name__ == "__main__":
