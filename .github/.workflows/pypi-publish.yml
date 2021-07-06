@@ -1,28 +1,36 @@
-- name: pypi-publish
+# This workflow will upload a Python Package using Twine when a release is created
+# For more information see: https://help.github.com/en/actions/language-and-framework-guides/using-python-with-github-actions#publishing-to-package-registries
+
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+name: Upload Python Package
 
 on:
-  push:
-    branches:
-    - main
-    - python
-    # Publish semver tags as releases.
-    tags: [ 'v*.*.*' ]
-  pull_request:
-    branches: [ main ]
+  release:
+    types: [published]
 
-  # You may pin to the exact commit or the version.
-  # uses: pypa/gh-action-pypi-publish@27b31702a0e7fc50959f5ad993c78deac1bdfc29
-  uses: pypa/gh-action-pypi-publish@v1.4.2
-  with:
-    user: __token__
-    password: ${{ secrets.PYPI_API_TOKEN }}
-    # The repository URL to use
-    repository_url: # optional
-    # The target directory for distribution
-    packages_dir: # optional, default is dist
-    # Check metadata before uploading
-    verify_metadata: # optional, default is true
-    # Do not fail if a Python package distribution exists in the target package index
-    skip_existing: # optional
-    # Show verbose output.
-    verbose: # optional
+jobs:
+  deploy:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.x'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build
+    - name: Build package
+      run: python -m build
+    - name: Publish package
+      uses: pypa/gh-action-pypi-publish@27b31702a0e7fc50959f5ad993c78deac1bdfc29
+      with:
+        user: __token__
+        password: ${{ secrets.PYPI_API_TOKEN }}
