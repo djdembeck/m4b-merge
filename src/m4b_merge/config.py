@@ -1,5 +1,6 @@
 from pathlib import Path
 import os, shutil
+from appdirs import *
 
 ### User editable variables
 # for non-default m4b-tool install path
@@ -38,12 +39,13 @@ else:
 
 # config section for docker
 if Path('/config').is_dir():
-	dir_path = Path('/config')
+	config_path = Path('/config')
 else:
-	dir_path = Path(f"{Path(__file__).resolve().parent.parent}/config")
-	Path(dir_path).mkdir(
-	parents=True,
-	exist_ok=True
+	appname = "m4b-merge"
+	config_path = Path(user_config_dir(appname))
+	Path(config_path).mkdir(
+		parents=True,
+		exist_ok=True
 	)
 
 	# Find path to m4b-tool binary

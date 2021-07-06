@@ -3,7 +3,7 @@ from pathlib import Path
 from pathvalidate import sanitize_filename
 from pydub.utils import mediainfo
 # Local imports
-import config
+from . import config
 
 class M4bMerge:
 	def __init__(self, input_data, metadata):
@@ -308,6 +308,7 @@ class M4bMerge:
 			move_dir = self.input_path.parent
 		else:
 			logging.warning("Couldn't find junk dir relative to input")
+			move_dir = None
 
 		if move_dir:
 			shutil.move(

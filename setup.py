@@ -1,26 +1,27 @@
-from distutils.core import setup
+import setuptools
 
-with open('README.rst') as f:
-    readme = f.read()
+with open("README.md", "r", encoding="utf-8") as fh:
+    long_description = fh.read()
 
-with open('LICENSE') as f:
-    license = f.read()
-
-setup(
-	name='M4bMerge',
+setuptools.setup(
+	name='m4b-merge',
 	version='0.3.2',
-	packages=['m4bmerge', 'm4bmerge.test'],
 	url='https://github.com/djdembeck/m4b-merge',
-	license=license,
 	description='A tool to standardize audiobook files into single m4b files with clean metadata based on Audible and chapters.',
-	long_description=readme,
-    author='David Dembeck',
+	long_description=long_description,
+    long_description_content_type="text/markdown",
+	author='David Dembeck',
     author_email='dembeck.david@protonmail.com',
-	install_requires=[
-		"html2text>=2020.1.16"
-		"pydub>=0.25.1"
-		"requests>=2.24.0"
-		"pathvalidate>=2.4.1"
-		"audible>=0.5.4"
-	],
+	project_urls={
+        "Bug Tracker": "https://github.com/djdembeck/m4b-merge/issues",
+    },
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "License :: OSI Approved :: GNU GENERAL PUBLIC LICENSE V3 (GPLV3)",
+        "Operating System :: OS Independent",
+    ],
+    package_dir={"": "src"},
+    packages=["m4b_merge"],
+    python_requires=">=3.6",
+    entry_points={'console_scripts': [ 'm4b-merge = m4b_merge.__main__:main' ]}
 )
