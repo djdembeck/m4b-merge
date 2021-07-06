@@ -1,0 +1,20 @@
+::
+
+   usage: m4bmerge/core.py [-h] -i INPUTS [INPUTS ...] [--log_level LOG_LEVEL]
+
+   m4bmerge cli
+
+   optional arguments:
+     -h, --help            show this help message and exit
+     -i INPUTS [INPUTS ...], --inputs INPUTS [INPUTS ...]
+                           Input paths to process
+     --log_level LOG_LEVEL
+                           Set logging level
+
+-  Check the user editable variables in `config.py`_, and see if there’s
+   anything you need to change.
+
+-  On first run, you will be prompted to signin to Audible. This is a
+   one-time process that will be saved to the ``config`` folder.
+
+.. _config.py: m4bmerge/config.py
