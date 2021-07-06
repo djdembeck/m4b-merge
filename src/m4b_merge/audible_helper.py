@@ -2,11 +2,11 @@ from pathlib import Path
 import audible, getpass, html2text, logging
 from datetime import datetime
 # Local imports
-import config
+from . import config
 
 # Authenticates user if already setup or registers the user if not
 class AudibleAuth:
-    auth_file = Path(config.dir_path, ".aud_auth.txt")
+    auth_file = Path(config.config_path, ".aud_auth.txt")
 
     def __init__(self, USERNAME="", PASSWORD=""):
         self.USERNAME = USERNAME

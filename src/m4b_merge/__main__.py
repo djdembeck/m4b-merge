@@ -1,9 +1,9 @@
 from pathlib import Path
 import argparse, collections, logging, os
 # Local imports
-import audible_helper, config, helpers, m4b_helper
+from . import *
 
-def main(inputs):
+def run_all(inputs):
 	logging.info(f"Working on: {inputs}")
 	# Validate path, check if it's a directory or a file
 	# This will also run find_extension to determine relevant filetype
@@ -26,10 +26,7 @@ def main(inputs):
 	m4b = m4b_helper.M4bMerge(input_data, metadata)
 	m4b.run_merge()
 
-# Only run call if using CLI directly
-if __name__ == "__main__":
-	# Setup global variables
-
+def main():
 	parser = argparse.ArgumentParser(
 		description='m4bmerge cli'
 		)
@@ -57,6 +54,10 @@ if __name__ == "__main__":
 	# Run through inputs
 	for inputs in args.inputs:
 		if inputs.exists():
-			main(inputs)
+			run_all(inputs)
 		else:
 			logging.error(f"Input \"{inputs}\" does not exist")
+
+# Only run call if using CLI directly
+if __name__ == "__main__":
+	main()
