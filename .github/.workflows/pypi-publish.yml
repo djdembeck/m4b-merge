@@ -1,0 +1,19 @@
+- name: pypi-publish
+  # You may pin to the exact commit or the version.
+  # uses: pypa/gh-action-pypi-publish@27b31702a0e7fc50959f5ad993c78deac1bdfc29
+  uses: pypa/gh-action-pypi-publish@v1.4.2
+  with:
+    # PyPI user
+    user: # optional, default is __token__
+    # Password for your PyPI user or an access token
+    password: 
+    # The repository URL to use
+    repository_url: # optional
+    # The target directory for distribution
+    packages_dir: # optional, default is dist
+    # Check metadata before uploading
+    verify_metadata: # optional, default is true
+    # Do not fail if a Python package distribution exists in the target package index
+    skip_existing: # optional
+    # Show verbose output.
+    verbose: # optional
