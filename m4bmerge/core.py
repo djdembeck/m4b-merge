@@ -31,7 +31,7 @@ if __name__ == "__main__":
 	# Setup global variables
 
 	parser = argparse.ArgumentParser(
-		description='Bragi Books merge cli'
+		description='m4bmerge cli'
 		)
 	parser.add_argument(
 		"-i", "--inputs",
