@@ -424,7 +424,14 @@ def m4b_fix_chapters(input, target, m4b_tool):
 def main(inputs):
 	logging.info(f"Working on: {inputs}")
 	input_data = get_directory(inputs)
-	asin = input("Audiobook ASIN: ")
+	# Validate ASIN input
+	while True:
+		try:
+			asin = input("Audiobook ASIN: ")
+			helpers.validate_asin(asin)
+			break
+		except Exception as e:
+			print(str(e))
 	aud = audiblehelper.AudibleData(asin)
 	metadata = aud.parser()
 	m4b_data(input_data, metadata)
