@@ -10,11 +10,12 @@ from . import config, helpers
 
 
 class M4bMerge:
-    def __init__(self, input_data, metadata):
+    def __init__(self, input_data, metadata, chapters=None):
         self.input_path = input_data[0]
         self.input_extension = input_data[1]
         self.num_of_files = input_data[2]
         self.metadata = metadata
+        self.chapters = chapters
 
     def prepare_data(self):
         # Metadata variables
@@ -288,23 +289,30 @@ class M4bMerge:
     def fix_chapters(self):
         chapter_file = f"{self.book_output}/{self.file_title}.chapters.txt"
         m4b_to_modify = f"{self.book_output}/{self.file_title}.m4b"
-        new_file_content = ""
-        with open(chapter_file) as f:
-            # Store and then skip past total length section
-            for line in f:
-                if "# total-length" in line.strip():
-                    new_file_content += line.strip() + "\n"
-                    break
-            # Iterate over rest of the file
-            counter = 0
-            for line in f:
-                stripped_line = line.strip()
-                counter += 1
-                new_line = (
-                    (stripped_line[0:13]) +
-                    f'Chapter {"{0:0=2d}".format(counter)}'
-                    )
-                new_file_content += new_line + "\n"
+
+        # Use audible chapters if they exist and this isn't an mp3
+        if self.chapters and self.input_extension != "mp3":
+            logging.info("Using chapter data from Audible")
+            new_file_content = ('\n'.join(self.chapters))
+        # Else fix formatting of existing chapters
+        else:
+            new_file_content = ""
+            with open(chapter_file) as f:
+                # Store and then skip past total length section
+                for line in f:
+                    if "# total-length" in line.strip():
+                        new_file_content += line.strip() + "\n"
+                        break
+                # Iterate over rest of the file
+                counter = 0
+                for line in f:
+                    stripped_line = line.strip()
+                    counter += 1
+                    new_line = (
+                        (stripped_line[0:13]) +
+                        f'Chapter {"{0:0=2d}".format(counter)}'
+                        )
+                    new_file_content += new_line + "\n"
 
         with open(chapter_file, 'w') as f:
             f.write(new_file_content)
