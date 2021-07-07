@@ -34,6 +34,7 @@ def find_extension(path_to_check):
                     x.endswith(f'.{extension_to_use}')
                     for x in list_of_files
                     )
+                path_to_use = path_to_check
             return path_to_use, extension_to_use, num_of_files
 
 

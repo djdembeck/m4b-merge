@@ -172,10 +172,8 @@ class M4bMerge:
                 )
                 args.append("--no-conversion")
             else:
-                args.append(
-                    f"--audio-bitrate=\"{target_bitrate}\"",
-                    f"--audio-samplerate=\"{target_samplerate}\""
-                )
+                args.append(f"--audio-bitrate=\"{target_bitrate}\"")
+                args.append(f"--audio-samplerate=\"{target_samplerate}\"")
 
             # m4b command with passed args
             m4b_cmd = (
