@@ -3,7 +3,7 @@ import audible
 import getpass
 import html2text
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 # Local imports
 from . import config
 
@@ -51,6 +51,52 @@ class BookData:
     def __init__(self, asin):
         self.auth = AudibleAuth()
         self.asin = asin
+
+    # Convert MS to timestamp format hh:mm:ss.ms
+    def ms_to_timestamp(self, input):
+        conversion = timedelta(milliseconds=input)
+
+        return str(conversion)
+
+    def get_chapters(self):
+        self.auth.handle_auth()
+        aud_chapter_json = self.auth.client.get(
+            f"content/{self.asin}/metadata",
+            params={
+                "response_groups": "chapter_info"
+            }
+        )
+        # Select chapter data from json response
+        chapter_info = aud_chapter_json['content_metadata']['chapter_info']
+
+        # Only use Audible chapters if tagged as accurate
+        if chapter_info['is_accurate'] is True:
+            chapter_output = []
+            # Append total runtime to the top of file
+            total_len = self.ms_to_timestamp(chapter_info['runtime_length_ms'])
+            chapter_output.append(
+                (
+                    "# total-length"
+                    f" {total_len}"
+                )
+            )
+
+            # Append each chapter to array
+            for chapter in chapter_info['chapters']:
+                chap_start = self.ms_to_timestamp(chapter['start_offset_ms'])
+                chapter_output.append(
+                    (
+                        f"{chap_start}"
+                        f" {chapter['title']}"
+                    )
+                )
+        else:
+            logging.info(
+                "Not using Audible chapters as they aren't tagged as accurate"
+            )
+            chapter_output = None
+
+        return chapter_output
 
     def parser(self):
         # Login or register as needed

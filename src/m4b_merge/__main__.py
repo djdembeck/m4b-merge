@@ -24,9 +24,10 @@ def run_all(inputs):
     # Create BookData object from asin response
     aud = audible_helper.BookData(asin)
     metadata = aud.parser()
+    chapters = aud.get_chapters()
 
     # Process metadata and run components to merge files
-    m4b = m4b_helper.M4bMerge(input_data, metadata)
+    m4b = m4b_helper.M4bMerge(input_data, metadata, chapters)
     m4b.run_merge()
 
 
