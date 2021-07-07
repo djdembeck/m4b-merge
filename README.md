@@ -10,6 +10,6 @@ optional arguments:
   --log_level LOG_LEVEL
                         Set logging level
 ```
-  - Check the user editable variables in [config.py](m4bmerge/config.py), and see if there's anything you need to change.
+  - Check the user editable variables in [config.py](src/m4b_merge/config.py), and see if there's anything you need to change.
 
   - On first run, you will be prompted to signin to Audible. This is a one-time process that will be saved to the `config` folder.
