@@ -20,11 +20,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
-    - uses: "finnp/create-file-action@master"
-      env:
-        FILE_NAME: "/config/.aud_auth.txt"
-        FILE_DATA: ${{ secrets.AUD_AUTH_FILE }}
-
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v2
       with:
@@ -42,4 +37,6 @@ jobs:
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
     - name: Test with pytest
       run: |
+        mkdir ~/.config/m4b-merge -p
+        echo ${{ secrets.AUD_AUTH_FILE }} > ~/.config/m4b-merge/.aud_auth.txt
         pytest
