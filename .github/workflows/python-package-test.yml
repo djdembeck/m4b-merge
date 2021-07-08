@@ -38,5 +38,5 @@ jobs:
     - name: Test with pytest
       run: |
         mkdir ~/.config/m4b-merge -p
-        echo ${{ secrets.AUD_AUTH_FILE }} > ~/.config/m4b-merge/.aud_auth.txt
+        echo "${{ secrets.AUD_AUTH_FILE }}" > ~/.config/m4b-merge/.aud_auth.txt
         pytest
