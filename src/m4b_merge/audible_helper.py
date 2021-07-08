@@ -55,8 +55,29 @@ class BookData:
     # Convert MS to timestamp format hh:mm:ss.ms
     def ms_to_timestamp(self, input):
         conversion = timedelta(milliseconds=input)
+        # Hacky fix for timedelta showing days past 24hr
+        # Test if we've gone into days
+        if "day" in str(conversion):
+            # Find hour after days string
+            hour = int(str(conversion).split(", ")[1].split(":")[0])
+            # Find int number of days
+            day = int(str(conversion).split(" ")[0])
+            # Add 24 hours for each day
+            real_hours = (hour+(day*24))
+            # Get the rest of the time string based on colon split
+            remainder = str(conversion).split(", ")[1].split(":", 1)[1]
+            timestamp = f"{real_hours}:{remainder}"
+        else:
+            timestamp = str(conversion)
 
-        return str(conversion)
+        # Remove trailing 000 except on opening credits
+        if "." in timestamp:
+            split_timestamp = timestamp.split(".")
+            prefix = split_timestamp[0]
+            suffix = split_timestamp[1].rstrip("000")
+            return prefix + '.' + suffix
+        else:
+            return timestamp
 
     def get_chapters(self):
         self.auth.handle_auth()
