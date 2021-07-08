@@ -37,4 +37,6 @@ jobs:
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
     - name: Test with pytest
       run: |
+        touch /config/.aud_auth.txt
+        echo ${{ secrets.AUD_AUTH_FILE }} > /config/.aud_auth.txt
         pytest
