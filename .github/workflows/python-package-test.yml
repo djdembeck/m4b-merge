@@ -20,6 +20,11 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
+    - uses: "finnp/create-file-action@master"
+      env:
+        FILE_NAME: "/config/.aud_auth.txt"
+        FILE_DATA: ${{ secrets.AUD_AUTH_FILE }}
+
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v2
       with:
@@ -37,7 +42,4 @@ jobs:
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
     - name: Test with pytest
       run: |
-        sudo mkdir /config
-        sudo touch /config/.aud_auth.txt
-        echo ${{ secrets.AUD_AUTH_FILE }} | sudo tee -a /config/.aud_auth.txt
         pytest
