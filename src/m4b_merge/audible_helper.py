@@ -91,7 +91,7 @@ class BookData:
                     )
                 )
         else:
-            logging.info(
+            logging.warning(
                 "Not using Audible chapters as they aren't tagged as accurate"
             )
             chapter_output = None
