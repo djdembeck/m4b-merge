@@ -84,10 +84,14 @@ class BookData:
             # Append each chapter to array
             for chapter in chapter_info['chapters']:
                 chap_start = self.ms_to_timestamp(chapter['start_offset_ms'])
+                if chapter['title'].isnumeric():
+                    chapter_title = f"Chapter {chapter['title']}"
+                else:
+                    chapter_title = chapter['title']
                 chapter_output.append(
                     (
                         f"{chap_start}"
-                        f" {chapter['title']}"
+                        f" {chapter_title}"
                     )
                 )
         else:
