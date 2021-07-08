@@ -108,9 +108,9 @@ class BookData:
                 if chapter['title'].isnumeric():
                     logging.info(
                         f"Changing chapter: {chapter['title']}"
-                        f" -> Chapter {chapter['title']}"
+                        f" -> Chapter {str(int(chapter['title']))}"
                     )
-                    chapter_title = f"Chapter {chapter['title']}"
+                    chapter_title = f"Chapter {str(int(chapter['title']))}"
                 else:
                     chapter_title = chapter['title']
                 chapter_output.append(
