@@ -85,7 +85,10 @@ class BookData:
             for chapter in chapter_info['chapters']:
                 chap_start = self.ms_to_timestamp(chapter['start_offset_ms'])
                 if chapter['title'].isnumeric():
-                    logging.info("Fixing bland chapter names from Audible")
+                    logging.info(
+                        f"Changing chapter: {chapter['title']}"
+                        f" -> Chapter {chapter['title']}"
+                    )
                     chapter_title = f"Chapter {chapter['title']}"
                 else:
                     chapter_title = chapter['title']
