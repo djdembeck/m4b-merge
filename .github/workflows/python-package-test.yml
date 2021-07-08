@@ -39,5 +39,5 @@ jobs:
       run: |
         sudo mkdir /config
         sudo touch /config/.aud_auth.txt
-        sudo echo ${{ secrets.AUD_AUTH_FILE }} > /config/.aud_auth.txt
+        echo ${{ secrets.AUD_AUTH_FILE }} | sudo tee -a /config/.aud_auth.txt
         pytest
