@@ -39,5 +39,7 @@ jobs:
       run: |
         mkdir ~/.config/m4b-merge -p
         touch ~/.config/m4b-merge/.aud_auth.txt
-        echo ${{ secrets.AUD_AUTH_FILE }} | tee -a ~/.config/m4b-merge/.aud_auth.txt
+        cat ~/.config/m4b-merge/.aud_auth.txt << EOF
+        ${{ secrets.AUD_AUTH_FILE }}
+        EOF
         pytest
