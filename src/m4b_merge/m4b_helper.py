@@ -296,6 +296,7 @@ class M4bMerge:
             new_file_content = ('\n'.join(self.chapters))
         # Else fix formatting of existing chapters
         else:
+            logging.info("Using existing chapter data")
             new_file_content = ""
             with open(chapter_file) as f:
                 # Store and then skip past total length section
