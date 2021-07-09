@@ -1,3 +1,4 @@
+import datetime
 from m4b_merge import audible_helper, helpers
 import pytest
 
@@ -58,4 +59,31 @@ class TestChapterData:
         assert chapters[len(chapters) - 1].split(' ')[0] == "55:17:58.186"
 
 
-# TODO: Check the title, author and other data used in m4b_merge.
+class TestMetadata:
+    def audible_data(self, asin):
+        aud = audible_helper.BookData(asin)
+        return aud
+
+    def test_returned_data(self):
+        errors = []
+        metadata = self.audible_data(primary_asin).parser()
+        # Check title
+        if metadata['title'] != "Project Hail Mary":
+            errors.append("Error with title")
+        # Check author
+        if metadata['authors'][0]['name'] != "Andy Weir":
+            errors.append("Error with author")
+        # Check narrator
+        if metadata['narrators'][0] != "Ray Porter":
+            errors.append("Error with narrator")
+        # Check release date object
+        if type(metadata['release_date']) is not datetime.date:
+            errors.append("Error with release date")
+        # Check publisher name
+        if metadata['publisher_name'] != "Audible Studios":
+            errors.append("Error with publisher")
+        # Check language
+        if metadata['language'] != "english":
+            errors.append("Error with language")
+        # Assert no errors come back
+        assert not errors, "Errors occured:\n{}".format("\n".join(errors))
