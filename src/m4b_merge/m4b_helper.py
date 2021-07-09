@@ -272,9 +272,7 @@ class M4bMerge:
 
             self.move_completed_input()
 
-            logging.warning(
-                f"Not processing chapters for"
-                f" {self.file_title}, since it's an mp3")
+            self.fix_chapters()
 
         elif not self.input_extension:
             logging.error(
@@ -293,6 +291,9 @@ class M4bMerge:
         # Use audible chapters if they exist and this isn't an mp3
         if self.chapters and self.input_extension != "mp3":
             logging.info("Using chapter data from Audible")
+            new_file_content = ('\n'.join(self.chapters))
+        elif self.num_of_files == 1 and self.input_extension == "mp3":
+            logging.info("Using chapter data from Audible on single mp3")
             new_file_content = ('\n'.join(self.chapters))
         # Else fix formatting of existing chapters
         else:

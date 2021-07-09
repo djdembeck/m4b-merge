@@ -64,7 +64,7 @@ def main():
             logging.error(f"Input \"{inputs}\" does not exist")
 
     print('-' * 25)
-    print(f"Done processing {len(inputs)} inputs")
+    print(f"Done processing {len(args.inputs)} inputs")
     print('-' * 25)
 
 
