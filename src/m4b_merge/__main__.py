@@ -63,6 +63,10 @@ def main():
         else:
             logging.error(f"Input \"{inputs}\" does not exist")
 
+    print('-' * 25)
+    print(f"Done processing {len(args.inputs)} inputs")
+    print('-' * 25)
+
 
 # Only run call if using CLI directly
 if __name__ == "__main__":

@@ -105,14 +105,23 @@ class BookData:
             # Append each chapter to array
             for chapter in chapter_info['chapters']:
                 chap_start = self.ms_to_timestamp(chapter['start_offset_ms'])
-                if chapter['title'].isnumeric():
+                # Starting chapter title data
+                original_title = chapter['title']
+                # Check if chapter title is purely numbers
+                if original_title.rstrip('.').isnumeric():
+                    # Remove trailing period in some cases
+                    strip_period = original_title.rstrip('.')
+                    # Convert to int to normalize numbers
+                    int_title = int(strip_period)
+                    # Convert back to string for file use
+                    str_title = str(int_title)
                     logging.info(
-                        f"Changing chapter: {chapter['title']}"
-                        f" -> Chapter {chapter['title']}"
+                        f"Changing chapter: {original_title}"
+                        f" -> Chapter {str_title}"
                     )
-                    chapter_title = f"Chapter {chapter['title']}"
+                    chapter_title = f"Chapter {str_title}"
                 else:
-                    chapter_title = chapter['title']
+                    chapter_title = original_title
                 chapter_output.append(
                     (
                         f"{chap_start}"
