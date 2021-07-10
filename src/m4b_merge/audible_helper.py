@@ -107,10 +107,11 @@ class BookData:
                 chap_start = self.ms_to_timestamp(chapter['start_offset_ms'])
                 # Starting chapter title data
                 original_title = chapter['title']
+                stripped_title = original_title.rstrip('.')
                 # Check if chapter title is purely numbers
-                if original_title.rstrip('.').isnumeric():
+                if stripped_title.isnumeric() and len(stripped_title) < 3:
                     # Remove trailing period in some cases
-                    strip_period = original_title.rstrip('.')
+                    strip_period = stripped_title
                     # Convert to int to normalize numbers
                     int_title = int(strip_period)
                     # Convert back to string for file use
