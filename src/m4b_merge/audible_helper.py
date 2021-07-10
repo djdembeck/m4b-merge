@@ -146,7 +146,8 @@ class BookData:
                     "contributors,"
                     "product_desc,"
                     "product_extended_attrs,"
-                    "product_attrs"),
+                    "product_attrs,"
+                    "media"),
                 "asins": self.asin
             }
         )
@@ -280,6 +281,13 @@ class BookData:
         if 'format_type' in aud_json['product']:
             metadata_dict['format_type'] = (
                 aud_json['product']['format_type'])
+
+        # Cover image
+        if 'product_images' in aud_json['product']:
+            metadata_dict['cover_image'] = (
+                aud_json['product']['product_images']['500']
+                .replace('_SL500_', '')
+            )
 
         # return all data
         return metadata_dict

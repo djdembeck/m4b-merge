@@ -7,7 +7,9 @@ from . import audible_helper, helpers, m4b_helper
 
 
 def run_all(inputs):
-    logging.info(f"Working on: {inputs}")
+    print('-' * 50)
+    print(f"Working on: {inputs}")
+    print('-' * 50)
     # Validate path, check if it's a directory or a file
     # This will also run find_extension to determine relevant filetype
     input_data = helpers.get_directory(inputs)
