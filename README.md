@@ -1,3 +1,9 @@
+![PyPI](https://img.shields.io/pypi/v/m4b-merge)
+![GitHub](https://img.shields.io/github/license/djdembeck/m4b-merge)
+![PyPI - Python Version](https://img.shields.io/pypi/pyversions/m4b-merge?style=flat)
+[![Python package](https://github.com/djdembeck/m4b-merge/actions/workflows/build.yml/badge.svg)](https://github.com/djdembeck/m4b-merge/actions/workflows/python-package-test.yml)
+![CodeFactor Grade](https://img.shields.io/codefactor/grade/github/djdembeck/m4b-merge)
+![PyPI - Downloads](https://img.shields.io/pypi/dm/m4b-merge)
 ## Functionality
 The steps accomplished by using this tool are as follows:
 
@@ -52,3 +58,6 @@ The `parser` function in `audible_helper.BookData` returns some extra data not u
 - Language
 - Runtime in minutes
 - Format type (abridged, unabridged, other)
+
+## Credits
+- Uses the [audible](https://github.com/mkb79/Audible) package.
