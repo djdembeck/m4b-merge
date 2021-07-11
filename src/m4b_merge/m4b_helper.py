@@ -1,6 +1,7 @@
 import logging
 import math
 import os
+import requests
 import shutil
 from pathlib import Path
 from pathvalidate import sanitize_filename
@@ -16,6 +17,22 @@ class M4bMerge:
         self.num_of_files = input_data[2]
         self.metadata = metadata
         self.chapters = chapters
+
+    def download_cover(self):
+        if 'cover_image' in self.metadata:
+            # Request to image URL
+            cover_request = requests.get(self.metadata['cover_image'])
+            # Verify image exists
+            if cover_request.status_code == 200:
+                # Path to write image to
+                self.cover_path = f"{self.input_path}_cover.jpg"
+                # Write image
+                with open(self.cover_path, 'wb') as f:
+                    f.write(cover_request.content)
+            else:
+                logging.error("Couldn't download Audible cover")
+        else:
+            logging.warning("No cover image available from Audible")
 
     def prepare_data(self):
         # Metadata variables
@@ -48,6 +65,9 @@ class M4bMerge:
             f"{sanitize_filename(path_title)}"
         )
         self.file_title = sanitize_filename(title)
+
+        # Download cover image
+        self.download_cover()
         ##
 
         # Make necessary directories
@@ -77,6 +97,9 @@ class M4bMerge:
         # Append series to metadata if it exists
         if series:
             self.metadata_args.append(f"--series=\"{series}\"")
+
+        if self.cover_path:
+            self.metadata_args.append(f"--cover=\"{self.cover_path}\"")
 
         # args for merge  process
         self.processing_args = [
@@ -255,7 +278,6 @@ class M4bMerge:
                 f"--output-file=\"{self.book_output}/{self.file_title}.m4b\"",
                 f"--audio-bitrate=\"{target_bitrate}\"",
                 f"--audio-samplerate=\"{target_samplerate}\"",
-                '--skip-cover'
             ]
             # Add in main metadata and merge args
             args.extend(self.metadata_args)
@@ -329,6 +351,9 @@ class M4bMerge:
         os.system(m4b_chap_cmd)
 
     def move_completed_input(self):
+        # Cleanup cover file
+        if self.cover_path:
+            os.remove(self.cover_path)
         # Move obsolete input to processed folder
         if Path(self.input_path.parent, 'done') == config.junk_dir:
             logging.debug("Junk dir is direct parent")

@@ -107,10 +107,11 @@ class BookData:
                 chap_start = self.ms_to_timestamp(chapter['start_offset_ms'])
                 # Starting chapter title data
                 original_title = chapter['title']
+                stripped_title = original_title.rstrip('.')
                 # Check if chapter title is purely numbers
-                if original_title.rstrip('.').isnumeric():
+                if stripped_title.isnumeric() and len(stripped_title) < 3:
                     # Remove trailing period in some cases
-                    strip_period = original_title.rstrip('.')
+                    strip_period = stripped_title
                     # Convert to int to normalize numbers
                     int_title = int(strip_period)
                     # Convert back to string for file use
@@ -146,7 +147,8 @@ class BookData:
                     "contributors,"
                     "product_desc,"
                     "product_extended_attrs,"
-                    "product_attrs"),
+                    "product_attrs,"
+                    "media"),
                 "asins": self.asin
             }
         )
@@ -280,6 +282,13 @@ class BookData:
         if 'format_type' in aud_json['product']:
             metadata_dict['format_type'] = (
                 aud_json['product']['format_type'])
+
+        # Cover image
+        if 'product_images' in aud_json['product']:
+            metadata_dict['cover_image'] = (
+                aud_json['product']['product_images']['500']
+                .replace('_SL500_', '')
+            )
 
         # return all data
         return metadata_dict
