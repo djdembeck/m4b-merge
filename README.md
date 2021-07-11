@@ -1,7 +1,7 @@
 ![PyPI](https://img.shields.io/pypi/v/m4b-merge)
 ![GitHub](https://img.shields.io/github/license/djdembeck/m4b-merge)
 ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/m4b-merge?style=flat)
-[![Python package](https://github.com/djdembeck/m4b-merge/actions/workflows/build.yml/badge.svg)](https://github.com/djdembeck/m4b-merge/actions/workflows/python-package-test.yml)
+[![Python package](https://github.com/djdembeck/m4b-merge/actions/workflows/build.yml/badge.svg)](https://github.com/djdembeck/m4b-merge/actions/workflows/build.yml)
 ![CodeFactor Grade](https://img.shields.io/codefactor/grade/github/djdembeck/m4b-merge)
 ![PyPI - Downloads](https://img.shields.io/pypi/dm/m4b-merge)
 ## Functionality
