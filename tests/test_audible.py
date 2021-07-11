@@ -85,5 +85,7 @@ class TestMetadata:
         # Check language
         if metadata['language'] != "english":
             errors.append("Error with language")
+        if not metadata['cover_image']:
+            errors.append("No cover image found")
         # Assert no errors come back
         assert not errors, "Errors occured:\n{}".format("\n".join(errors))
