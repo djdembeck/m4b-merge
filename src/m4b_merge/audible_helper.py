@@ -207,7 +207,7 @@ class BookData:
                 else:
                     aud_authors_arr.append(
                         {
-                            'name': author[author]['name']
+                            'name': author['name']
                         }
                     )
             metadata_dict['authors'] = aud_authors_arr
