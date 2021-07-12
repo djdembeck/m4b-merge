@@ -53,8 +53,8 @@ class BookData:
         self.asin = asin
 
     # Convert MS to timestamp format hh:mm:ss.ms
-    def ms_to_timestamp(self, input):
-        conversion = timedelta(milliseconds=input)
+    def ms_to_timestamp(self, input_duration):
+        conversion = timedelta(milliseconds=input_duration)
         # Hacky fix for timedelta showing days past 24hr
         # Test if we've gone into days
         if "day" in str(conversion):
@@ -76,8 +76,7 @@ class BookData:
             prefix = split_timestamp[0]
             suffix = split_timestamp[1].rstrip("000")
             return prefix + '.' + suffix
-        else:
-            return timestamp
+        return timestamp
 
     def get_chapters(self):
         self.auth.handle_auth()
@@ -195,20 +194,20 @@ class BookData:
         # check if list contains more than 1 author
         if len(aud_authors_json) > 1:
             aud_authors_arr = []
-            for author in range(len(aud_authors_json)):
+            for author in aud_authors_json:
                 # Use ASIN for author only if available
-                if aud_authors_json[author].get('asin'):
+                if author['asin']:
                     # from array of dicts, get author name
                     aud_authors_arr.append(
                         {
-                            'asin': aud_authors_json[author]['asin'],
-                            'name': aud_authors_json[author]['name']
+                            'asin': author['asin'],
+                            'name': author['name']
                         }
                     )
                 else:
                     aud_authors_arr.append(
                         {
-                            'name': aud_authors_json[author]['name']
+                            'name': author['name']
                         }
                     )
             metadata_dict['authors'] = aud_authors_arr
@@ -236,10 +235,10 @@ class BookData:
         # check if list contains more than 1 narrator
         if len(aud_narrators_json) > 1:
             aud_narrators_arr = []
-            for narrator in range(len(aud_narrators_json)):
+            for narrator in aud_narrators_json:
                 # from array of dicts, get narrator name
                 aud_narrators_arr.append(
-                    aud_narrators_json[narrator]['name']
+                    narrator['name']
                 )
             metadata_dict['narrators'] = aud_narrators_arr
         else:
