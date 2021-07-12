@@ -141,152 +141,157 @@ class M4bMerge:
         # Prepare metadata commands
         self.prepare_data()
 
-        # args for multiple input files in a folder
+        # Handle multiple input files in a folder
         if ((self.input_path.is_dir() and self.num_of_files > 1)
                 or self.input_extension is None):
-            logging.info("Processing multiple files in a dir...")
-
-            # If multi-disc, find the extension
-            if not self.input_extension:
-                input_path_glob = Path(self.input_path).glob('**/*')
-                i = 0
-                sorted_multi = sorted(input_path_glob)
-                while not sorted_multi[i].is_dir():
-                    logging.debug("Looking for first dir in multi-dir...")
-                    i += 1
-                selected_input = sorted_multi[i]
-                logging.debug(
-                    f"Result was #{i+1} for first dir: {selected_input}"
-                )
-                self.input_extension = helpers.find_extension(
-                    selected_input)[1]
-                logging.debug(
-                    (f"Guessed multi-disc extension to be:"
-                        f" {self.input_extension}")
-                )
-            else:
-                selected_input = self.input_path
-
-            selected_input_glob = Path(selected_input).glob('**/*')
-
-            # Find first file with our extension, to check rates against
-            for file in sorted(selected_input_glob):
-                if file.suffix == f".{self.input_extension}":
-                    first_file = file
-                    break
-
-            logging.debug(f"Got file to run mediainfo on: {first_file}")
-
-            # Mediainfo data
-            target_bitrate = self.find_bitrate(first_file)
-            target_samplerate = self.find_samplerate(first_file)
-            ##
-
-            args = [
-                config.m4b_tool_bin,
-                'merge',
-                f"--output-file={self.book_output}/{self.file_title}.m4b"
-            ]
-
-            # Add in main metadata and merge args
-            args.extend(self.metadata_args)
-            args.extend(self.processing_args)
-
-            if self.input_extension == "m4b" or self.input_extension == "m4a":
-                logging.info(
-                    f"Multiple {self.input_extension} files, not converting"
-                )
-                args.append("--no-conversion")
-            else:
-                args.append(f"--audio-bitrate={target_bitrate}")
-                args.append(f"--audio-samplerate={target_samplerate}")
-
-            # Append input path
-            args.append(self.input_path)
-
-            # m4b command with passed args
-            logging.debug(f"M4B command: {args}")
-            subprocess.call(args, shell=False)
-
-            # Move obsolete input to processed folder
-            self.move_completed_input()
-
-            self.fix_chapters()
-
-        # args for single m4b input file
+            self.merge_multiple_files()
+        # Handle single m4b or m4a input file
         elif ((self.input_path.is_file()) and
                 (self.input_extension == "m4b" or
                     self.input_extension == "m4a")):
-            logging.info(f"Processing single {self.input_extension} input...")
-
-            args = [
-                config.m4b_tool_bin,
-                'meta',
-                (f"{self.input_path.parent}/"
-                    f"{self.input_path.stem}.new.m4b")
-            ]
-            # Add in main metadata args
-            args.extend(self.metadata_args)
-
-            # make backup file
-            shutil.copy(
-                self.input_path,
-                f"{self.input_path.parent}/{self.input_path.stem}.new.m4b"
-                )
-
-            # m4b command with passed args
-            logging.debug(f"M4B command: {args}")
-            subprocess.call(args, shell=False)
-
-            # Move completed file
-            shutil.move(
-                f"{self.input_path.parent}/{self.input_path.stem}.new.m4b",
-                f"{self.book_output}/{self.file_title}.m4b"
-            )
-
-            self.move_completed_input()
-
-            self.fix_chapters()
-
+            self.merge_single_aac()
+        # Handle single mp3 input file
         elif self.input_path.is_file() and self.input_extension == "mp3":
-            logging.info(f"Processing single {self.input_extension} input...")
-
-            # Mediainfo data
-            target_bitrate = self.find_bitrate(self.input_path)
-            target_samplerate = self.find_samplerate(self.input_path)
-            ##
-
-            args = [
-                config.m4b_tool_bin,
-                'merge',
-                f"--output-file={self.book_output}/{self.file_title}.m4b",
-                f"--audio-bitrate={target_bitrate}",
-                f"--audio-samplerate={target_samplerate}"
-            ]
-            # Add in main metadata and merge args
-            args.extend(self.metadata_args)
-            args.extend(self.processing_args)
-
-            # Append input path
-            args.append(self.input_path)
-
-            # m4b command with passed args
-            logging.debug(f"M4B command: {args}")
-            subprocess.call(args, shell=False)
-
-            self.move_completed_input()
-
-            self.fix_chapters()
-
-        elif not self.input_extension:
-            logging.error(
-                f"No recognized filetypes found for"
-                f" {self.file_title}")
-
+            self.merge_single_mp3()
+        # If none of the above are true, log error
         else:
             logging.error(
                 f"Couldn't determine input type/extension for"
                 f" {self.file_title}")
+
+    def merge_multiple_files(self):
+        logging.info("Processing multiple files in a dir...")
+
+        # If multi-disc, find the extension
+        if not self.input_extension:
+            input_path_glob = Path(self.input_path).glob('**/*')
+            i = 0
+            sorted_multi = sorted(input_path_glob)
+            while not sorted_multi[i].is_dir():
+                logging.debug("Looking for first dir in multi-dir...")
+                i += 1
+            selected_input = sorted_multi[i]
+            logging.debug(
+                f"Result was #{i+1} for first dir: {selected_input}"
+            )
+            self.input_extension = helpers.find_extension(
+                selected_input)[1]
+            logging.debug(
+                (f"Guessed multi-disc extension to be:"
+                    f" {self.input_extension}")
+            )
+        else:
+            selected_input = self.input_path
+
+        selected_input_glob = Path(selected_input).glob('**/*')
+
+        # Find first file with our extension, to check rates against
+        for file in sorted(selected_input_glob):
+            if file.suffix == f".{self.input_extension}":
+                first_file = file
+                break
+
+        logging.debug(f"Got file to run mediainfo on: {first_file}")
+
+        # Mediainfo data
+        target_bitrate = self.find_bitrate(first_file)
+        target_samplerate = self.find_samplerate(first_file)
+        ##
+
+        args = [
+            config.m4b_tool_bin,
+            'merge',
+            f"--output-file={self.book_output}/{self.file_title}.m4b"
+        ]
+
+        # Add in main metadata and merge args
+        args.extend(self.metadata_args)
+        args.extend(self.processing_args)
+
+        if self.input_extension == "m4b" or self.input_extension == "m4a":
+            logging.info(
+                f"Multiple {self.input_extension} files, not converting"
+            )
+            args.append("--no-conversion")
+        else:
+            args.append(f"--audio-bitrate={target_bitrate}")
+            args.append(f"--audio-samplerate={target_samplerate}")
+
+        # Append input path
+        args.append(self.input_path)
+
+        # m4b command with passed args
+        logging.debug(f"M4B command: {args}")
+        subprocess.call(args, shell=False)
+
+        # Move obsolete input to processed folder
+        self.move_completed_input()
+        # Process chapters
+        self.fix_chapters()
+
+    def merge_single_aac(self):
+        logging.info(f"Processing single {self.input_extension} input...")
+
+        args = [
+            config.m4b_tool_bin,
+            'meta',
+            (f"{self.input_path.parent}/"
+                f"{self.input_path.stem}.new.m4b")
+        ]
+        # Add in main metadata args
+        args.extend(self.metadata_args)
+
+        # make backup file
+        shutil.copy(
+            self.input_path,
+            f"{self.input_path.parent}/{self.input_path.stem}.new.m4b"
+            )
+
+        # m4b command with passed args
+        logging.debug(f"M4B command: {args}")
+        subprocess.call(args, shell=False)
+
+        # Move completed file
+        shutil.move(
+            f"{self.input_path.parent}/{self.input_path.stem}.new.m4b",
+            f"{self.book_output}/{self.file_title}.m4b"
+        )
+
+        # Move obsolete input to processed folder
+        self.move_completed_input()
+        # Process chapters
+        self.fix_chapters()
+
+    def merge_single_mp3(self):
+        logging.info(f"Processing single {self.input_extension} input...")
+
+        # Mediainfo data
+        target_bitrate = self.find_bitrate(self.input_path)
+        target_samplerate = self.find_samplerate(self.input_path)
+        ##
+
+        args = [
+            config.m4b_tool_bin,
+            'merge',
+            f"--output-file={self.book_output}/{self.file_title}.m4b",
+            f"--audio-bitrate={target_bitrate}",
+            f"--audio-samplerate={target_samplerate}"
+        ]
+        # Add in main metadata and merge args
+        args.extend(self.metadata_args)
+        args.extend(self.processing_args)
+
+        # Append input path
+        args.append(self.input_path)
+
+        # m4b command with passed args
+        logging.debug(f"M4B command: {args}")
+        subprocess.call(args, shell=False)
+
+        # Move obsolete input to processed folder
+        self.move_completed_input()
+        # Process chapters
+        self.fix_chapters()
 
     def fix_chapters(self):
         chapter_file = f"{self.book_output}/{self.file_title}.chapters.txt"
