@@ -82,7 +82,7 @@ def create_blank_audio():
         '58253',
         '-i',
         'anullsrc=cl=stereo:r=44100',
-        'test.m4b'
+        test_path
     ]
     if not test_path.exists():
         subprocess.run(ffmpegargs, stdout=subprocess.PIPE)
