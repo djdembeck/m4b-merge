@@ -3,6 +3,7 @@ import math
 import os
 import requests
 import shutil
+import subprocess
 from pathlib import Path
 from pathvalidate import sanitize_filename
 from pydub.utils import mediainfo
@@ -86,20 +87,20 @@ class M4bMerge:
         # Array for argument use
         # main metadata args
         self.metadata_args = [
-            f"--name=\"{title}\"",
-            f"--album=\"{path_title}\"",
-            f"--artist=\"{narrator}\"",
-            f"--albumartist=\"{author}\"",
-            f"--year=\"{year}\"",
-            f"--description=\"{summary}\""
+            f"--name={title}",
+            f"--album={path_title}",
+            f"--artist={narrator}",
+            f"--albumartist={author}",
+            f"--year={year}",
+            f"--description={summary}"
         ]
 
         # Append series to metadata if it exists
         if series:
-            self.metadata_args.append(f"--series=\"{series}\"")
+            self.metadata_args.append(f"--series={series}")
 
         if self.cover_path:
-            self.metadata_args.append(f"--cover=\"{self.cover_path}\"")
+            self.metadata_args.append(f"--cover={self.cover_path}")
 
         # args for merge  process
         self.processing_args = [
@@ -182,8 +183,9 @@ class M4bMerge:
             ##
 
             args = [
-                ' merge',
-                f"--output-file=\"{self.book_output}/{self.file_title}.m4b\""
+                config.m4b_tool_bin,
+                'merge',
+                f"--output-file={self.book_output}/{self.file_title}.m4b"
             ]
 
             # Add in main metadata and merge args
@@ -196,17 +198,15 @@ class M4bMerge:
                 )
                 args.append("--no-conversion")
             else:
-                args.append(f"--audio-bitrate=\"{target_bitrate}\"")
-                args.append(f"--audio-samplerate=\"{target_samplerate}\"")
+                args.append(f"--audio-bitrate={target_bitrate}")
+                args.append(f"--audio-samplerate={target_samplerate}")
+
+            # Append input path
+            args.append(self.input_path)
 
             # m4b command with passed args
-            m4b_cmd = (
-                config.m4b_tool_bin +
-                ' '.join(args) +
-                f" \"{self.input_path}\""
-            )
-            logging.debug(f"M4B command: {m4b_cmd}")
-            os.system(m4b_cmd)
+            logging.debug(f"M4B command: {args}")
+            subprocess.call(args, shell=False)
 
             # Move obsolete input to processed folder
             self.move_completed_input()
@@ -219,23 +219,11 @@ class M4bMerge:
                     self.input_extension == "m4a")):
             logging.info(f"Processing single {self.input_extension} input...")
 
-            m4b_cmd = (
-                config.m4b_tool_bin +
-                ' meta ' +
-                '--export-chapters=\"\"' +
-                f" \"{self.input_path}\""
-            )
-            logging.debug(f"M4B command: {m4b_cmd}")
-            os.system(m4b_cmd)
-
-            shutil.move(
-                (f"{self.input_path.parent}/"
-                    f"{self.input_path.stem}.chapters.txt"),
-                f"{self.book_output}/{self.file_title}.chapters.txt"
-                )
-
             args = [
-                ' meta'
+                config.m4b_tool_bin,
+                'meta',
+                (f"{self.input_path.parent}/"
+                    f"{self.input_path.stem}.new.m4b")
             ]
             # Add in main metadata args
             args.extend(self.metadata_args)
@@ -247,13 +235,8 @@ class M4bMerge:
                 )
 
             # m4b command with passed args
-            m4b_cmd = (
-                config.m4b_tool_bin +
-                ' '.join(args) +
-                (f" \"{self.input_path.parent}/"
-                    f"{self.input_path.stem}.new.m4b\""))
-            logging.debug(f"M4B command: {m4b_cmd}")
-            os.system(m4b_cmd)
+            logging.debug(f"M4B command: {args}")
+            subprocess.call(args, shell=False)
 
             # Move completed file
             shutil.move(
@@ -274,23 +257,22 @@ class M4bMerge:
             ##
 
             args = [
-                ' merge',
-                f"--output-file=\"{self.book_output}/{self.file_title}.m4b\"",
-                f"--audio-bitrate=\"{target_bitrate}\"",
-                f"--audio-samplerate=\"{target_samplerate}\"",
+                config.m4b_tool_bin,
+                'merge',
+                f"--output-file={self.book_output}/{self.file_title}.m4b",
+                f"--audio-bitrate={target_bitrate}",
+                f"--audio-samplerate={target_samplerate}"
             ]
             # Add in main metadata and merge args
             args.extend(self.metadata_args)
             args.extend(self.processing_args)
 
+            # Append input path
+            args.append(self.input_path)
+
             # m4b command with passed args
-            m4b_cmd = (
-                config.m4b_tool_bin +
-                ' '.join(args) +
-                f" \"{self.input_path}\""
-            )
-            logging.debug(f"M4B command: {m4b_cmd}")
-            os.system(m4b_cmd)
+            logging.debug(f"M4B command: {args}")
+            subprocess.call(args, shell=False)
 
             self.move_completed_input()
 
@@ -342,13 +324,13 @@ class M4bMerge:
             f.write(new_file_content)
 
         # Apply fixed chapters to file
-        m4b_chap_cmd = (
-            config.m4b_tool_bin +
-            ' meta ' +
-            f" \"{m4b_to_modify}\" " +
-            f"--import-chapters=\"{chapter_file}\""
-            )
-        os.system(m4b_chap_cmd)
+        args = [
+            config.m4b_tool_bin,
+            'meta',
+            m4b_to_modify,
+            f"--import-chapters={chapter_file}"
+        ]
+        subprocess.call(args, shell=False)
 
     def move_completed_input(self):
         # Cleanup cover file
