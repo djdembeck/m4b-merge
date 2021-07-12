@@ -77,7 +77,7 @@ class TestMetadata:
         if metadata['narrators'][0] != "Ray Porter":
             errors.append("Error with narrator")
         # Check release date object
-        if type(metadata['release_date']) is not datetime.date:
+        if not isinstance(metadata['release_date'], datetime.date):
             errors.append("Error with release date")
         # Check publisher name
         if metadata['publisher_name'] != "Audible Studios":
