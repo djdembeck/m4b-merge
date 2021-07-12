@@ -81,6 +81,7 @@ def validate_asin(asin):
             logging.info(f"Validated ASIN: {asin}")
         else:
             raise ValueError(f"HTTP error {check.status_code}")
+
         return check.status_code
-    else:
-        raise ValueError("Invalid ASIN length")
+
+    raise ValueError("Invalid ASIN length")
