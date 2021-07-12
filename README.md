@@ -1,9 +1,9 @@
-![PyPI](https://img.shields.io/pypi/v/m4b-merge)
-![GitHub](https://img.shields.io/github/license/djdembeck/m4b-merge)
+[![PyPI](https://img.shields.io/pypi/v/m4b-merge)](https://pypi.org/project/m4b-merge/)
+[![GitHub](https://img.shields.io/github/license/djdembeck/m4b-merge)](https://github.com/djdembeck/m4b-merge/blob/develop/LICENSE)
 ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/m4b-merge?style=flat)
 [![Python package](https://github.com/djdembeck/m4b-merge/actions/workflows/build.yml/badge.svg)](https://github.com/djdembeck/m4b-merge/actions/workflows/build.yml)
-![CodeFactor Grade](https://img.shields.io/codefactor/grade/github/djdembeck/m4b-merge)
-![PyPI - Downloads](https://img.shields.io/pypi/dm/m4b-merge)
+[![CodeFactor Grade](https://img.shields.io/codefactor/grade/github/djdembeck/m4b-merge)](https://www.codefactor.io/repository/github/djdembeck/m4b-merge)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/m4b-merge)](https://pypi.org/project/m4b-merge/)
 ## Functionality
 The steps accomplished by using this tool are as follows:
 
