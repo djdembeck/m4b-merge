@@ -29,6 +29,12 @@ jobs:
         python -m pip install --upgrade pip
         python -m pip install flake8 pytest
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        sudo apt install ffmpeg wget mp4v2-utils fdkaac php-cli php-intl php-json php-mbstring php-xml
+        M4B_TOOL_PRE_RELEASE_LINK=$(wget -q -O - https://github.com/sandreas/m4b-tool/releases/tag/latest | grep -o 'M4B_TOOL_DOWNLOAD_LINK=[^ ]*' | head -1 | cut -d '=' -f 2)
+        wget "${M4B_TOOL_PRE_RELEASE_LINK}" -O /tmp/m4b-tool.tar.gz
+        tar xzf /tmp/m4b-tool.tar.gz -C /tmp/ && rm /tmp/m4b-tool.tar.gz
+        mv /tmp/m4b-tool.phar /usr/local/bin/m4b-tool
+        chmod +x /usr/local/bin/m4b-tool
     - name: Lint with flake8
       run: |
         # stop the build if there are Python syntax errors or undefined names
@@ -42,5 +48,4 @@ jobs:
         cat <<'EOF' > ~/.config/m4b-merge/.aud_auth.txt
         ${{ secrets.AUD_AUTH_FILE }}
         EOF
-        sudo apt-get install ffmpeg
         pytest
