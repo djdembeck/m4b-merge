@@ -70,13 +70,16 @@ class BookData:
         else:
             timestamp = str(conversion)
 
-        # Remove trailing 000 except on opening credits
+        # Remove trailing 000 if it makes ms 6 places long
         if "." in timestamp:
             split_timestamp = timestamp.split(".")
             prefix = split_timestamp[0]
-            suffix = split_timestamp[1].rstrip("000")
+            suffix = split_timestamp[1]
+            if len(suffix) > 3:
+                suffix = suffix.rstrip("000")
             return prefix + '.' + suffix
-        return timestamp
+        else:
+            return timestamp + '.' + '000'
 
     def get_chapters(self):
         self.auth.handle_auth()
