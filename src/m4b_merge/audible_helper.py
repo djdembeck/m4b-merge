@@ -78,8 +78,8 @@ class BookData:
             if len(suffix) > 3:
                 suffix = suffix.rstrip("000")
             return prefix + '.' + suffix
-        else:
-            return timestamp + '.' + '000'
+
+        return timestamp + '.' + '000'
 
     def get_chapters(self):
         self.auth.handle_auth()
