@@ -298,11 +298,10 @@ class M4bMerge:
         m4b_to_modify = f"{self.book_output}/{self.file_title}.m4b"
 
         # Use audible chapters if they exist and this isn't an mp3
-        if self.chapters and self.input_extension != "mp3":
+        if (self.chapters and self.input_extension != "mp3") or (
+            self.num_of_files == 1 and self.input_extension == "mp3"
+        ):
             logging.info("Using chapter data from Audible")
-            new_file_content = ('\n'.join(self.chapters))
-        elif self.num_of_files == 1 and self.input_extension == "mp3":
-            logging.info("Using chapter data from Audible on single mp3")
             new_file_content = ('\n'.join(self.chapters))
         # Else fix formatting of existing chapters
         else:
