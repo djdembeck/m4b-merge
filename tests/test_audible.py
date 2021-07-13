@@ -40,7 +40,7 @@ class TestChapterData:
     # Test named chapters returning with timestamp
     def test_chapter_name(self):
         chapters = self.chapters(primary_asin)
-        assert chapters[1] == "0:00:00 Opening Credits"
+        assert chapters[1] == "0:00:00.000 Opening Credits"
 
     def test_chapter_int_with_period(self):
         # Use ASIN that has periods in chapter name

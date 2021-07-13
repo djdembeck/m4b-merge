@@ -50,7 +50,7 @@ class TestMerge:
         m4b.prepare_data()
         m4b.fix_chapters()
         assert (output_chapters.exists() and
-                os.path.getsize(output_chapters) == 790)
+                os.path.getsize(output_chapters) == 794)
 
     def test_bitrate(self):
         m4b = self.m4b_data(primary_asin)
