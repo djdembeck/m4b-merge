@@ -64,4 +64,12 @@ else:
         raise SystemExit(
             'Error: Could not successfully run m4b-tool, exiting.'
             )
+
+    # Test existence of mp4chaps
+    if shutil.which('mp4chaps'):
+        mp4chaps_bin = shutil.which('mp4chaps')
+    else:
+        raise SystemExit(
+            'Error: Cannot find mp4chaps binary.'
+            )
 ###
