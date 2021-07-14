@@ -345,9 +345,9 @@ class M4bMerge:
             args.append('-i')
 
         # Set logging level of m4bchaps depending upon log_level
-        if logging.root.level == (logging.INFO or logging.DEBUG):
+        if logging.root.level == logging.DEBUG:
             args.append('-v')
-        else:
+        elif logging.root.level >= logging.WARNING:
             args.append('-q')
 
         # Apply fixed chapters to file
