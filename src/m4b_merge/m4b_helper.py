@@ -360,16 +360,15 @@ class M4bMerge:
         # Move obsolete input to processed folder
         if Path(self.input_path.parent, 'done') == config.junk_dir:
             logging.debug("Junk dir is direct parent")
-            move_dir = self.input_path
+            move_dir = Path(self.input_path)
         elif Path(self.input_path.parents[1], 'done') == config.junk_dir:
             logging.debug("Junk dir is double parent")
-            move_dir = self.input_path.parent
+            move_dir = Path(self.input_path.parent)
         else:
-            logging.warning("Couldn't find junk dir relative to input")
-            move_dir = None
+            return logging.warning("Couldn't find junk dir relative to input")
 
-        if move_dir:
-            shutil.move(
-                str(Path(move_dir).resolve()),
-                str(Path(config.junk_dir).resolve())
-            )
+        dest = Path(config.junk_dir, move_dir.name)
+        try:
+            move_dir.replace(dest)
+        except OSError:
+            logging.warning("Couldn't move input to complete dir")
