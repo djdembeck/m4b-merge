@@ -330,7 +330,8 @@ class M4bMerge:
         # Apply chapter arguments/command
         args = [
             config.mp4chaps_bin,
-            m4b_to_modify
+            '-z',
+            m4b_to_modify,
         ]
 
         # Check that chapter file is valid
