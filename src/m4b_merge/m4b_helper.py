@@ -327,13 +327,30 @@ class M4bMerge:
         with open(chapter_file, 'w') as f:
             f.write(new_file_content)
 
-        # Apply fixed chapters to file
+        # Apply chapter arguments/command
         args = [
-            config.m4b_tool_bin,
-            'meta',
+            config.mp4chaps_bin,
+            '-z',
             m4b_to_modify,
-            f"--import-chapters={chapter_file}"
         ]
+
+        # Check that chapter file is valid
+        # Generally only an issue because of:
+        # https://github.com/sandreas/m4b-tool/issues/141
+        if os.path.getsize(chapter_file) == 0:
+            logging.error("Chapter file is empty, attempting to correct")
+            args.append('-r')
+        else:
+            logging.info("Applying chapters to m4b...")
+            args.append('-i')
+
+        # Set logging level of m4bchaps depending upon log_level
+        if logging.root.level == logging.DEBUG:
+            args.append('-v')
+        elif logging.root.level >= logging.WARNING:
+            args.append('-q')
+
+        # Apply fixed chapters to file
         subprocess.call(args, shell=False)
 
     def move_completed_input(self):
@@ -343,16 +360,15 @@ class M4bMerge:
         # Move obsolete input to processed folder
         if Path(self.input_path.parent, 'done') == config.junk_dir:
             logging.debug("Junk dir is direct parent")
-            move_dir = self.input_path
+            move_dir = Path(self.input_path)
         elif Path(self.input_path.parents[1], 'done') == config.junk_dir:
             logging.debug("Junk dir is double parent")
-            move_dir = self.input_path.parent
+            move_dir = Path(self.input_path.parent)
         else:
-            logging.warning("Couldn't find junk dir relative to input")
-            move_dir = None
+            return logging.warning("Couldn't find junk dir relative to input")
 
-        if move_dir:
-            shutil.move(
-                f"{move_dir}",
-                f"{config.junk_dir}"
-            )
+        dest = Path(config.junk_dir, move_dir.name)
+        try:
+            move_dir.replace(dest)
+        except OSError:
+            logging.warning("Couldn't move input to complete dir")
