@@ -4,9 +4,6 @@ import shutil
 from appdirs import user_config_dir
 
 # User editable variables
-# for non-default m4b-tool install path
-m4b_tool_bin = "m4b-tool"
-
 # output directory for cleaned metadata/folder structure
 # leaving blank uses /output for docker or $USER/output for anything else
 output = ""
@@ -49,19 +46,18 @@ else:
         exist_ok=True
     )
 
-    # Find path to m4b-tool binary
-    # Check that binary actually exists
-    if not m4b_tool_bin:
-        # try to automatically recover
-        if shutil.which('m4b-tool'):
-            m4b_tool_bin = shutil.which('m4b-tool')
-        else:
-            raise SystemExit(
-                'Error: Cannot find m4b-tool binary.'
-                )
-    # If no response from binary, exit
-    if not m4b_tool_bin:
-        raise SystemExit(
-            'Error: Could not successfully run m4b-tool, exiting.'
-            )
+# Find path to m4b-tool binary
+# Check that binary actually exists
+m4b_tool_bin = shutil.which('m4b-tool')
+if not m4b_tool_bin:
+    raise SystemExit(
+        'Error: Cannot find m4b-tool binary.'
+        )
+
+# Test existence of mp4chaps
+mp4chaps_bin = shutil.which('mp4chaps')
+if not mp4chaps_bin:
+    raise SystemExit(
+        'Error: Cannot find mp4chaps binary.'
+        )
 ###

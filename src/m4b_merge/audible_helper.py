@@ -199,7 +199,7 @@ class BookData:
             aud_authors_arr = []
             for author in aud_authors_json:
                 # Use ASIN for author only if available
-                if author['asin']:
+                if 'asin' in author:
                     # from array of dicts, get author name
                     aud_authors_arr.append(
                         {
