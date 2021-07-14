@@ -327,13 +327,29 @@ class M4bMerge:
         with open(chapter_file, 'w') as f:
             f.write(new_file_content)
 
-        # Apply fixed chapters to file
+        # Apply chapter arguments/command
         args = [
-            config.m4b_tool_bin,
-            'meta',
-            m4b_to_modify,
-            f"--import-chapters={chapter_file}"
+            config.mp4chaps_bin,
+            m4b_to_modify
         ]
+
+        # Check that chapter file is valid
+        # Generally only an issue because of:
+        # https://github.com/sandreas/m4b-tool/issues/141
+        if os.path.getsize(chapter_file) == 0:
+            logging.error("Chapter file is empty, attempting to correct")
+            args.append('-r')
+        else:
+            logging.info("Applying chapters to m4b...")
+            args.append('-i')
+
+        # Set logging level of m4bchaps depending upon log_level
+        if logging.root.level == (logging.INFO or logging.DEBUG):
+            args.append('-v')
+        else:
+            args.append('-q')
+
+        # Apply fixed chapters to file
         subprocess.call(args, shell=False)
 
     def move_completed_input(self):
