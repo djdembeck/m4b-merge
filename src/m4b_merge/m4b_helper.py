@@ -370,6 +370,6 @@ class M4bMerge:
 
         if move_dir:
             shutil.move(
-                f"{move_dir}",
-                f"{config.junk_dir}"
+                str(Path(move_dir).resolve()),
+                str(Path(config.junk_dir).resolve())
             )
