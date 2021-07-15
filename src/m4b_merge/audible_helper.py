@@ -294,3 +294,17 @@ class BookData:
 
         # return all data
         return metadata_dict
+
+    def check_asin_sku(self):
+        # Login or register as needed
+        self.auth.handle_auth()
+        aud_json = self.auth.client.get(
+            f"catalog/products/{self.asin}",
+            params={
+                "response_groups": "sku",
+                "asins": self.asin
+            }
+        )
+        if 'sku' in aud_json['product']:
+            return True
+        return None
