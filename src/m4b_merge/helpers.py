@@ -67,6 +67,11 @@ def get_directory(input_take):
         extension_to_use = Path(extension_to_use_PRE).stem.split('.')[1]
         num_of_files = 1
 
+    # Handle not a file or dir
+    else:
+        logging.error("File not accessible or valid")
+        return None
+
     logging.debug(f"Final input path is: {path_to_use}")
     logging.debug(f"Extension is: {extension_to_use}")
     logging.debug(f"Number of files: {num_of_files}")
