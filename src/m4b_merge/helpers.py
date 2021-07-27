@@ -56,6 +56,9 @@ def get_directory(input_take):
         else:
             for dirpath, dirnames, files in os.walk(input_take):
                 return_find_ext = find_extension(dirpath)
+                # Return error if no supported file extensions
+                if not return_find_ext:
+                    return None
                 path_to_use = return_find_ext[0]
                 extension_to_use = return_find_ext[1]
                 num_of_files = return_find_ext[2]
