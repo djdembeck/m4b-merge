@@ -162,36 +162,7 @@ class M4bMerge:
     def merge_multiple_files(self):
         logging.info("Processing multiple files in a dir...")
 
-        # If multi-disc, find the extension
-        if not self.input_extension:
-            input_path_glob = Path(self.input_path).glob('**/*')
-            i = 0
-            sorted_multi = sorted(input_path_glob)
-            while not sorted_multi[i].is_dir():
-                logging.debug("Looking for first dir in multi-dir...")
-                i += 1
-            selected_input = sorted_multi[i]
-            logging.debug(
-                f"Result was #{i+1} for first dir: {selected_input}"
-            )
-            self.input_extension = helpers.find_extension(
-                selected_input)[1]
-            logging.debug(
-                (f"Guessed multi-disc extension to be:"
-                    f" {self.input_extension}")
-            )
-        else:
-            selected_input = self.input_path
-
-        selected_input_glob = Path(selected_input).glob('**/*')
-
-        # Find first file with our extension, to check rates against
-        for file in sorted(selected_input_glob):
-            if file.suffix == f".{self.input_extension}":
-                first_file = file
-                break
-
-        logging.debug(f"Got file to run mediainfo on: {first_file}")
+        first_file = self.find_file_for_mediainfo()
 
         # Mediainfo data
         target_bitrate = self.find_bitrate(first_file)
@@ -292,6 +263,46 @@ class M4bMerge:
         self.move_completed_input()
         # Process chapters
         self.fix_chapters()
+
+    def find_file_for_mediainfo(self):
+        # If multi-disc, find the extension
+        if not self.input_extension:
+            selected_input = self.find_multi_disc_extension()
+        else:
+            selected_input = self.input_path
+
+        selected_input_glob = Path(selected_input).glob('**/*')
+
+        # Find first file with our extension, to check rates against
+        for file in sorted(selected_input_glob):
+            if file.suffix == f".{self.input_extension}":
+                first_file = file
+                break
+
+        logging.debug(f"Got file to run mediainfo on: {first_file}")
+        return first_file
+
+    def find_multi_disc_extension(self):
+        # Get all directories
+        input_path_glob = Path(self.input_path).glob('**/*')
+        # Find first directory in sort
+        i = 0
+        sorted_multi = sorted(input_path_glob)
+        while not sorted_multi[i].is_dir():
+            logging.debug("Looking for first dir in multi-dir...")
+            i += 1
+        selected_input = sorted_multi[i]
+        logging.debug(
+            f"Result was #{i+1} for first dir: {selected_input}"
+        )
+        # Now that first sorted directory was found, find it's primary ext
+        self.input_extension = helpers.find_extension(
+            selected_input)[1]
+        logging.debug(
+            (f"Guessed multi-disc extension to be:"
+                f" {self.input_extension}")
+        )
+        return selected_input
 
     def fix_chapters(self):
         chapter_file = f"{self.book_output}/{self.file_title}.chapters.txt"
