@@ -1,4 +1,4 @@
-tests/test.m4b
+tests/media_files
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -138,3 +138,4 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+tests/test.mp3
