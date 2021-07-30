@@ -66,7 +66,7 @@ class TestMerge:
         mp3.prepare_data()
         mp3.merge_single_mp3()
         assert (output_path.exists() and
-                os.path.getsize(output_path) == 932048814)
+                os.path.getsize(output_path) == 25321057)
 
     def mp3_data(self, asin):
         input_data = helpers.get_directory(test_path)
@@ -92,4 +92,5 @@ def create_blank_audio():
         test_path
     ]
     if not test_path.exists():
+        print("Generating empty audio file for testing...")
         subprocess.run(ffmpegargs, stdout=subprocess.PIPE)
