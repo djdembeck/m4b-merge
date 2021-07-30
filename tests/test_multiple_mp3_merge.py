@@ -65,7 +65,6 @@ class TestMerge:
     def test_chapter_generation(self):
         mp3 = self.mp3_data(primary_asin)
         mp3.prepare_data()
-        mp3.merge_multiple_files()
         mp3.fix_chapters()
         assert (output_chapters.exists() and
                 os.path.getsize(output_chapters) == 76)
@@ -100,6 +99,7 @@ def create_blank_audio():
     for file in test_files:
         this_path = Path(test_path, file)
         if not this_path.exists():
+            print("Generating empty audio file for testing...")
             ffmpegargs.append(this_path)
             subprocess.run(ffmpegargs, stdout=subprocess.PIPE)
             ffmpegargs.pop()

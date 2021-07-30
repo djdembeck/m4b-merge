@@ -93,4 +93,5 @@ def create_blank_audio():
         test_path
     ]
     if not test_path.exists():
+        print("Generating empty audio file for testing...")
         subprocess.run(ffmpegargs, stdout=subprocess.PIPE)
