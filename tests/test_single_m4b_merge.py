@@ -1,4 +1,3 @@
-# TODO: Test mediainfo
 from m4b_merge import audible_helper, config, m4b_helper, helpers
 import os
 import shutil
