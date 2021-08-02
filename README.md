@@ -22,6 +22,9 @@ Audible data features:
   - Chapters (title and length) used for m4b/m4a inputs.
 
 
+## Dependencies
+This tool uses m4b-merge for it's file processing. Installation instructions can be found on [the project's readme](https://github.com/sandreas/m4b-tool#installation).
+
 ## CLI usage
 
 ```
