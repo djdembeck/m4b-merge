@@ -71,15 +71,16 @@ def main():
     else:
         logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
     # Run through inputs
-    for inputs in args.inputs:
-        if inputs.exists():
-            run_all(inputs)
-        else:
-            logging.error(f"Input \"{inputs}\" does not exist")
+    if args.inputs:
+        for inputs in args.inputs:
+            if inputs.exists():
+                run_all(inputs)
+            else:
+                logging.error(f"Input \"{inputs}\" does not exist")
 
-    print('-' * 25)
-    print(f"Done processing {len(args.inputs)} inputs")
-    print('-' * 25)
+        print('-' * 25)
+        print(f"Done processing {len(args.inputs)} inputs")
+        print('-' * 25)
 
 
 # Only run call if using CLI directly
