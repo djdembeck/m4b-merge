@@ -2,6 +2,7 @@ from pathlib import Path
 import argparse
 import logging
 import os
+import sys
 # Local imports
 from . import audible_helper, helpers, m4b_helper
 
@@ -36,20 +37,31 @@ def run_all(inputs):
 def main():
     parser = argparse.ArgumentParser(
         description='m4bmerge cli'
-        )
+    )
     parser.add_argument(
         "-i", "--inputs",
         help="Input paths to process",
         nargs='+',
-        required=True,
+        required='--login' not in sys.argv,
         type=Path
-        )
+    )
     parser.add_argument(
         "--log_level",
         help="Set logging level"
-        )
+    )
+    parser.add_argument(
+        "--login",
+        default=False,
+        action="store_true",
+        help="Log in to Audible"
+    )
+
     args = parser.parse_args()
 
+    # Run login helper
+    if args.login:
+        aud = audible_helper.AudibleAuth()
+        aud.handle_auth()
     # Get log level from system or input
     if args.log_level:
         numeric_level = getattr(logging, args.log_level.upper(), None)
