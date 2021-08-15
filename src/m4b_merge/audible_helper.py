@@ -2,6 +2,7 @@ from pathlib import Path
 import audible
 import getpass
 import html2text
+import time
 import logging
 from datetime import datetime, timedelta
 # Local imports
@@ -12,9 +13,12 @@ from . import config
 class AudibleAuth:
     auth_file = Path(config.config_path, ".aud_auth.txt")
 
-    def __init__(self, USERNAME="", PASSWORD=""):
+    def __init__(self, USERNAME="", PASSWORD="", OTP=""):
         self.USERNAME = USERNAME
         self.PASSWORD = PASSWORD
+        self.OTP = OTP
+        self.CAPTCHA = ""
+        self.CAPTCHA_GUESS = ""
 
     def handle_auth(self):
         # If auth file doesn't exist, call register
@@ -28,6 +32,29 @@ class AudibleAuth:
         self.auth = audible.Authenticator.from_file(self.auth_file)
         self.client = audible.Client(self.auth)
 
+    def custom_otp_callback(self):
+        logging.warning("Need to enter OTP code")
+        # If coming from console, else use web supplied
+        if not self.OTP:
+            self.OTP = getpass.getpass()
+        return self.OTP
+
+    def custom_captcha_callback(self, captcha_url):
+        logging.warning("Need to enter Captcha response")
+        # If coming from console, else use web supplied
+        if not self.USERNAME:
+            print(captcha_url)
+            self.CAPTCHA_GUESS = audible.LoginAuthenticator.default_captcha_callback(
+                captcha_url
+            )
+        else:
+            self.CAPTCHA = captcha_url
+            print(self.CAPTCHA)
+            while not self.CAPTCHA_GUESS:
+                time.sleep(5)
+            logging.info("Got captcha response from user")
+        return self.CAPTCHA_GUESS
+
     def register(self):
         print("You need to login")
         # Check if we're coming from web or not
@@ -37,6 +64,8 @@ class AudibleAuth:
         auth = audible.Authenticator.from_login(
             self.USERNAME,
             self.PASSWORD,
+            otp_callback=self.custom_otp_callback,
+            captcha_callback=self.custom_captcha_callback,
             locale="us",
             with_username=False,
             register=True
