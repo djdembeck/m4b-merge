@@ -63,4 +63,5 @@ The `parser` function in `audible_helper.BookData` returns some extra data not u
 - Format type (abridged, unabridged, other)
 
 ## Credits
-- Uses the [audible](https://github.com/mkb79/Audible) package.
+- Many thanks to mkb79 for their [audible](https://github.com/mkb79/Audible) package.
+- Thanks to sandreas for their tireless work on [m4b-tool](https://github.com/sandreas/m4b-tool)
