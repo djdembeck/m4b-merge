@@ -12,10 +12,6 @@ from . import config
 class AudibleAuth:
     auth_file = Path(config.config_path, ".aud_auth.txt")
 
-    def __init__(self, USERNAME="", PASSWORD=""):
-        self.USERNAME = USERNAME
-        self.PASSWORD = PASSWORD
-
     def handle_auth(self):
         # If auth file doesn't exist, call register
         if not self.auth_file.exists():
@@ -28,15 +24,23 @@ class AudibleAuth:
         self.auth = audible.Authenticator.from_file(self.auth_file)
         self.client = audible.Client(self.auth)
 
+    def custom_captcha_callback(self, captcha_url):
+        logging.warning(
+            "Open this URL in browser and then type your answer:"
+        )
+        print(captcha_url)
+
+        self.CAPTCHA_GUESS = input("Captcha answer: ")
+        return str(self.CAPTCHA_GUESS).strip().lower()
+
     def register(self):
         print("You need to login")
-        # Check if we're coming from web or not
-        if not self.USERNAME:
-            self.USERNAME = input("Email: ")
-            self.PASSWORD = getpass.getpass()
+        self.USERNAME = input("Email: ")
+        self.PASSWORD = getpass.getpass()
         auth = audible.Authenticator.from_login(
             self.USERNAME,
             self.PASSWORD,
+            captcha_callback=self.custom_captcha_callback,
             locale="us",
             with_username=False,
             register=True
