@@ -24,6 +24,15 @@ class AudibleAuth:
         self.auth = audible.Authenticator.from_file(self.auth_file)
         self.client = audible.Client(self.auth)
 
+    def custom_captcha_callback(self, captcha_url):
+        logging.warning(
+            "Open this URL in browser and then type your answer:"
+        )
+        print(captcha_url)
+
+        self.CAPTCHA_GUESS = input("Captcha answer: ")
+        return str(self.CAPTCHA_GUESS).strip().lower()
+
     def register(self):
         print("You need to login")
         self.USERNAME = input("Email: ")
@@ -31,7 +40,6 @@ class AudibleAuth:
         auth = audible.Authenticator.from_login(
             self.USERNAME,
             self.PASSWORD,
-            otp_callback=self.custom_otp_callback,
             captcha_callback=self.custom_captcha_callback,
             locale="us",
             with_username=False,
