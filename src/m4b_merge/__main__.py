@@ -63,7 +63,7 @@ def main():
         aud = audible_helper.AudibleAuth()
         run_auth = aud.handle_auth()
         if not run_auth:
-            print("Already logged in")
+            print("Logged in")
     # Get log level from system or input
     if args.log_level:
         numeric_level = getattr(logging, args.log_level.upper(), None)
