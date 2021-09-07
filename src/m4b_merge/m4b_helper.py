@@ -1,3 +1,4 @@
+from datetime import datetime
 import logging
 import math
 import os
@@ -44,22 +45,37 @@ class M4bMerge:
             title = f"{base_title} - {base_subtitle}"
         else:
             title = self.metadata['title']
-        # Only use first author/narrator for file names;
         # no subtitle for file name
         path_title = self.metadata['title']
+
+        # Only use first author/narrator for file names;
         path_author = self.metadata['authors'][0]['name']
+
         # For embedded, use all authors/narrators
         author_name_arr = []
         for authors in self.metadata['authors']:
             author_name_arr.append(authors['name'])
         author = ', '.join(author_name_arr)
-        narrator = ', '.join(self.metadata['narrators'])
-        if 'series' in self.metadata:
-            series = self.metadata['series']
+
+        narrator_name_arr = []
+        for narrators in self.metadata['narrators']:
+            narrator_name_arr.append(narrators['name'])
+        narrator = ', '.join(narrator_name_arr)
+
+        if 'primary_series' in self.metadata:
+            series = self.metadata['primary_series']['name']
+            series_position = self.metadata['primary_series']['position']
         else:
             series = None
+
         summary = self.metadata['short_summary']
-        year = self.metadata['release_date'].year
+
+        # Convert date string into datetime object
+        
+        dateObj = datetime.strptime(
+            self.metadata['release_date'], '%Y-%m-%dT%H:%M:%S.%fZ'
+        )
+        year = dateObj.year
 
         self.book_output = (
             f"{config.output}/{sanitize_filename(path_author)}/"
@@ -98,6 +114,7 @@ class M4bMerge:
         # Append series to metadata if it exists
         if series:
             self.metadata_args.append(f"--series={series}")
+            self.metadata_args.append(f"--series-part={series_position}")
 
         if self.cover_path:
             self.metadata_args.append(f"--cover={self.cover_path}")
@@ -212,6 +229,7 @@ class M4bMerge:
         # Add in main metadata args
         args.extend(self.metadata_args)
 
+        print(args)
         # make backup file
         shutil.copy(
             self.input_path,
