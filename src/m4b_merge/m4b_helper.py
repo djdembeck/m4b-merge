@@ -71,11 +71,20 @@ class M4bMerge:
         summary = self.metadata['short_summary']
 
         # Convert date string into datetime object
-        
         dateObj = datetime.strptime(
             self.metadata['release_date'], '%Y-%m-%dT%H:%M:%S.%fZ'
         )
         year = dateObj.year
+
+        if 'genres' in self.metadata:
+            genre_names = []
+            for g in self.metadata['genres']:
+                genre_names.append(g['name'])
+            genre = '/'.join(genre_names)
+
+        # Use format type for comment
+        if 'format_type' in self.metadata:
+            comment = self.metadata['format_type'].capitalize()
 
         self.book_output = (
             f"{config.output}/{sanitize_filename(path_author)}/"
@@ -108,13 +117,19 @@ class M4bMerge:
             f"--artist={narrator}",
             f"--albumartist={author}",
             f"--year={year}",
-            f"--description={summary}"
+            f"--description={summary}",
         ]
 
         # Append series to metadata if it exists
         if series:
             self.metadata_args.append(f"--series={series}")
             self.metadata_args.append(f"--series-part={series_position}")
+
+        if genre:
+            self.metadata_args.append(f"--genre={genre}")
+
+        if comment:
+            self.metadata_args.append(f"--comment={comment}")
 
         if self.cover_path:
             self.metadata_args.append(f"--cover={self.cover_path}")
