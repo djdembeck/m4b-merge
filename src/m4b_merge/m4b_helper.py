@@ -140,6 +140,7 @@ class M4bMerge:
             '--force',
             '--no-chapter-reindexing',
             '--no-cleanup',
+            '--ignore-source-tags',
             f'--jobs={config.num_cpus}'
         ]
 
@@ -239,13 +240,13 @@ class M4bMerge:
         args = [
             config.m4b_tool_bin,
             'meta',
+            '--ignore-source-tags',
             (f"{self.input_path.parent}/"
                 f"{self.input_path.stem}.new.m4b")
         ]
         # Add in main metadata args
         args.extend(self.metadata_args)
 
-        print(args)
         # make backup file
         shutil.copy(
             self.input_path,
