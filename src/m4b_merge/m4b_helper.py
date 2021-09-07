@@ -76,6 +76,7 @@ class M4bMerge:
         )
         year = dateObj.year
 
+        genre = None
         if 'genres' in self.metadata:
             genre_names = []
             for g in self.metadata['genres']:
