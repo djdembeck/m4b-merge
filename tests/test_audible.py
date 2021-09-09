@@ -79,15 +79,15 @@ class TestMetadata:
         if metadata['narrators'][0]['name'] != "Ray Porter":
             errors.append("Error with narrator")
         # Check release date object
-        # if not isinstance(metadata['release_date'], datetime.date):
+        # if not isinstance(metadata['releaseDate'], datetime.date):
         #     errors.append("Error with release date")
         # Check publisher name
-        if metadata['publisher_name'] != "Audible Studios":
+        if metadata['publisherName'] != "Audible Studios":
             errors.append("Error with publisher")
         # Check language
         if metadata['language'] != "english":
             errors.append("Error with language")
-        if not metadata['cover_image']:
+        if not metadata['image']:
             errors.append("No cover image found")
         # Assert no errors come back
         assert not errors, "Errors occured:\n{}".format("\n".join(errors))
@@ -107,15 +107,15 @@ class TestMetadata:
         if metadata['narrators'][1]['name'] != "Krysten Ritter":
             errors.append("Error with narrator")
         # Check release date object
-        # if not isinstance(metadata['release_date'], datetime.date):
+        # if not isinstance(metadata['releaseDate'], datetime.date):
         #     errors.append("Error with release date")
         # Check publisher name
-        if metadata['publisher_name'] != "Audible Originals":
+        if metadata['publisherName'] != "Audible Originals":
             errors.append("Error with publisher")
         # Check language
         if metadata['language'] != "english":
             errors.append("Error with language")
-        if not metadata['cover_image']:
+        if not metadata['image']:
             errors.append("No cover image found")
         # Assert no errors come back
         assert not errors, "Errors occured:\n{}".format("\n".join(errors))
