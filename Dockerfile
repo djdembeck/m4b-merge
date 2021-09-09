@@ -105,10 +105,10 @@ RUN  \
         make install
 
 # base image
-FROM python:3.8
+FROM python:3.9
 
 # setup environment variable
-ENV DockerHOME=/home/app/webapp
+ENV DockerHOME=/home/app
 
 RUN \
     touch /etc/apt/sources.list.d/contrib.list && \
@@ -137,7 +137,11 @@ RUN	apt-get update && \
     rm ./*.deb && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get remove -y wget && \
-    mkdir -p $DockerHOME
+    mkdir -p $DockerHOME && \
+    adduser worker && \
+    chown -R worker $DockerHOME
+
+USER worker
 
 # where your code lives  
 WORKDIR $DockerHOME
@@ -145,21 +149,21 @@ WORKDIR $DockerHOME
 # set environment variables
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
+ENV PATH="/home/worker/.local/bin:${PATH}"
 
 # install dependencies
-RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --user --no-cache-dir --upgrade pip
 
 # copy whole project to your docker home directory.
-COPY . $DockerHOME
+COPY --chown=worker:worker . $DockerHOME
 
 # run this command to install all dependencies
-RUN pip install --no-cache-dir -r requirements.txt \
-    pip install --no-cache-dir .
+RUN pip install --user --no-cache-dir -r requirements.txt \
+    pip install --user --no-cache-dir .
+
 
 COPY --from=ffbuild /opt/ffmpeg/bin/ffmpeg /usr/bin
 COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /usr/bin
-
-# USER 99:100
 
 # start server
 CMD m4b-merge

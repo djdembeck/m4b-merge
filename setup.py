@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name='m4b-merge',
-    version='0.3.5.7',
+    version='0.3.6',
     url='https://github.com/djdembeck/m4b-merge',
     description=(
                 "A tool to standardize audiobook files"
@@ -28,7 +28,6 @@ setuptools.setup(
     install_requires=[
         'appdirs>=1.4.4',
         'audible>=0.5.4',
-        'html2text>=2020.1.16',
         'pathvalidate>=2.4.1',
         'pydub>=0.25.1',
         'requests>=2.24.0',
