@@ -1,7 +1,6 @@
 from pathlib import Path
 import audible
 import getpass
-import html2text
 import logging
 import requests
 from datetime import datetime, timedelta

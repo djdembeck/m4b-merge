@@ -66,7 +66,7 @@ class TestMerge:
         m4b.prepare_data()
         m4b.merge_single_aac()
         assert (output_path.exists() and
-                os.path.getsize(output_path) == 25321155)
+                os.path.getsize(output_path) == 25301510)
 
     def m4b_data(self, asin):
         input_data = helpers.get_directory(test_path)
@@ -89,7 +89,7 @@ def create_blank_audio():
         '58253',
         '-i',
         'anullsrc=cl=stereo:r=44100',
-        test_path
+        test_path,
     ]
     if not test_path.exists():
         print("Generating empty audio file for testing...")
