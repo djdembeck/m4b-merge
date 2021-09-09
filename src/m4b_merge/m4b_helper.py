@@ -21,9 +21,9 @@ class M4bMerge:
         self.chapters = chapters
 
     def download_cover(self):
-        if 'cover_image' in self.metadata:
+        if 'image' in self.metadata:
             # Request to image URL
-            cover_request = requests.get(self.metadata['cover_image'])
+            cover_request = requests.get(self.metadata['image'])
             # Verify image exists
             if cover_request.status_code == 200:
                 # Path to write image to
@@ -62,17 +62,17 @@ class M4bMerge:
             narrator_name_arr.append(narrators['name'])
         narrator = ', '.join(narrator_name_arr)
 
-        if 'primary_series' in self.metadata:
-            series = self.metadata['primary_series']['name']
-            series_position = self.metadata['primary_series']['position']
+        if 'primarySeries' in self.metadata:
+            series = self.metadata['primarySeries']['name']
+            series_position = self.metadata['primarySeries']['position']
         else:
             series = None
 
-        summary = self.metadata['short_summary']
+        summary = self.metadata['description']
 
         # Convert date string into datetime object
         dateObj = datetime.strptime(
-            self.metadata['release_date'], '%Y-%m-%dT%H:%M:%S.%fZ'
+            self.metadata['releaseDate'], '%Y-%m-%dT%H:%M:%S.%fZ'
         )
         year = dateObj.year
 
@@ -84,8 +84,8 @@ class M4bMerge:
             genre = '/'.join(genre_names)
 
         # Use format type for comment
-        if 'format_type' in self.metadata:
-            comment = self.metadata['format_type'].capitalize()
+        if 'formatType' in self.metadata:
+            comment = self.metadata['formatType'].capitalize()
 
         self.book_output = (
             f"{config.output}/{sanitize_filename(path_author)}/"

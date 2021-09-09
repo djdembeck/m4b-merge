@@ -53,7 +53,7 @@ class AudibleAuth:
 
 # Checks validity of asin, then gathers json response into a return object
 class BookData:
-    audnexus_url = "http://localhost:3000/api/book?asin="
+    audnexus_url = "http://localhost:3000/books/"
 
     def __init__(self, asin):
         self.auth = AudibleAuth()
