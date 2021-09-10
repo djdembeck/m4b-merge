@@ -1,3 +1,4 @@
+from datetime import datetime
 import logging
 import math
 import os
@@ -20,9 +21,9 @@ class M4bMerge:
         self.chapters = chapters
 
     def download_cover(self):
-        if 'cover_image' in self.metadata:
+        if 'image' in self.metadata:
             # Request to image URL
-            cover_request = requests.get(self.metadata['cover_image'])
+            cover_request = requests.get(self.metadata['image'])
             # Verify image exists
             if cover_request.status_code == 200:
                 # Path to write image to
@@ -44,22 +45,47 @@ class M4bMerge:
             title = f"{base_title} - {base_subtitle}"
         else:
             title = self.metadata['title']
-        # Only use first author/narrator for file names;
         # no subtitle for file name
         path_title = self.metadata['title']
+
+        # Only use first author/narrator for file names;
         path_author = self.metadata['authors'][0]['name']
+
         # For embedded, use all authors/narrators
         author_name_arr = []
         for authors in self.metadata['authors']:
             author_name_arr.append(authors['name'])
         author = ', '.join(author_name_arr)
-        narrator = ', '.join(self.metadata['narrators'])
-        if 'series' in self.metadata:
-            series = self.metadata['series']
+
+        narrator_name_arr = []
+        for narrators in self.metadata['narrators']:
+            narrator_name_arr.append(narrators['name'])
+        narrator = ', '.join(narrator_name_arr)
+
+        if 'primarySeries' in self.metadata:
+            series = self.metadata['primarySeries']['name']
+            series_position = self.metadata['primarySeries']['position']
         else:
             series = None
-        summary = self.metadata['short_summary']
-        year = self.metadata['release_date'].year
+
+        summary = self.metadata['description']
+
+        # Convert date string into datetime object
+        dateObj = datetime.strptime(
+            self.metadata['releaseDate'], '%Y-%m-%dT%H:%M:%S.%fZ'
+        )
+        year = dateObj.year
+
+        genre = None
+        if 'genres' in self.metadata:
+            genre_names = []
+            for g in self.metadata['genres']:
+                genre_names.append(g['name'])
+            genre = '/'.join(genre_names)
+
+        # Use format type for comment
+        if 'formatType' in self.metadata:
+            comment = self.metadata['formatType'].capitalize()
 
         self.book_output = (
             f"{config.output}/{sanitize_filename(path_author)}/"
@@ -92,12 +118,19 @@ class M4bMerge:
             f"--artist={narrator}",
             f"--albumartist={author}",
             f"--year={year}",
-            f"--description={summary}"
+            f"--description={summary}",
         ]
 
         # Append series to metadata if it exists
         if series:
             self.metadata_args.append(f"--series={series}")
+            self.metadata_args.append(f"--series-part={series_position}")
+
+        if genre:
+            self.metadata_args.append(f"--genre={genre}")
+
+        if comment:
+            self.metadata_args.append(f"--comment={comment}")
 
         if self.cover_path:
             self.metadata_args.append(f"--cover={self.cover_path}")
@@ -107,6 +140,7 @@ class M4bMerge:
             '--force',
             '--no-chapter-reindexing',
             '--no-cleanup',
+            '--ignore-source-tags',
             f'--jobs={config.num_cpus}'
         ]
 
@@ -206,6 +240,7 @@ class M4bMerge:
         args = [
             config.m4b_tool_bin,
             'meta',
+            '--ignore-source-tags',
             (f"{self.input_path.parent}/"
                 f"{self.input_path.stem}.new.m4b")
         ]
