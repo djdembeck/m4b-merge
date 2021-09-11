@@ -11,8 +11,7 @@ on:
 
 jobs:
   build:
-
-    runs-on: ghcr.io/djdembeck/m4b-merge/m4b-merge:latest
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +34,7 @@ jobs:
         # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
     - name: Test with pytest
+      uses: ghcr.io/djdembeck/m4b-merge/m4b-merge:develop
       run: |
         mkdir ~/.config/m4b-merge -p
         touch ~/.config/m4b-merge/.aud_auth.txt
