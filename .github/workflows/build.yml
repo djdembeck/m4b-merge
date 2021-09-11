@@ -11,6 +11,7 @@ on:
 
 jobs:
   build:
+
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -27,6 +28,17 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         python -m pip install flake8 pytest
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        sudo apt update; sudo apt install ffmpeg wget fdkaac php-cli php-intl php-json php-mbstring php-xml
+        M4B_TOOL_PRE_RELEASE_LINK=$(wget -q -O - https://github.com/sandreas/m4b-tool/releases/tag/latest | grep -o 'M4B_TOOL_DOWNLOAD_LINK=[^ ]*' | head -1 | cut -d '=' -f 2)
+        wget "${M4B_TOOL_PRE_RELEASE_LINK}" -O /tmp/m4b-tool.tar.gz
+        tar xzf /tmp/m4b-tool.tar.gz -C /tmp/
+        sudo mv /tmp/m4b-tool.phar /usr/local/bin/m4b-tool
+        sudo chmod +x /usr/local/bin/m4b-tool
+        wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/libmp4v2-2_2.0.0~dfsg0-6_amd64.deb
+        wget http://archive.ubuntu.com/ubuntu/pool/universe/m/mp4v2/mp4v2-utils_2.0.0~dfsg0-6_amd64.deb
+        sudo dpkg -i libmp4v2-2_2.0.0~dfsg0-6_amd64.deb
+        sudo dpkg -i mp4v2-utils_2.0.0~dfsg0-6_amd64.deb
     - name: Lint with flake8
       run: |
         # stop the build if there are Python syntax errors or undefined names
@@ -34,7 +46,6 @@ jobs:
         # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
     - name: Test with pytest
-      uses: ghcr.io/djdembeck/m4b-merge/m4b-merge:develop
       run: |
         mkdir ~/.config/m4b-merge -p
         touch ~/.config/m4b-merge/.aud_auth.txt
