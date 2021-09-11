@@ -62,9 +62,9 @@ class M4bMerge:
             narrator_name_arr.append(narrators['name'])
         narrator = ', '.join(narrator_name_arr)
 
-        if 'primarySeries' in self.metadata:
-            series = self.metadata['primarySeries']['name']
-            series_position = self.metadata['primarySeries']['position']
+        if 'seriesPrimary' in self.metadata:
+            series = self.metadata['seriesPrimary']['name']
+            series_position = self.metadata['seriesPrimary']['position']
         else:
             series = None
 
