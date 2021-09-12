@@ -1,5 +1,6 @@
 {
     "conventionalCommits.scopes": [
-        "docker"
+        "docker",
+        "audible"
     ]
 }
