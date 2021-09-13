@@ -80,7 +80,9 @@ class TestMetadata:
             errors.append("Error with narrator")
         # Check release date object
         if not isinstance(
-            datetime.fromisoformat(metadata['releaseDate']), datetime.date
+            datetime.datetime.fromisoformat(
+                metadata['releaseDate'].replace('Z', '+00:00')
+            ), datetime.date
         ):
             errors.append("Error with release date")
         # Check publisher name
@@ -110,7 +112,9 @@ class TestMetadata:
             errors.append("Error with narrator")
         # Check release date object
         if not isinstance(
-            datetime.fromisoformat(metadata['releaseDate']), datetime.date
+            datetime.datetime.fromisoformat(
+                metadata['releaseDate'].replace('Z', '+00:00')
+            ), datetime.date
         ):
             errors.append("Error with release date")
         # Check publisher name

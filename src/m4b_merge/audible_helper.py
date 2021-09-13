@@ -149,7 +149,7 @@ class BookData:
         # metadata dictionary
         api_call = requests.get(f"{self.audnexus_url}{self.asin}")
         metadata_dict = api_call.json()
-
+        print(metadata_dict)
         return metadata_dict
 
     def check_asin_sku(self):
