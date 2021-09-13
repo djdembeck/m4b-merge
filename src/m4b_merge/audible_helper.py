@@ -145,11 +145,10 @@ class BookData:
 
         return chapter_output
 
-    def parser(self):
+    def fetch_api_data(self):
         # metadata dictionary
         api_call = requests.get(f"{self.audnexus_url}{self.asin}")
         metadata_dict = api_call.json()
-        print(metadata_dict)
         return metadata_dict
 
     def check_asin_sku(self):

@@ -66,7 +66,7 @@ class TestMetadata:
 
     def test_single_author_single_narrator(self):
         errors = []
-        metadata = self.audible_data(primary_asin).parser()
+        metadata = self.audible_data(primary_asin).fetch_api_data()
         # Check title
         if metadata['title'] != "Project Hail Mary":
             errors.append("Error with title")
@@ -98,7 +98,7 @@ class TestMetadata:
 
     def test_multiple_author_multiple_narrator(self):
         errors = []
-        metadata = self.audible_data("B08C6YJ1LS").parser()
+        metadata = self.audible_data("B08C6YJ1LS").fetch_api_data()
         # Check title
         if metadata['title'] != "The Coldest Case: A Black Book Audio Drama":
             errors.append("Error with title")
