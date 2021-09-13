@@ -66,7 +66,7 @@ class TestMerge:
         mp3.prepare_data()
         mp3.merge_single_mp3()
         assert (output_path.exists() and
-                os.path.getsize(output_path) == (25301526 or 25321154))
+                os.path.getsize(output_path) == 25301526 or 25330986)
 
     def mp3_data(self, asin):
         input_data = helpers.get_directory(test_path)

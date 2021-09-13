@@ -60,7 +60,7 @@ class TestMerge:
         m4b.prepare_data()
         m4b.merge_multiple_files()
         assert (output_path.exists() and
-                os.path.getsize(output_path) == (25302000 or 25321620))
+                os.path.getsize(output_path) == 25302000 or 25331460)
 
     def test_chapter_generation(self):
         m4b = self.m4b_data(primary_asin)
