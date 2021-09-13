@@ -151,14 +151,12 @@ ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 ENV PATH="/home/worker/.local/bin:${PATH}"
 
-# install dependencies
-RUN pip install --user --no-cache-dir --upgrade pip
-
 # copy whole project to your docker home directory.
-COPY --chown=worker:worker . $DockerHOME
+COPY . $DockerHOME
 
 # run this command to install all dependencies
-RUN pip install --user --no-cache-dir -r requirements.txt \
+RUN pip install --user --no-cache-dir --upgrade pip && \
+    pip install --user --no-cache-dir -r requirements.txt \
     pip install --user --no-cache-dir .
 
 
