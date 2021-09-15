@@ -27,7 +27,6 @@ setuptools.setup(
     ],
     install_requires=[
         'appdirs>=1.4.4',
-        'audible>=0.5.4',
         'pathvalidate>=2.4.1',
         'pydub>=0.25.1',
         'requests>=2.24.0',
