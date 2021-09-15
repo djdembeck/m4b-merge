@@ -34,6 +34,7 @@ class TestChapterData:
     # Create new Audible object to work with
     def chapters(self, asin):
         aud = self.audible_data(asin)
+        aud.fetch_api_data()
         chapters = aud.get_chapters()
         return chapters
 
@@ -62,11 +63,11 @@ class TestChapterData:
 class TestMetadata:
     def audible_data(self, asin):
         aud = audible_helper.BookData(asin)
-        return aud
+        return aud.fetch_api_data()
 
     def test_single_author_single_narrator(self):
         errors = []
-        metadata = self.audible_data(primary_asin).fetch_api_data()
+        metadata = self.audible_data(primary_asin)
         # Check title
         if metadata['title'] != "Project Hail Mary":
             errors.append("Error with title")
@@ -98,7 +99,7 @@ class TestMetadata:
 
     def test_multiple_author_multiple_narrator(self):
         errors = []
-        metadata = self.audible_data("B08C6YJ1LS").fetch_api_data()
+        metadata = self.audible_data("B08C6YJ1LS")
         # Check title
         if metadata['title'] != "The Coldest Case: A Black Book Audio Drama":
             errors.append("Error with title")
