@@ -41,7 +41,6 @@ class BookData:
     def get_chapters(self):
         # Select chapter data from json response
         chapter_info = self.metadata_dict['chapterInfo']
-        print(chapter_info)
 
         # Only use Audible chapters if tagged as accurate
         if chapter_info['isAccurate'] is True:
