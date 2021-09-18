@@ -64,7 +64,8 @@ class M4bMerge:
 
         if 'seriesPrimary' in self.metadata:
             series = self.metadata['seriesPrimary']['name']
-            series_position = self.metadata['seriesPrimary']['position']
+            if 'position' in self.metadata['seriesPrimary']:
+                series_position = self.metadata['seriesPrimary']['position']
         else:
             series = None
 
@@ -124,7 +125,8 @@ class M4bMerge:
         # Append series to metadata if it exists
         if series:
             self.metadata_args.append(f"--series={series}")
-            self.metadata_args.append(f"--series-part={series_position}")
+            if series_position:
+                self.metadata_args.append(f"--series-part={series_position}")
 
         if genre:
             self.metadata_args.append(f"--genre={genre}")
