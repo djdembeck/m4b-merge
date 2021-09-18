@@ -68,6 +68,8 @@ class M4bMerge:
                 self.series_position = (
                     self.metadata['seriesPrimary']['position']
                 )
+            else:
+                self.series_position = None
         else:
             self.series = None
 
