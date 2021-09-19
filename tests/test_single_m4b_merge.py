@@ -47,6 +47,7 @@ class TestMerge:
     def test_chapter_generation(self):
         m4b = self.m4b_data(primary_asin)
         m4b.prepare_data()
+        m4b.prepare_command_args()
         m4b.fix_chapters()
         assert (output_chapters.exists() and
                 os.path.getsize(output_chapters) == 794)
@@ -64,6 +65,7 @@ class TestMerge:
     def test_merge(self):
         m4b = self.m4b_data(primary_asin)
         m4b.prepare_data()
+        m4b.prepare_command_args()
         m4b.merge_single_aac()
         assert (output_path.exists() and
                 os.path.getsize(output_path) == 25301510 or 25330971)
