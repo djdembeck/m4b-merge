@@ -58,6 +58,7 @@ class TestMerge:
     def test_merge(self):
         mp3 = self.mp3_data(primary_asin)
         mp3.prepare_data()
+        mp3.prepare_command_args()
         mp3.merge_multiple_files()
         assert (output_path.exists() and
                 os.path.getsize(output_path) == 25300169 or 25329629)
@@ -65,6 +66,7 @@ class TestMerge:
     def test_chapter_generation(self):
         mp3 = self.mp3_data(primary_asin)
         mp3.prepare_data()
+        mp3.prepare_command_args()
         mp3.fix_chapters()
         assert (output_chapters.exists() and
                 os.path.getsize(output_chapters) == 76)
