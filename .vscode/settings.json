@@ -1,0 +1,7 @@
+{
+    "conventionalCommits.scopes": [
+        "docker",
+        "audible",
+        "merge"
+    ]
+}

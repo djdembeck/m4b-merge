@@ -34,6 +34,7 @@ class TestChapterData:
     # Create new Audible object to work with
     def chapters(self, asin):
         aud = self.audible_data(asin)
+        aud.fetch_api_data()
         chapters = aud.get_chapters()
         return chapters
 
@@ -62,11 +63,11 @@ class TestChapterData:
 class TestMetadata:
     def audible_data(self, asin):
         aud = audible_helper.BookData(asin)
-        return aud
+        return aud.fetch_api_data()
 
     def test_single_author_single_narrator(self):
         errors = []
-        metadata = self.audible_data(primary_asin).parser()
+        metadata = self.audible_data(primary_asin)
         # Check title
         if metadata['title'] != "Project Hail Mary":
             errors.append("Error with title")
@@ -76,25 +77,29 @@ class TestMetadata:
         if metadata['authors'][0]['asin'] != "B00G0WYW92":
             errors.append("Error with author ASIN")
         # Check narrator
-        if metadata['narrators'][0] != "Ray Porter":
+        if metadata['narrators'][0]['name'] != "Ray Porter":
             errors.append("Error with narrator")
         # Check release date object
-        if not isinstance(metadata['release_date'], datetime.date):
+        if not isinstance(
+            datetime.datetime.fromisoformat(
+                metadata['releaseDate'].replace('Z', '+00:00')
+            ), datetime.date
+        ):
             errors.append("Error with release date")
         # Check publisher name
-        if metadata['publisher_name'] != "Audible Studios":
+        if metadata['publisherName'] != "Audible Studios":
             errors.append("Error with publisher")
         # Check language
         if metadata['language'] != "english":
             errors.append("Error with language")
-        if not metadata['cover_image']:
+        if not metadata['image']:
             errors.append("No cover image found")
         # Assert no errors come back
         assert not errors, "Errors occured:\n{}".format("\n".join(errors))
 
     def test_multiple_author_multiple_narrator(self):
         errors = []
-        metadata = self.audible_data("B08C6YJ1LS").parser()
+        metadata = self.audible_data("B08C6YJ1LS")
         # Check title
         if metadata['title'] != "The Coldest Case: A Black Book Audio Drama":
             errors.append("Error with title")
@@ -104,18 +109,22 @@ class TestMetadata:
         if metadata['authors'][2]['asin'] != "B07R2F2DXH":
             errors.append("Error with author ASIN")
         # Check narrator
-        if metadata['narrators'][1] != "Krysten Ritter":
+        if metadata['narrators'][1]['name'] != "Krysten Ritter":
             errors.append("Error with narrator")
         # Check release date object
-        if not isinstance(metadata['release_date'], datetime.date):
+        if not isinstance(
+            datetime.datetime.fromisoformat(
+                metadata['releaseDate'].replace('Z', '+00:00')
+            ), datetime.date
+        ):
             errors.append("Error with release date")
         # Check publisher name
-        if metadata['publisher_name'] != "Audible Originals":
+        if metadata['publisherName'] != "Audible Originals":
             errors.append("Error with publisher")
         # Check language
         if metadata['language'] != "english":
             errors.append("Error with language")
-        if not metadata['cover_image']:
+        if not metadata['image']:
             errors.append("No cover image found")
         # Assert no errors come back
         assert not errors, "Errors occured:\n{}".format("\n".join(errors))

@@ -1,6 +1,4 @@
-html2text==2020.1.16
+appdirs==1.4.4
+pathvalidate==2.4.1
 pydub==0.25.1
 requests==2.26.0
-pathvalidate==2.4.1
-audible==0.5.5
-appdirs==1.4.4
