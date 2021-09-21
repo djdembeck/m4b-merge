@@ -3,7 +3,7 @@ import collections
 import logging
 import os
 import requests
-from . import audible_helper
+from . import config
 
 
 # Find the primary extension which we will use
@@ -85,14 +85,10 @@ def get_directory(input_take):
 def validate_asin(asin):
     if len(asin) == 10:
         # Check ASIN http response
-        check = requests.get(f"https://www.audible.com/pd/{asin}")
-        # Check ASIN JSON response
-        aud = audible_helper.BookData(asin)
+        check = requests.get(f"{config.api_url}/{asin}")
         # If either good http response or valid api response
         if check.status_code == 200:
             logging.info(f"Validated ASIN: {asin}")
-        elif aud.check_asin_sku():
-            logging.warning("Got HTTP error, but valid JSON response")
         else:
             raise ValueError(f"HTTP error {check.status_code}")
 

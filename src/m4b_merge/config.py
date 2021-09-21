@@ -4,6 +4,9 @@ import shutil
 from appdirs import user_config_dir
 
 # User editable variables
+# API url
+api_url = "https://api.audnex.us/books"
+
 # output directory for cleaned metadata/folder structure
 # leaving blank uses /output for docker or $USER/output for anything else
 output = ""

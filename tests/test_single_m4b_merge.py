@@ -47,6 +47,7 @@ class TestMerge:
     def test_chapter_generation(self):
         m4b = self.m4b_data(primary_asin)
         m4b.prepare_data()
+        m4b.prepare_command_args()
         m4b.fix_chapters()
         assert (output_chapters.exists() and
                 os.path.getsize(output_chapters) == 794)
@@ -64,14 +65,15 @@ class TestMerge:
     def test_merge(self):
         m4b = self.m4b_data(primary_asin)
         m4b.prepare_data()
+        m4b.prepare_command_args()
         m4b.merge_single_aac()
         assert (output_path.exists() and
-                os.path.getsize(output_path) == 25321058)
+                os.path.getsize(output_path) == 25301510 or 25330971)
 
     def m4b_data(self, asin):
         input_data = helpers.get_directory(test_path)
         aud = audible_helper.BookData(asin)
-        metadata = aud.parser()
+        metadata = aud.fetch_api_data()
         chapters = aud.get_chapters()
 
         # Process metadata and run components to merge files
@@ -89,7 +91,7 @@ def create_blank_audio():
         '58253',
         '-i',
         'anullsrc=cl=stereo:r=44100',
-        test_path
+        test_path,
     ]
     if not test_path.exists():
         print("Generating empty audio file for testing...")
