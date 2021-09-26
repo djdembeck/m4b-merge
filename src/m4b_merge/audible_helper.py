@@ -40,7 +40,7 @@ class BookData:
 
     def get_chapters(self):
         # Select chapter data from json response
-        chapter_info = self.metadata_dict['chapterInfo']
+        chapter_info = self.metadata_dict['chapter_info']
 
         # Only use Audible chapters if tagged as accurate
         if chapter_info['isAccurate'] is True:
@@ -75,8 +75,14 @@ class BookData:
 
     def fetch_api_data(self):
         # metadata dictionary
-        api_call = requests.get(f"{config.api_url}/{self.asin}")
-        self.metadata_dict = api_call.json()
+        book_api_call = requests.get(
+            f"{config.api_url}/{self.asin}"
+        )
+        chapter_api_call = requests.get(
+            f"{config.api_url}/{self.asin}/chapters"
+        )
+        self.metadata_dict = book_api_call.json()
+        self.metadata_dict['chapter_info'] = chapter_api_call.json()
         return self.metadata_dict
 
     def check_asin_sku(self):
