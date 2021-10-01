@@ -43,7 +43,7 @@ class BookData:
         chapter_info = self.metadata_dict['chapter_info']
 
         # Only use Audible chapters if tagged as accurate
-        if chapter_info['isAccurate'] is True:
+        if 'isAccurate' in chapter_info and chapter_info['isAccurate'] is True:
             chapter_output = []
             # Append total runtime to the top of file
             total_len = self.ms_to_timestamp(chapter_info['runtimeLengthMs'])
