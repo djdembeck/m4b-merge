@@ -41,7 +41,7 @@ class TestMerge:
         mp3 = self.mp3_data(primary_asin)
         mp3.download_cover()
         assert ((test_cover).exists() and
-                os.path.getsize(test_cover) == 62800)
+                os.path.getsize(test_cover) == 779312)
 
     def test_bitrate(self):
         mp3 = self.mp3_data(primary_asin)
