@@ -143,18 +143,19 @@ RUN	apt-get update && \
 
 USER worker
 
+WORKDIR $DockerHOME
+
 # set environment variables
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 ENV PATH="/home/worker/.local/bin:${PATH}"
 
+COPY . /src
+
 # run this command to install all dependencies
 RUN pip install --user --no-cache-dir --upgrade pip && \
     pip install --user --no-cache-dir -r requirements.txt \
-    pip install --user --no-cache-dir . --src $DockerHOME
-
-# where your code lives  
-WORKDIR $DockerHOME
+    pip install --user --no-cache-dir /src --src $DockerHOME
 
 COPY --from=ffbuild /opt/ffmpeg/bin/ffmpeg /usr/bin
 COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /usr/bin
