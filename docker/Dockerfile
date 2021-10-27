@@ -186,7 +186,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY --from=ffbuild /usr/local/bin/ffmpeg /usr/bin
 COPY --from=ffbuild /usr/local/bin/ffprobe /usr/bin
 
-USER worker
-
-# start server
+USER root
+ENTRYPOINT ["/bin/sh", "/src/docker/entrypoint.sh"]
 CMD m4b-merge
