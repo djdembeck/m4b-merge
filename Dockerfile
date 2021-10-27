@@ -1,108 +1,136 @@
-FROM alpine:3.10 AS ffbase
+# Forked from https://github.com/wader/static-ffmpeg/blob/master/Dockerfile
+FROM alpine:3.14.2 AS ffbuild
 
-RUN buildDeps="autoconf \
-    automake \
-    bash \
-    binutils \
-    build-base \
-    bzip2 \
-    cmake \
-    curl \
+ARG FFMPEG_VERSION=4.4.1
+ARG FFMPEG_URL="https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.bz2"
+ARG FFMPEG_SHA256=8fc9f20ac5ed95115a9e285647add0eedd5cc1a98a039ada14c132452f98ac42
+
+ARG MP3LAME_VERSION=3.100
+ARG MP3LAME_URL="https://sourceforge.net/projects/lame/files/lame/$MP3LAME_VERSION/lame-$MP3LAME_VERSION.tar.gz/download"
+ARG MP3LAME_SHA256=ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e
+
+ARG FDK_AAC_VERSION=2.0.2
+ARG FDK_AAC_URL="https://github.com/mstorsjo/fdk-aac/archive/v$FDK_AAC_VERSION.tar.gz"
+ARG FDK_AAC_SHA256=7812b4f0cf66acda0d0fe4302545339517e702af7674dd04e5fe22a5ade16a90
+
+ARG OPUS_VERSION=1.3.1
+ARG OPUS_URL="https://archive.mozilla.org/pub/opus/opus-$OPUS_VERSION.tar.gz"
+ARG OPUS_SHA256=65b58e1e25b2a114157014736a3d9dfeaad8d41be1c8179866f144a2fb44ff9d
+
+ARG CFLAGS="-O3 -static-libgcc -fno-strict-overflow -fstack-protector-all -fPIE"
+ARG CXXFLAGS="-O3 -static-libgcc -fno-strict-overflow -fstack-protector-all -fPIE"
+ARG LDFLAGS="-Wl,-z,relro,-z,now"
+
+# Can probably clean these out
+RUN apk add --no-cache \
     coreutils \
-    diffutils \
-    expat-dev \
-    file \
-    findutils \
-    g++ \
-    gperf \
-    libarchive-tools \
-    libgomp \
-    libtool \
-    nasm \
-    python3 \
-    openssl \
-    openssl-dev \
+    rust \
+    cargo \
+    openssl openssl-dev openssl-libs-static \
+    ca-certificates \
+    bash \
     tar \
-    util-linux-dev \
+    build-base \
+    autoconf \
+    automake \
+    libtool \
+    diffutils \
+    cmake \
+    meson \
+    ninja \
+    git \
     yasm \
-    zlib-dev" && \
-    apk add --no-cache ${buildDeps}
+    nasm \
+    texinfo \
+    jq \
+    zlib zlib-dev zlib-static \
+    libbz2 bzip2-dev bzip2-static \
+    libxml2 libxml2-dev \
+    expat expat-dev expat-static \
+    fontconfig fontconfig-dev fontconfig-static \
+    freetype freetype-dev freetype-static \
+    graphite2-static \
+    glib-static \
+    tiff tiff-dev \
+    libjpeg-turbo libjpeg-turbo-dev \
+    libpng-dev libpng-static \
+    giflib giflib-dev \
+    harfbuzz harfbuzz-dev harfbuzz-static \
+    fribidi fribidi-dev fribidi-static \
+    brotli brotli-dev brotli-static \
+    soxr soxr-dev soxr-static \
+    tcl \
+    numactl numactl-dev \
+    cunit cunit-dev \
+    xxd
 
-FROM ffbase AS ffbuild
-
-WORKDIR /tmp/workdir
-
-ARG PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig
-ARG LD_LIBRARY_PATH=/opt/ffmpeg/lib
-ARG PREFIX=/opt/ffmpeg
-ARG MAKEFLAGS="-j$(nproc)"
-
-ENV FFMPEG_VERSION=snapshot \
-    LAME_VERSION=3.100 \
-    OPUS_VERSION=1.3.1 \
-    SRC=/usr/local
-
-ARG OPUS_SHA256SUM="65b58e1e25b2a114157014736a3d9dfeaad8d41be1c8179866f144a2fb44ff9d opus-${OPUS_VERSION}.tar.gz"
-
-### fdk-aac https://github.com/mstorsjo/fdk-aac
 RUN \
-        DIR=/tmp/fdk-aac && \
-        mkdir -p ${DIR} && \
-        cd ${DIR} && \
-        curl -sL https://github.com/mstorsjo/fdk-aac/archive/master.zip -o fdk-aac-master.zip && \
-        bsdtar --strip-components=1 -xf fdk-aac-master.zip && \
-        rm fdk-aac-master.zip && \
-        autoreconf -fiv && \
-        ./configure --prefix="${PREFIX}" --disable-shared --datadir="${DIR}" && \
-        make && \
-        make install
+    OPENSSL_VERSION=$(pkg-config --modversion openssl) \
+    LIBXML2_VERSION=$(pkg-config --modversion libxml-2.0) \
+    EXPAT_VERSION=$(pkg-config --modversion expat) \
+    FREETYPE_VERSION=$(pkg-config --modversion freetype2)  \
+    FONTCONFIG_VERSION=$(pkg-config --modversion fontconfig)  \
+    FRIBIDI_VERSION=$(pkg-config --modversion fribidi)  \
+    SOXR_VERSION=$(pkg-config --modversion soxr) \
+    jq -n \
+    '{ \
+    ffmpeg: env.FFMPEG_VERSION, \
+    openssl: env.OPENSSL_VERSION, \
+    libxml2: env.LIBXML2_VERSION, \
+    expat: env.EXPAT_VERSION, \
+    libmp3lame: env.MP3LAME_VERSION, \
+    "libfdk-aac": env.FDK_AAC_VERSION, \
+    libopus: env.OPUS_VERSION, \
+    }' > /versions.json
 
-### libopus https://www.opus-codec.org/
 RUN \
-        DIR=/tmp/opus && \
-        mkdir -p ${DIR} && \
-        cd ${DIR} && \
-        curl -sLO https://archive.mozilla.org/pub/opus/opus-${OPUS_VERSION}.tar.gz && \
-        echo ${OPUS_SHA256SUM} | sha256sum --check && \
-        tar -zx --strip-components=1 -f opus-${OPUS_VERSION}.tar.gz && \
-        autoreconf -fiv && \
-        ./configure --prefix="${PREFIX}" --disable-shared && \
-        make && \
-        make install
-        
-### libmp3lame http://lame.sourceforge.net/
-RUN \
-        DIR=/tmp/lame && \
-        mkdir -p ${DIR} && \
-        cd ${DIR} && \
-        curl -sL https://versaweb.dl.sourceforge.net/project/lame/lame/$(echo ${LAME_VERSION} | sed -e 's/[^0-9]*\([0-9]*\)[.]\([0-9]*\)[.]\([0-9]*\)\([0-9A-Za-z-]*\)/\1.\2/')/lame-${LAME_VERSION}.tar.gz | \
-        tar -zx --strip-components=1 && \
-        ./configure --prefix="${PREFIX}" --bindir="${PREFIX}/bin" --disable-shared --enable-nasm --enable-pic --disable-frontend && \
-        make && \
-        make install
+    wget -O lame.tar.gz "$MP3LAME_URL" && \
+    echo "$MP3LAME_SHA256  lame.tar.gz" | sha256sum --status -c - && \
+    tar xf lame.tar.gz && \
+    cd lame-* && ./configure --disable-shared --enable-static --enable-nasm --disable-gtktest --disable-cpml --disable-frontend && \
+    make -j$(nproc) install
 
-## ffmpeg https://ffmpeg.org/
-RUN  \
-        DIR=/tmp/ffmpeg && mkdir -p ${DIR} && cd ${DIR} && \
-        curl -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.bz2 && \
-        tar -jx --strip-components=1 -f ffmpeg-${FFMPEG_VERSION}.tar.bz2 && \
-        ./configure \
-        --enable-ffplay \
-        --enable-gpl \
-        --enable-version3 \
-        --enable-libfdk-aac \
-        --enable-libmp3lame \
-        --enable-libopus \
-        --enable-nonfree \
-        --enable-openssl \
-        --pkg-config-flags="--static" \
-        --extra-cflags="-I$PREFIX/include" \
-        --extra-ldflags="-L$PREFIX/lib" \
-        --extra-libs="-lpthread -lm -lz" \
-        --extra-ldexeflags="-static" \
-        --prefix="${PREFIX}" && \
-        make && \
-        make install
+RUN \
+    wget -O fdk-aac.tar.gz "$FDK_AAC_URL" && \
+    echo "$FDK_AAC_SHA256  fdk-aac.tar.gz" | sha256sum --status -c - && \
+    tar xf fdk-aac.tar.gz && \
+    cd fdk-aac-* && ./autogen.sh && ./configure --disable-shared --enable-static && \
+    make -j$(nproc) install
+
+RUN \
+    wget -O opus.tar.gz "$OPUS_URL" && \
+    echo "$OPUS_SHA256  opus.tar.gz" | sha256sum --status -c - && \
+    tar xf opus.tar.gz && \
+    cd opus-* && ./configure --disable-shared --enable-static --disable-extra-programs && \
+    make -j$(nproc) install
+
+RUN \
+    wget -O ffmpeg.tar.bz2 "$FFMPEG_URL" && \
+    echo "$FFMPEG_SHA256  ffmpeg.tar.bz2" | sha256sum --status -c - && \
+    tar xf ffmpeg.tar.bz2 && \
+    cd ffmpeg-* && \
+    sed -i 's/add_ldexeflags -fPIE -pie/add_ldexeflags -fPIE -static-pie/' configure && \
+    ./configure \
+    --pkg-config-flags="--static" \
+    --extra-cflags="-fopenmp" \
+    --extra-ldflags="-fopenmp" \
+    --extra-libs="-lstdc++" \
+    --toolchain=hardened \
+    --disable-debug \
+    --disable-shared \
+    --disable-ffplay \
+    --enable-static \
+    --enable-gpl \
+    --enable-gray \
+    --enable-nonfree \
+    --enable-openssl \
+    --enable-iconv \
+    --enable-libxml2 \
+    --enable-libmp3lame \
+    --enable-libfdk-aac \
+    || (cat ffbuild/config.log ; false) \
+    && make -j$(nproc) install tools/qt-faststart \
+    && cp tools/qt-faststart /usr/local/bin
 
 # base image
 FROM python:3.9
@@ -141,8 +169,6 @@ RUN	apt-get update && \
     adduser worker && \
     chown -R worker $DockerHOME
 
-USER worker
-
 WORKDIR $DockerHOME
 
 # set environment variables
@@ -153,12 +179,14 @@ ENV PATH="/home/worker/.local/bin:${PATH}"
 COPY . /src
 
 # run this command to install all dependencies
-RUN pip install --user --no-cache-dir --upgrade pip && \
-    pip install --user --no-cache-dir -r /src/requirements.txt \
-    pip install --user --no-cache-dir /src --src $DockerHOME
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r /src/requirements.txt \
+    pip install --no-cache-dir /src
 
-COPY --from=ffbuild /opt/ffmpeg/bin/ffmpeg /usr/bin
-COPY --from=ffbuild /opt/ffmpeg/bin/ffprobe /usr/bin
+COPY --from=ffbuild /usr/local/bin/ffmpeg /usr/bin
+COPY --from=ffbuild /usr/local/bin/ffprobe /usr/bin
+
+USER worker
 
 # start server
 CMD m4b-merge
