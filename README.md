@@ -1,32 +1,96 @@
+
+<h1 align="center">m4b-merge</h1>
+
+<div align="center">
+
+[![Status](https://img.shields.io/badge/status-active-success.svg)]()
+[![GitHub Issues](https://img.shields.io/github/issues/djdembeck/m4b-merge.svg)](https://github.com/djdembeck/m4b-merge/issues)
+[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/djdembeck/m4b-merge.svg)](https://github.com/djdembeck/m4b-merge/pulls)
 [![PyPI](https://img.shields.io/pypi/v/m4b-merge)](https://pypi.org/project/m4b-merge/)
-[![GitHub](https://img.shields.io/github/license/djdembeck/m4b-merge)](https://github.com/djdembeck/m4b-merge/blob/develop/LICENSE)
 ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/m4b-merge?style=flat)
 [![Python package](https://github.com/djdembeck/m4b-merge/actions/workflows/build.yml/badge.svg)](https://github.com/djdembeck/m4b-merge/actions/workflows/build.yml)
 [![CodeFactor Grade](https://img.shields.io/codefactor/grade/github/djdembeck/m4b-merge)](https://www.codefactor.io/repository/github/djdembeck/m4b-merge)
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/m4b-merge)](https://pypi.org/project/m4b-merge/)
-## Functionality
-The steps accomplished by using this tool are as follows:
+[![License](https://img.shields.io/github/license/djdembeck/m4b-merge)](https://github.com/djdembeck/m4b-merge/blob/develop/LICENSE)
 
-- Easy batch inputs via `-i folder1/ folder2/* file.mp3` etc.
-- Only user input required is one ASIN per book.
-- Converts mp3(s) into single m4b files
-  - Matches existing bitrate and samplerate for target file.
-  - Standardizes chapter names, like 'Chapter 1'. 
-- Merges or edits m4a/m4b into single m4b file, without re-converting.
-- Moves input file/folder to `done` folder when processed.
+</div>
 
-Audible data features:
-  - Title, author(s), narrator(s), series, release year, description
-    - For generating folder structure 
-    - For seeding M4b metadata fields
-  - Chapters (title and length) used for m4b/m4a inputs.
+---
+
+<p align="center"> A CLI tool which outputs consistently sorted, tagged, single m4b files regardless of the input.
+    <br> 
+</p>
+
+## 📝 Table of Contents
+
+- [About](#about)
+- [Getting Started](#getting_started)
+- [Usage](#usage)
+- [Built Using](#built_using)
+- [Contributing](../CONTRIBUTING.md)
+- [Authors](#authors)
+- [Acknowledgments](#acknowledgement)
+
+## 🧐 About <a name = "about"></a>
+
+m4b-merge was originally part of Bragi Books, but was split apart to allow savvy users to automate its usage in more advanced ways. Some of the things m4b-merge offers are:
+
+- Accepts single and multiple mp3, m4a and m4b files.
+- mp3s are converted to m4b. m4a/m4b files are edited/merged without conversion.
+- Matches existing bitrate and samplerate for target file conversions.
+- Final files moved to `/output/Author/Book/Book: Subtitle.m4b` format.
+- Moves finished files into `done` folder in `input` directory.
+
+Metadata provided by audnexus:
+
+- Title, authors, narrators, description, series, genres, release year - written as tags.
+- Chapter times/titles (only when input is m4b or a single mp3) - written as tags and `chapters.txt`.
+- High resolution (2000x2000 or greater) cover art - embedded into output file.
+
+## 🏁 Getting Started <a name = "getting_started"></a>
+
+These instructions will get you a copy of the project up and running on your local machine for development and testing purposes. See [deployment](#deployment) for notes on how to deploy the project on a live system.
+
+### Prerequisites
+
+You can either install this project via `pip` directly or run it prepackaged in Docker:
+- If installing directly on your system, you'll need to install m4b-tool and it's dependants from [the project's readme](https://github.com/sandreas/m4b-tool#installation)
+- If using Docker, all prerequisites are included in the image.
+
+### Installing
+
+#### For a `pip` installation
+
+Simply run
+
+```
+pip install m4b-merge
+```
+
+#### For a Docker installation
+
+You'll need to specify input/output volumes in the run command for easy use later:
+
+```
+docker run --name=merge -v /input:/path/to/input -v /output:/path/to/output ghcr.io/djdembeck/m4b-merge:main
+```
+
+## 🔧 Running the tests <a name = "tests"></a>
+
+- Run `pip install pytest`
+- To run all tests, run `pytest` from inside this project directory.
+- To run a single test, run `pytest tests/test_NAME.py`
+
+## 🎈 Usage <a name="usage"></a>
+
+### Workflow
+The process is simple
+1. Pass the file as input via `-i FILE.ext`
+2. Enter the ASIN (found from audible.com) when prompted.
+3. Depending on necessary conversions, the process will take between 5 seconds and 5-10 minutes.
 
 
-## Dependencies
-This tool uses m4b-merge for it's file processing. Installation instructions can be found on [the project's readme](https://github.com/sandreas/m4b-tool#installation).
-
-## CLI usage
-
+### CLI usage
 ```
 usage: m4b-merge [-h] -i INPUTS [INPUTS ...] [--log_level LOG_LEVEL]
 
@@ -39,29 +103,30 @@ optional arguments:
   --log_level LOG_LEVEL
                         Set logging level
 ```
-  - Check the user editable variables in [config.py](src/m4b_merge/config.py), and see if there's anything you need to change.
-  - On first run, you will be prompted to signin to Audible. This is a one-time process that will be saved to your system's relevant config folder, under `m4b-merge`.
 
-## Module usage
-If you are a developer wanting to use this in a project, you can import the modules as so:
-`from m4b_merge import audible_helper, config, helpers, m4b_helper`
+#### When installed via `pip`, you can run inputs like so
 
-And then creating the objects you need (from `audible_helper.BookData(asin)` and `m4b_helper.M4bMerge(input_data, metadata)`)
-You can see more usage examples in the sister project, [Bragi Books](https://github.com/djdembeck/bragibooks/blob/main/importer/views.py)
+```
+m4b-merge -i /path/to/file.mp3
+```
 
-The `parser` function in `audible_helper.BookData` returns some extra data not used in the CLI here. This is a list of all data returned:
-- Title
-- Short Summary
-- Long Summary
-- Authors
-- Narrators
-- Series
-- Release Date
-- Publisher
-- Language
-- Runtime in minutes
-- Format type (abridged, unabridged, other)
+#### On Docker, you can run inputs like so
 
-## Credits
-- Many thanks to mkb79 for their [audible](https://github.com/mkb79/Audible) package.
-- Thanks to sandreas for their tireless work on [m4b-tool](https://github.com/sandreas/m4b-tool)
+```
+docker run -it merge m4b-merge -i /input/file.mp3
+```
+
+For a folder of multiple audio files, simply pass the folder itself as an input, such as `-i /input/dir`
+
+## ⛏️ Built Using <a name = "built_using"></a>
+
+- [audnexus](https://github.com/laxamentumtech/audnexus) - API backend for metadata
+- [m4b-tool]([m4b-tool](https://github.com/sandreas/m4b-tool)) - File merging and tagging
+
+## ✍️ Authors <a name = "authors"></a>
+
+- [@djdembeck](https://github.com/djdembeck) - Idea & Initial work
+
+## 🎉 Acknowledgements <a name = "acknowledgement"></a>
+
+- sandreas for creating and maintaining m4b-tool
