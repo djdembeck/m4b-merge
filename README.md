@@ -87,7 +87,6 @@ The process is simple
 2. Enter the ASIN (found from audible.com) when prompted.
 3. Depending on necessary conversions, the process will take between 5 seconds and 5-10 minutes.
 
-
 ### CLI usage
 ```
 usage: m4b-merge [-h] -i INPUTS [INPUTS ...] [--log_level LOG_LEVEL]
@@ -119,7 +118,7 @@ For a folder of multiple audio files, simply pass the folder itself as an input,
 ## ⛏️ Built Using <a name = "built_using"></a>
 
 - [audnexus](https://github.com/laxamentumtech/audnexus) - API backend for metadata
-- [m4b-tool]([m4b-tool](https://github.com/sandreas/m4b-tool)) - File merging and tagging
+- [m4b-tool](https://github.com/sandreas/m4b-tool) - File merging and tagging
 
 ## ✍️ Authors <a name = "authors"></a>
 
@@ -127,4 +126,4 @@ For a folder of multiple audio files, simply pass the folder itself as an input,
 
 ## 🎉 Acknowledgements <a name = "acknowledgement"></a>
 
-- [sandreas](https://github.com/sandreas) for creating and maintaining[ m4b-tool](https://github.com/sandreas/m4b-tool)
+- [sandreas](https://github.com/sandreas) for creating and maintaining [m4b-tool](https://github.com/sandreas/m4b-tool)
