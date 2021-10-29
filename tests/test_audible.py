@@ -86,12 +86,36 @@ class TestMetadata:
             ), datetime.date
         ):
             errors.append("Error with release date")
+        # Genres/tags
+        if len(metadata['genres']) != 5:
+            errors.append("Not enough genres")
+        if metadata['genres'][0]['name'] != "Science Fiction & Fantasy":
+            errors.append("Genre 1 is incorrect")
+        if metadata['genres'][0]['type'] != "genre":
+            errors.append("Genre  type is incorrect")
+        if metadata['genres'][1]['name'] != "Science Fiction":
+            errors.append("Genre 2 is incorrect")
+        if metadata['genres'][1]['type'] != "genre":
+            errors.append("Genre 2 type is incorrect")
+        if metadata['genres'][2]['name'] != "Adventure":
+            errors.append("Genre 2 is incorrect")
+        if metadata['genres'][2]['type'] != "tag":
+            errors.append("Genre 2 type is incorrect")
+        if metadata['genres'][3]['name'] != "Hard Science Fiction":
+            errors.append("Genre 2 is incorrect")
+        if metadata['genres'][3]['type'] != "tag":
+            errors.append("Genre 2 type is incorrect")
+        if metadata['genres'][4]['name'] != "Space Opera":
+            errors.append("Genre 2 is incorrect")
+        if metadata['genres'][4]['type'] != "tag":
+            errors.append("Genre 2 type is incorrect")
         # Check publisher name
         if metadata['publisherName'] != "Audible Studios":
             errors.append("Error with publisher")
         # Check language
         if metadata['language'] != "english":
             errors.append("Error with language")
+        # Image
         if not metadata['image']:
             errors.append("No cover image found")
         # Assert no errors come back
@@ -118,13 +142,32 @@ class TestMetadata:
             ), datetime.date
         ):
             errors.append("Error with release date")
+        # Genres/tags
+        if len(metadata['genres']) != 2:
+            errors.append("Not enough genres")
+        if metadata['genres'][0]['name'] != "Mystery, Thriller & Suspense":
+            errors.append("Genre 1 is incorrect")
+        if metadata['genres'][0]['type'] != "genre":
+            errors.append("Genre  type is incorrect")
+        if metadata['genres'][1]['name'] != "Thriller & Suspense":
+            errors.append("Genre 2 is incorrect")
+        if metadata['genres'][1]['type'] != "genre":
+            errors.append("Genre 2 type is incorrect")
         # Check publisher name
         if metadata['publisherName'] != "Audible Originals":
             errors.append("Error with publisher")
         # Check language
         if metadata['language'] != "english":
             errors.append("Error with language")
+        # Image
         if not metadata['image']:
             errors.append("No cover image found")
+        # Series
+        if metadata['seriesPrimary']['asin'] != "B08RLSPY4J":
+            errors.append("Series asin incorrect")
+        if metadata['seriesPrimary']['name'] != "A Billy Harney Thriller":
+            errors.append("Series name incorrect")
+        if metadata['seriesPrimary']['position'] != "Book 0.5":
+            errors.append("Series position incorrect")
         # Assert no errors come back
         assert not errors, "Errors occured:\n{}".format("\n".join(errors))
