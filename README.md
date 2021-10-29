@@ -33,7 +33,7 @@
 
 ## 🧐 About <a name = "about"></a>
 
-m4b-merge was originally part of Bragi Books, but was split apart to allow savvy users to automate its usage in more advanced ways. Some of the things m4b-merge offers are:
+m4b-merge was originally part of [Bragi Books](https://github.com/djdembeck/bragibooks), but was split apart to allow savvy users to automate its usage in more advanced ways. Some of the things m4b-merge offers are:
 
 - Accepts single and multiple mp3, m4a and m4b files.
 - mp3s are converted to m4b. m4a/m4b files are edited/merged without conversion.
@@ -41,7 +41,7 @@ m4b-merge was originally part of Bragi Books, but was split apart to allow savvy
 - Final files moved to `/output/Author/Book/Book: Subtitle.m4b` format.
 - Moves finished files into `done` folder in `input` directory.
 
-Metadata provided by audnexus:
+Metadata provided by [audnexus](https://github.com/laxamentumtech/audnexus):
 
 - Title, authors, narrators, description, series, genres, release year - written as tags.
 - Chapter times/titles (only when input is m4b or a single mp3) - written as tags and `chapters.txt`.
@@ -129,4 +129,4 @@ For a folder of multiple audio files, simply pass the folder itself as an input,
 
 ## 🎉 Acknowledgements <a name = "acknowledgement"></a>
 
-- sandreas for creating and maintaining m4b-tool
+- [sandreas](https://github.com/sandreas) for creating and maintaining[ m4b-tool](https://github.com/sandreas/m4b-tool)
