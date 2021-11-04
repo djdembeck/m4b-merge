@@ -35,6 +35,7 @@ class M4bMerge:
                 logging.error("Couldn't download Audible cover")
         else:
             logging.warning("No cover image available from Audible")
+            self.cover_path = None
 
     def prepare_data(self):
         # Metadata variables
