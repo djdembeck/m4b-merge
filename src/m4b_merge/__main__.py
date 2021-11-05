@@ -42,28 +42,15 @@ def main():
         "-i", "--inputs",
         help="Input paths to process",
         nargs='+',
-        required='--login' not in sys.argv,
         type=Path
     )
     parser.add_argument(
         "--log_level",
         help="Set logging level"
     )
-    parser.add_argument(
-        "--login",
-        default=False,
-        action="store_true",
-        help="Log in to Audible"
-    )
 
     args = parser.parse_args()
 
-    # Run login helper
-    if args.login:
-        aud = audible_helper.AudibleAuth()
-        run_auth = aud.handle_auth()
-        if not run_auth:
-            print("Logged in")
     # Get log level from system or input
     if args.log_level:
         numeric_level = getattr(logging, args.log_level.upper(), None)
