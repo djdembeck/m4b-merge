@@ -2,7 +2,6 @@ from pathlib import Path
 import argparse
 import logging
 import os
-import sys
 # Local imports
 from . import audible_helper, helpers, m4b_helper
 
