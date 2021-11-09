@@ -40,8 +40,8 @@ def validate_args(args):
     else:
         config.api_url = "https://api.audnex.us/books"
     # Completed Directory
-    if args.completed_dir:
-        config.junk_dir = args.completed_dir
+    if args.completed_directory:
+        config.junk_dir = args.completed_directory
     else:
         # If using docker, default to /input/done folder, else $USER/input/done
         if Path('/input').is_dir():
