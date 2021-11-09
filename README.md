@@ -89,16 +89,23 @@ The process is simple
 
 ### CLI usage
 ```
-usage: m4b-merge [-h] -i INPUTS [INPUTS ...] [--log_level LOG_LEVEL]
+usage: m4b-merge [-h] [--api_url API_URL] [--completed_directory COMPLETED_DIRECTORY] -i INPUTS [INPUTS ...] [--log_level LOG_LEVEL]
+                 [--num_cpus NUM_CPUS] [-o OUTPUT]
 
-m4b-merge cli
+m4bmerge cli
 
 optional arguments:
   -h, --help            show this help message and exit
+  --api_url API_URL     Audnexus mirror to use
+  --completed_directory COMPLETED_DIRECTORY
+                        Directory path to move original input files to
   -i INPUTS [INPUTS ...], --inputs INPUTS [INPUTS ...]
                         Input paths to process
   --log_level LOG_LEVEL
                         Set logging level
+  --num_cpus NUM_CPUS   Number of CPUs to use
+  -o OUTPUT, --output OUTPUT
+                        Output directory
 ```
 
 #### When installed via `pip`, you can run inputs like so
