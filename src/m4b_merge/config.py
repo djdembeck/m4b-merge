@@ -27,4 +27,3 @@ if not mp4chaps_bin:
     raise SystemExit(
         'Error: Cannot find mp4chaps binary.'
         )
-###

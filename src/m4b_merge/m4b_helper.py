@@ -102,7 +102,6 @@ class M4bMerge:
 
         # Download cover image
         self.download_cover()
-        ##
 
         # Make necessary directories
         # Final output folder
@@ -220,7 +219,6 @@ class M4bMerge:
         # Mediainfo data
         target_bitrate = self.find_bitrate(first_file)
         target_samplerate = self.find_samplerate(first_file)
-        ##
 
         args = [
             config.m4b_tool_bin,
@@ -293,7 +291,6 @@ class M4bMerge:
         # Mediainfo data
         target_bitrate = self.find_bitrate(self.input_path)
         target_samplerate = self.find_samplerate(self.input_path)
-        ##
 
         args = [
             config.m4b_tool_bin,
