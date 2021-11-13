@@ -4,7 +4,7 @@ import pytest
 
 # Test with Project Haill Mary, because it's a good book
 primary_asin = "B08G9PRS1K"
-config.api_url = "https://api.audnex.us/books"
+config.api_url = "https://api.audnex.us"
 
 
 class TestASINValidation:
