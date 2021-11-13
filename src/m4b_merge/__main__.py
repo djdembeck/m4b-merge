@@ -2,9 +2,8 @@ from pathlib import Path
 import argparse
 import logging
 import os
-import sys
 # Local imports
-from . import audible_helper, helpers, m4b_helper
+from . import audible_helper, config, helpers, m4b_helper
 
 
 def run_all(inputs):
@@ -34,37 +33,23 @@ def run_all(inputs):
     m4b.run_merge()
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='m4bmerge cli'
-    )
-    parser.add_argument(
-        "-i", "--inputs",
-        help="Input paths to process",
-        nargs='+',
-        required='--login' not in sys.argv,
-        type=Path
-    )
-    parser.add_argument(
-        "--log_level",
-        help="Set logging level"
-    )
-    parser.add_argument(
-        "--login",
-        default=False,
-        action="store_true",
-        help="Log in to Audible"
-    )
-
-    args = parser.parse_args()
-
-    # Run login helper
-    if args.login:
-        aud = audible_helper.AudibleAuth()
-        run_auth = aud.handle_auth()
-        if not run_auth:
-            print("Logged in")
-    # Get log level from system or input
+def validate_args(args):
+    # API URL
+    if args.api_url:
+        config.api_url = args.api_url
+    else:
+        config.api_url = "https://api.audnex.us/books"
+    # Completed Directory
+    if args.completed_directory:
+        config.junk_dir = args.completed_directory
+    else:
+        # If using docker, default to /input/done folder, else $USER/input/done
+        if Path('/input').is_dir():
+            config.junk_dir = Path('/input/done')
+        else:
+            default_input = Path.home()
+            config.junk_dir = Path(f"{default_input}/input/done")
+    # Log Level
     if args.log_level:
         numeric_level = getattr(logging, args.log_level.upper(), None)
         if not isinstance(numeric_level, int):
@@ -72,7 +57,23 @@ def main():
         logging.basicConfig(level=numeric_level)
     else:
         logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-    # Run through inputs
+    # Number of CPUs
+    if args.num_cpus:
+        config.num_cpus = args.num_cpus
+    else:
+        config.num_cpus = os.cpu_count()
+    # Output Directory
+    if args.output:
+        config.output = args.output
+    else:
+        # If using docker, default to /output folder, else $USER/output
+        if Path('/output').is_dir():
+            config.output = Path('/output')
+        else:
+            default_output = Path.home()
+            config.output = Path(f"{default_output}/output")
+    # Inputs
+    # Last to be checked
     if args.inputs:
         for inputs in args.inputs:
             if inputs.exists():
@@ -84,6 +85,44 @@ def main():
         print(f"Done processing {len(args.inputs)} inputs")
         print('-' * 25)
 
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='m4bmerge cli'
+    )
+    parser.add_argument(
+        "--api_url",
+        help="Audnexus mirror to use",
+        type=str
+    )
+    parser.add_argument(
+        "--completed_directory",
+        help="Directory path to move original input files to",
+        type=Path
+    )
+    parser.add_argument(
+        "-i", "--inputs",
+        help="Input paths to process",
+        nargs='+',
+        required=True,
+        type=Path
+    )
+    parser.add_argument(
+        "--log_level",
+        help="Set logging level"
+    )
+    parser.add_argument(
+        "--num_cpus",
+        help="Number of CPUs to use",
+        type=int
+    )
+    parser.add_argument(
+        "-o", "--output",
+        help="Output directory",
+        type=Path
+    )
+
+    validate_args(parser.parse_args())
 
 # Only run call if using CLI directly
 if __name__ == "__main__":
