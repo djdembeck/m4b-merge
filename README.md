@@ -114,6 +114,12 @@ optional arguments:
 m4b-merge -i /path/to/file.mp3
 ```
 
+Or for multiple inputs
+
+```
+m4b-merge -i /path/to/file.mp3 -i /dir/ -i /path/to/other/file
+```
+
 #### On Docker, you can run inputs like so
 
 ```
