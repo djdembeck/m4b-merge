@@ -38,7 +38,7 @@ def validate_args(args):
     if args.api_url:
         config.api_url = args.api_url
     else:
-        config.api_url = "https://api.audnex.us/books"
+        config.api_url = "https://api.audnex.us"
     # Completed Directory
     if args.completed_directory:
         config.junk_dir = args.completed_directory
