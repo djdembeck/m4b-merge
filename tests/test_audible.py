@@ -1,9 +1,10 @@
 import datetime
-from m4b_merge import audible_helper, helpers
+from m4b_merge import audible_helper, config, helpers
 import pytest
 
 # Test with Project Haill Mary, because it's a good book
 primary_asin = "B08G9PRS1K"
+config.api_url = "https://api.audnex.us/books"
 
 
 class TestASINValidation:

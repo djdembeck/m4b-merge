@@ -84,17 +84,3 @@ class BookData:
         self.metadata_dict = book_api_call.json()
         self.metadata_dict['chapter_info'] = chapter_api_call.json()
         return self.metadata_dict
-
-    def check_asin_sku(self):
-        # Login or register as needed
-        self.auth.handle_auth()
-        aud_json = self.auth.client.get(
-            f"catalog/products/{self.asin}",
-            params={
-                "response_groups": "sku",
-                "asins": self.asin
-            }
-        )
-        if 'sku' in aud_json['product']:
-            return True
-        return None

@@ -1,42 +1,6 @@
 from pathlib import Path
-import os
 import shutil
 from appdirs import user_config_dir
-
-# User editable variables
-# API url
-api_url = "https://api.audnex.us/books"
-
-# output directory for cleaned metadata/folder structure
-# leaving blank uses /output for docker or $USER/output for anything else
-output = ""
-
-# Number of cpus to use for jobs
-cpus_to_use = ""
-#
-
-# Set defaults if no user changes
-# Setup output folder defaults
-if not output:
-    # If using docker, default to /output folder, else $USER/output
-    if Path('/output').is_dir():
-        output = Path('/output')
-    else:
-        default_output = Path.home()
-        output = Path(f"{default_output}/output")
-
-# If using docker, default to /input/done folder, else $USER/input/done
-if Path('/input').is_dir():
-    junk_dir = Path('/input/done')
-else:
-    default_input = Path.home()
-    junk_dir = Path(f"{default_input}/input/done")
-
-# Available CPU cores to use
-if not cpus_to_use:
-    num_cpus = os.cpu_count()
-else:
-    num_cpus = cpus_to_use
 
 # config section for docker
 if Path('/config').is_dir():
@@ -63,4 +27,3 @@ if not mp4chaps_bin:
     raise SystemExit(
         'Error: Cannot find mp4chaps binary.'
         )
-###
