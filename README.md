@@ -83,8 +83,8 @@ docker run --name=merge -v /input:/path/to/input -v /output:/path/to/output ghcr
 
 ### Workflow
 The process is simple
-1. Pass the file as input via `-i FILE.ext`
-2. Enter the ASIN (found from audible.com) when prompted.
+1. Pass the file as input via `-i FILE.ext` or folder `-i DIR/`
+2. Enter the ASIN (found on audible.com) when prompted.
 3. Depending on necessary conversions, the process will take between 5 seconds and 5-10 minutes.
 
 ### CLI usage
