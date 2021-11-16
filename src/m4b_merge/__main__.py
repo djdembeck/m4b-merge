@@ -25,7 +25,7 @@ def run_all(inputs):
 
     # Create BookData object from asin response
     aud = audible_helper.BookData(asin)
-    metadata = aud.fetch_api_data()
+    metadata = aud.fetch_api_data(config.api_url)
     chapters = aud.get_chapters()
 
     # Process metadata and run components to merge files
