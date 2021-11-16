@@ -3,7 +3,6 @@ import collections
 import logging
 import os
 import requests
-from . import config
 
 
 # Find the primary extension which we will use
@@ -82,10 +81,10 @@ def get_directory(input_take):
 
 
 # Checks that asin is the expected length, then cheks for http code 200
-def validate_asin(asin):
+def validate_asin(api_url, asin):
     if len(asin) == 10:
         # Check ASIN http response
-        check = requests.get(f"{config.api_url}/books/{asin}")
+        check = requests.get(f"{api_url}/books/{asin}")
         # If either good http response or valid api response
         if check.status_code == 200:
             logging.info(f"Validated ASIN: {asin}")
