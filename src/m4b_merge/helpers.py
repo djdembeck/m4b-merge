@@ -85,7 +85,7 @@ def get_directory(input_take):
 def validate_asin(asin):
     if len(asin) == 10:
         # Check ASIN http response
-        check = requests.get(f"{config.api_url}/{asin}")
+        check = requests.get(f"{config.api_url}/books/{asin}")
         # If either good http response or valid api response
         if check.status_code == 200:
             logging.info(f"Validated ASIN: {asin}")
