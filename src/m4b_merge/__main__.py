@@ -18,7 +18,7 @@ def run_all(inputs):
     while True:
         try:
             asin = input("Audiobook ASIN: ")
-            helpers.validate_asin(asin)
+            helpers.validate_asin(config.api_url, asin)
             break
         except Exception as e:
             print(str(e))
