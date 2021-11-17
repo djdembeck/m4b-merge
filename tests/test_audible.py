@@ -10,7 +10,7 @@ config.api_url = "https://api.audnex.us"
 class TestASINValidation:
     # Call ASIN validator
     def audible_request(self, asin):
-        helpers.validate_asin(asin)
+        helpers.validate_asin(config.api_url, asin)
 
     # Check a known good ASIN
     def test_audible_request_valid(self):
