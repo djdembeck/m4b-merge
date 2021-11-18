@@ -40,14 +40,15 @@ class M4bMerge:
     def prepare_data(self):
         # Metadata variables
         # Only use subtitle in case of metadata, not file name
-        if 'subtitle' in self.metadata:
-            base_title = self.metadata['title']
-            base_subtitle = self.metadata['subtitle']
-            self.title = f"{base_title} - {base_subtitle}"
-        else:
+        if 'title' in self.metadata:
             self.title = self.metadata['title']
-        # no subtitle for file name
-        self.path_title = self.metadata['title']
+        else:
+            raise ValueError("No title in metadata")
+
+        if 'subtitle' in self.metadata:
+            self.subtitle = self.metadata['subtitle']
+        else:
+            self.subtitle = None
 
         # Only use first author/narrator for file names;
         self.path_author = self.metadata['authors'][0]['name']
@@ -64,7 +65,7 @@ class M4bMerge:
         self.narrator = ', '.join(narrator_name_arr)
 
         if 'seriesPrimary' in self.metadata:
-            self.series = self.metadata['seriesPrimary']['name']
+            self.series_name = self.metadata['seriesPrimary']['name']
             if 'position' in self.metadata['seriesPrimary']:
                 self.series_position = (
                     self.metadata['seriesPrimary']['position']
@@ -72,7 +73,8 @@ class M4bMerge:
             else:
                 self.series_position = None
         else:
-            self.series = None
+            self.series_name = None
+            self.series_position = None
 
         self.summary = self.metadata['description']
 
@@ -94,11 +96,7 @@ class M4bMerge:
             self.comment = self.metadata['formatType'].capitalize()
 
     def prepare_command_args(self):
-        self.book_output = (
-            f"{config.output}/{sanitize_filename(self.path_author)}/"
-            f"{sanitize_filename(self.path_title)}"
-        )
-        self.file_title = sanitize_filename(self.title)
+        self.prepare_output_path()
 
         # Download cover image
         self.download_cover()
@@ -118,9 +116,12 @@ class M4bMerge:
 
         # Array for argument use
         # main metadata args
+        combined_title = self.title
+        if self.subtitle:
+            combined_title = f"{self.title} - {self.subtitle}"
         self.metadata_args = [
-            f"--name={self.title}",
-            f"--album={self.path_title}",
+            f"--name={combined_title}",
+            f"--album={self.title}",
             f"--artist={self.narrator}",
             f"--albumartist={self.author}",
             f"--year={self.year}",
@@ -128,8 +129,8 @@ class M4bMerge:
         ]
 
         # Append series to metadata if it exists
-        if self.series:
-            self.metadata_args.append(f"--series={self.series}")
+        if self.series_name:
+            self.metadata_args.append(f"--series={self.series_name}")
             if self.series_position:
                 self.metadata_args.append(
                     f"--series-part={self.series_position}"
@@ -165,6 +166,53 @@ class M4bMerge:
             self.processing_args.append('-v')
         elif level == logging.DEBUG:
             self.processing_args.append('-vvv')
+    
+    def prepare_output_path(self):
+        """
+            Parses user input for desired output path.
+
+            For example:
+            `author/series_name series_position - title: subtitle (year)/author - title (year)`
+        """
+        # First we need to replace the terms with actual data
+        # Author
+        self.replace_tag('author', self.path_author)
+        # Narrator
+        self.replace_tag('narrator', self.narrator[0])
+        # Series Name
+        self.replace_tag('series_name', self.series_name)
+        # Series Position
+        self.replace_tag('series_position', self.series_position)
+        # Subtitle
+        self.replace_tag('subtitle', self.subtitle)
+        # Title
+        self.replace_tag('title', self.title)
+        # Year
+        self.replace_tag('year', self.year)
+
+        # Now prepare the actual path
+        split_paths = config.path_format.split('/')
+        sanitized_path_arr = []
+        for section in split_paths:
+            sanitized_path_arr.append(sanitize_filename(section))
+        final_path = '/'.join(sanitized_path_arr)
+        logging.info(f"Final path format: {final_path}")
+
+        self.book_output = (
+            f"{config.output}/"
+            f"{final_path}"
+        )
+        logging.info(f"Complete output path: {self.book_output}")
+
+    def replace_tag(self, key, value):
+        if key and value:
+            logging.warning(key)
+            config.path_format = config.path_format.replace(key, str(value))
+        else:
+            self.remove_tag(key)
+
+    def remove_tag(self, tag):
+        config.path_format.replace(tag, '')
 
     def find_bitrate(self, file_input):
         # Divide bitrate by 1k, round up,
@@ -223,7 +271,7 @@ class M4bMerge:
         args = [
             config.m4b_tool_bin,
             'merge',
-            f"--output-file={self.book_output}/{self.file_title}.m4b"
+            f"--output-file={self.book_output}.m4b"
         ]
 
         # Add in main metadata and merge args
@@ -277,7 +325,7 @@ class M4bMerge:
         # Move completed file
         shutil.move(
             f"{self.input_path.parent}/{self.input_path.stem}.new.m4b",
-            f"{self.book_output}/{self.file_title}.m4b"
+            f"{self.book_output}.m4b"
         )
 
         # Move obsolete input to processed folder
@@ -295,7 +343,7 @@ class M4bMerge:
         args = [
             config.m4b_tool_bin,
             'merge',
-            f"--output-file={self.book_output}/{self.file_title}.m4b",
+            f"--output-file={self.book_output}.m4b",
             f"--audio-bitrate={target_bitrate}",
             f"--audio-samplerate={target_samplerate}"
         ]
@@ -356,8 +404,8 @@ class M4bMerge:
         return selected_input
 
     def fix_chapters(self):
-        chapter_file = f"{self.book_output}/{self.file_title}.chapters.txt"
-        m4b_to_modify = f"{self.book_output}/{self.file_title}.m4b"
+        chapter_file = f"{self.book_output}.chapters.txt"
+        m4b_to_modify = f"{self.book_output}.m4b"
 
         # Use audible chapters if they exist and this isn't an mp3
         if (self.chapters and self.input_extension != "mp3") or (
