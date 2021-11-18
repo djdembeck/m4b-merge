@@ -1,7 +1,6 @@
 import logging
 import requests
 from datetime import timedelta
-from . import config
 
 
 # Checks validity of asin, then gathers json response into a return object
@@ -73,13 +72,13 @@ class BookData:
 
         return chapter_output
 
-    def fetch_api_data(self):
+    def fetch_api_data(self, api_url):
         # metadata dictionary
         book_api_call = requests.get(
-            f"{config.api_url}/{self.asin}"
+            f"{api_url}/books/{self.asin}"
         )
         chapter_api_call = requests.get(
-            f"{config.api_url}/{self.asin}/chapters"
+            f"{api_url}/books/{self.asin}/chapters"
         )
         self.metadata_dict = book_api_call.json()
         self.metadata_dict['chapter_info'] = chapter_api_call.json()

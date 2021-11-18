@@ -4,13 +4,13 @@ import pytest
 
 # Test with Project Haill Mary, because it's a good book
 primary_asin = "B08G9PRS1K"
-config.api_url = "https://api.audnex.us/books"
+config.api_url = "https://api.audnex.us"
 
 
 class TestASINValidation:
     # Call ASIN validator
     def audible_request(self, asin):
-        helpers.validate_asin(asin)
+        helpers.validate_asin(config.api_url, asin)
 
     # Check a known good ASIN
     def test_audible_request_valid(self):
@@ -35,7 +35,7 @@ class TestChapterData:
     # Create new Audible object to work with
     def chapters(self, asin):
         aud = self.audible_data(asin)
-        aud.fetch_api_data()
+        aud.fetch_api_data(config.api_url)
         chapters = aud.get_chapters()
         return chapters
 
@@ -64,7 +64,7 @@ class TestChapterData:
 class TestMetadata:
     def audible_data(self, asin):
         aud = audible_helper.BookData(asin)
-        return aud.fetch_api_data()
+        return aud.fetch_api_data(config.api_url)
 
     def test_single_author_single_narrator(self):
         errors = []
