@@ -419,6 +419,9 @@ class M4bMerge:
         # Cleanup cover file
         if self.cover_path:
             os.remove(self.cover_path)
+        logging.debug("Input path vs junk dir:")
+        logging.debug(self.input_path)
+        logging.debug(config.junk_dir)
         # Move obsolete input to processed folder
         if Path(self.input_path.parent, 'done') == Path(config.junk_dir):
             logging.debug("Junk dir is direct parent")
