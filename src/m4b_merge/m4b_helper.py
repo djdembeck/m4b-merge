@@ -2,6 +2,7 @@ from datetime import datetime
 import logging
 import math
 import os
+import re
 import requests
 import shutil
 import subprocess
@@ -206,13 +207,12 @@ class M4bMerge:
 
     def replace_tag(self, key, value):
         if key and value:
-            logging.warning(key)
-            config.path_format = config.path_format.replace(key, str(value))
+            config.path_format = re.sub(key, str(value), config.path_format)
         else:
             self.remove_tag(key)
 
     def remove_tag(self, tag):
-        config.path_format.replace(tag, '')
+        config.path_format = re.sub(tag, '', config.path_format).rstrip().strip('-')
 
     def find_bitrate(self, file_input):
         # Divide bitrate by 1k, round up,
