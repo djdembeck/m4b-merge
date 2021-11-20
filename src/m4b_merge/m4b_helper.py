@@ -104,7 +104,7 @@ class M4bMerge:
 
         # Make necessary directories
         # Final output folder
-        Path(self.book_output).mkdir(
+        Path(os.path.dirname(self.book_output)).mkdir(
             parents=True,
             exist_ok=True
         )
