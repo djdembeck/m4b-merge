@@ -72,6 +72,11 @@ def validate_args(args):
         else:
             default_output = Path.home()
             config.output = Path(f"{default_output}/output")
+    # Path Format
+    if args.path_format:
+        config.path_format = args.path_format
+    else:
+        config.path_format = "author/title - subtitle"
     # Inputs
     # Last to be checked
     if args.inputs:
@@ -120,6 +125,11 @@ def main():
         "-o", "--output",
         help="Output directory",
         type=Path
+    )
+    parser.add_argument(
+        "-p", "--path_format",
+        help="Structure of output path/naming. Supported terms: author, narrator, series_name, series_position, subtitle, title, year",
+        type=str
     )
 
     validate_args(parser.parse_args())
