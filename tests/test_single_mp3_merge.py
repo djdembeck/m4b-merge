@@ -19,6 +19,7 @@ test_cover = Path(f"{test_path}_cover.jpg")
 home = Path.home()
 config.output = Path(f"{home}/output")
 config.junk_dir = Path(f"{home}/input/done")
+config.path_format = "author/title/title - subtitle"
 output_dir = Path(f"{config.output}/Andy Weir/Project Hail Mary")
 output_path = Path(output_dir, "Project Hail Mary.m4b")
 output_chapters = Path(f"{output_dir}/Project Hail Mary.chapters.txt")
