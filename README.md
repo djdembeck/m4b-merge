@@ -6,12 +6,12 @@
 [![Status](https://img.shields.io/badge/status-active-success.svg)]()
 [![GitHub Issues](https://img.shields.io/github/issues/djdembeck/m4b-merge.svg)](https://github.com/djdembeck/m4b-merge/issues)
 [![GitHub Pull Requests](https://img.shields.io/github/issues-pr/djdembeck/m4b-merge.svg)](https://github.com/djdembeck/m4b-merge/pulls)
+[![License](https://img.shields.io/github/license/djdembeck/m4b-merge)](https://github.com/djdembeck/m4b-merge/blob/develop/LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/m4b-merge)](https://pypi.org/project/m4b-merge/)
 ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/m4b-merge?style=flat)
 [![Python package](https://github.com/djdembeck/m4b-merge/actions/workflows/build.yml/badge.svg)](https://github.com/djdembeck/m4b-merge/actions/workflows/build.yml)
 [![CodeFactor Grade](https://img.shields.io/codefactor/grade/github/djdembeck/m4b-merge)](https://www.codefactor.io/repository/github/djdembeck/m4b-merge)
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/m4b-merge)](https://pypi.org/project/m4b-merge/)
-[![License](https://img.shields.io/github/license/djdembeck/m4b-merge)](https://github.com/djdembeck/m4b-merge/blob/develop/LICENSE)
 
 </div>
 
