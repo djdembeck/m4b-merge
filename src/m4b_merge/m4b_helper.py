@@ -51,6 +51,9 @@ class M4bMerge:
         else:
             self.subtitle = None
 
+        if not 'authors' in self.metadata:
+            raise ValueError("No author in metadata")
+
         # Only use first author/narrator for file names;
         self.path_author = self.metadata['authors'][0]['name']
 
@@ -61,8 +64,9 @@ class M4bMerge:
         self.author = ', '.join(author_name_arr)
 
         narrator_name_arr = []
-        for narrators in self.metadata['narrators']:
-            narrator_name_arr.append(narrators['name'])
+        if 'narrators' in self.metadata:
+            for narrators in self.metadata['narrators']:
+                narrator_name_arr.append(narrators['name'])
         self.narrator = ', '.join(narrator_name_arr)
 
         if 'seriesPrimary' in self.metadata:
