@@ -51,7 +51,7 @@ class M4bMerge:
         else:
             self.subtitle = None
 
-        if not 'authors' in self.metadata:
+        if 'authors' not in self.metadata:
             raise ValueError("No author in metadata")
 
         # Only use first author/narrator for file names;
@@ -171,13 +171,14 @@ class M4bMerge:
             self.processing_args.append('-v')
         elif level == logging.DEBUG:
             self.processing_args.append('-vvv')
-    
+
     def prepare_output_path(self):
         """
             Parses user input for desired output path.
 
             For example:
-            `author/series_name series_position - title: subtitle (year)/author - title (year)`
+            `author/series_name series_position - title`
+            `: subtitle (year)/author - title (year)`
         """
         # First we need to replace the terms with actual data
         # Author
@@ -216,7 +217,9 @@ class M4bMerge:
             self.remove_tag(key)
 
     def remove_tag(self, tag):
-        config.path_format = re.sub(tag, '', config.path_format).rstrip().strip('-')
+        config.path_format = re.sub(
+            tag, '', config.path_format
+        ).rstrip().strip('-')
 
     def find_bitrate(self, file_input):
         # Divide bitrate by 1k, round up,
