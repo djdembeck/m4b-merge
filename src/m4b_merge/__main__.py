@@ -128,11 +128,17 @@ def main():
     )
     parser.add_argument(
         "-p", "--path_format",
-        help="Structure of output path/naming. Supported terms: author, narrator, series_name, series_position, subtitle, title, year",
+        help=(
+            "Structure of output path/naming."
+            "Supported terms: author, narrator, "
+            "series_name, series_position, "
+            "subtitle, title, year"
+        ),
         type=str
     )
 
     validate_args(parser.parse_args())
+
 
 # Only run call if using CLI directly
 if __name__ == "__main__":
