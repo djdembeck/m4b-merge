@@ -15,27 +15,12 @@ def find_extension(path_to_check):
                 .resolve().glob(f'*.{EXT}')
                 ):
             extension_to_use = EXT
-            list_of_files = os.listdir(Path(path_to_check))
-            # Case for single file in a folder
-            if sum(
-                x.endswith(f'.{extension_to_use}')
-                for x in list_of_files
-            ) == 1:
-                for m4b_file in (
-                    Path(path_to_check)
-                        .glob(f'*.{extension_to_use}')):
-                    logging.debug(
-                        f"Adjusted input for {path_to_check}"
-                        f" to use single m4b file")
-                    path_to_use = m4b_file
-                num_of_files = 1
-            else:
-                num_of_files = sum(
-                    x.endswith(f'.{extension_to_use}')
-                    for x in list_of_files
-                    )
-                path_to_use = path_to_check
-            return path_to_use, extension_to_use, num_of_files
+            return extension_to_use
+    logging.warn(f'Could not determine extension for {path_to_check}, continuing with a guess')
+    first_file = os.listdir(Path(path_to_check))[0]
+    extension_to_use = Path(first_file).suffix.replace('.', '')
+
+    return extension_to_use
 
 
 # Validate path, check if it's a directory or a file
