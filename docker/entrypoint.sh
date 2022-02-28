@@ -11,6 +11,6 @@ else
     groupmod -g "$GROUP_ID" user > /dev/null
 fi
 export HOME=/home/user
-chown -R "$USER_ID":"$GROUP_ID" /input /output
+chown -R "$USER_ID":"$GROUP_ID" /config /input /output
 
 exec runuser -u user "$@"
