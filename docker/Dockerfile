@@ -135,9 +135,6 @@ RUN \
 # base image
 FROM python:3.9
 
-# setup environment variable
-ENV DockerHOME=/home/app
-
 RUN \
     touch /etc/apt/sources.list.d/contrib.list && \
     echo "deb http://ftp.us.debian.org/debian buster main contrib non-free" >> /etc/apt/sources.list.d/contrib.list 
@@ -164,28 +161,22 @@ RUN	apt-get update && \
     dpkg -i mp4v2-utils_2.0.0~dfsg0-6_amd64.deb && \
     rm ./*.deb && \
     rm -rf /var/lib/apt/lists/* && \
-    apt-get remove -y wget && \
-    mkdir -p $DockerHOME && \
-    adduser worker && \
-    chown -R worker $DockerHOME
-
-WORKDIR $DockerHOME
+    apt-get remove -y wget
 
 # set environment variables
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
-ENV PATH="/home/worker/.local/bin:${PATH}"
 
 COPY . /src
 
 # run this command to install all dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /src/requirements.txt \
-    pip install --no-cache-dir /src
+    pip install --no-cache-dir /src && \
+    rm -rf /src/build
 
 COPY --from=ffbuild /usr/local/bin/ffmpeg /usr/bin
 COPY --from=ffbuild /usr/local/bin/ffprobe /usr/bin
 
-USER root
 ENTRYPOINT ["/bin/sh", "/src/docker/entrypoint.sh"]
 CMD m4b-merge

@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.4.7](https://github.com/djdembeck/m4b-merge/compare/v0.4.6...v0.4.7) (2022-02-28)
+
+
+### Bug Fixes
+
+* **docker:** :ambulance: also chown /config ([8e99393](https://github.com/djdembeck/m4b-merge/commit/8e993935e92cd2e49a10cd2abbec4cf394bbee83))
+* **docker:** :bug: better startup permissions management ([3c4cef5](https://github.com/djdembeck/m4b-merge/commit/3c4cef567f185e2c690c043b2316c1e4439ed441))
+* **merge:** :bug: cleanup find_extension process ([a37bfbe](https://github.com/djdembeck/m4b-merge/commit/a37bfbe96870774d35e3255813932f7ce2e7c518))
+* **merge:** :bug: separate these into own functions so multi disc and single file both can pick up unknown extensions ([a8da6b5](https://github.com/djdembeck/m4b-merge/commit/a8da6b5ab3fe726057d4c9b18a7d486f5947990a))
+
 ### [0.4.6](https://github.com/djdembeck/m4b-merge/compare/v0.4.5...v0.4.6) (2022-02-07)
 
 ### [0.4.2](https://github.com/djdembeck/m4b-merge/compare/v0.4.1...v0.4.2) (2021-11-04)
