@@ -73,6 +73,12 @@ You'll need to specify input/output volumes in the run command for easy use late
 docker run --name=merge -v /input:/path/to/input -v /output:/path/to/output ghcr.io/djdembeck/m4b-merge:main
 ```
 
+You may also specify the user and group to run as with env variables:
+
+```
+-e UID=99 -e GID=100
+```
+
 ## 🔧 Running the tests <a name = "tests"></a>
 
 - Run `pip install pytest`

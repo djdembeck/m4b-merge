@@ -374,10 +374,10 @@ class M4bMerge:
         # If multi-disc, find the extension
         if not self.input_extension:
             selected_input = self.find_multi_disc_extension()
+            selected_input_glob = Path(selected_input).glob('*')
         else:
             selected_input = self.input_path
-
-        selected_input_glob = Path(selected_input).glob('**/*')
+            selected_input_glob = Path(selected_input).glob('**/*')
 
         # Find first file with our extension, to check rates against
         for file in sorted(selected_input_glob):
@@ -403,7 +403,7 @@ class M4bMerge:
         )
         # Now that first sorted directory was found, find it's primary ext
         self.input_extension = helpers.find_extension(
-            selected_input)[1]
+            selected_input)
         logging.debug(
             (f"Guessed multi-disc extension to be:"
                 f" {self.input_extension}")
