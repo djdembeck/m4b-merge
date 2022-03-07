@@ -50,6 +50,8 @@ def validate_args(args):
             default_input = Path.home()
             config.junk_dir = Path(f"{default_input}/input/done")
     # Log Level
+    if os.environ.get('LOG_LEVEL') and not args.log_level:
+        args.log_level = os.environ.get('LOG_LEVEL')
     if args.log_level:
         numeric_level = getattr(logging, args.log_level.upper(), None)
         if not isinstance(numeric_level, int):
