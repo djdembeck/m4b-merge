@@ -24,6 +24,9 @@ def find_extension(path_to_check):
 
 
 def find_num_of_files(path_to_check, extension_to_use):
+    # First verify this isn't a single file
+    if Path(path_to_check).is_file():
+        return 1
     list_of_files = os.listdir(Path(path_to_check))
     # Case for single file in a folder
     if sum(
@@ -36,7 +39,7 @@ def find_num_of_files(path_to_check, extension_to_use):
             x.endswith(f'.{extension_to_use}')
             for x in list_of_files
             )
-    return  num_of_files
+    return num_of_files
 
 
 def find_path_to_use(path_to_check, extension_to_use):
