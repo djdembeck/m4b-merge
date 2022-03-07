@@ -77,6 +77,11 @@ def validate_args(args):
         config.path_format = args.path_format
     else:
         config.path_format = "author/title - subtitle"
+    logging.debug(f'Using API URL: {config.api_url}')
+    logging.debug(f'Using junk path: {config.junk_dir}')
+    logging.debug(f'Using CPU cores: {config.num_cpus}')
+    logging.debug(f'Using output path: {config.output}')
+    logging.debug(f'Using output format: {config.path_format}')
     # Inputs
     # Last to be checked
     if args.inputs:
