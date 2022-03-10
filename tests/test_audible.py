@@ -144,7 +144,7 @@ class TestMetadata:
         ):
             errors.append("Error with release date")
         # Genres/tags
-        if len(metadata['genres']) != 2:
+        if len(metadata['genres']) < 2:
             errors.append("Not enough genres")
         if metadata['genres'][0]['name'] != "Mystery, Thriller & Suspense":
             errors.append("Genre 1 is incorrect")
@@ -168,7 +168,7 @@ class TestMetadata:
             errors.append("Series asin incorrect")
         if metadata['seriesPrimary']['name'] != "A Billy Harney Thriller":
             errors.append("Series name incorrect")
-        if metadata['seriesPrimary']['position'] != "Book 0.5":
+        if metadata['seriesPrimary']['position'] != "0.5":
             errors.append("Series position incorrect")
         # Assert no errors come back
         assert not errors, "Errors occured:\n{}".format("\n".join(errors))
