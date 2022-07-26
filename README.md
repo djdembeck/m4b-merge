@@ -70,7 +70,7 @@ pip install m4b-merge
 You'll need to specify input/output volumes in the run command for easy use later:
 
 ```
-docker run --name=merge -v /input:/path/to/input -v /output:/path/to/output ghcr.io/djdembeck/m4b-merge:main
+docker run --name=merge -v /path/to/input:/input -v /path/to/output:/output ghcr.io/djdembeck/m4b-merge:main
 ```
 
 You may also specify the user and group to run as with env variables:
