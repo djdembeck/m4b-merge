@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.4.8](https://github.com/djdembeck/m4b-merge/compare/v0.4.7...v0.4.8) (2022-09-12)
+
+
+### Features
+
+* **merge:** :sparkles: use LOG_LEVEL from environment variable if available ([6779104](https://github.com/djdembeck/m4b-merge/commit/677910471c1ea88f272df29d1b5f0faf34e6b073))
+
+
+### Bug Fixes
+
+* **merge:** :ambulance: fix crash on single file in a folder ([a895b4d](https://github.com/djdembeck/m4b-merge/commit/a895b4de44f549068c4b010a3b4fb1a82d1750ad))
+* **merge:** :bug: handle case where input has no `bit_rate` and/or `sample_rate` ([9e17fbd](https://github.com/djdembeck/m4b-merge/commit/9e17fbd7b58145461ca1cee422ab881e76415483))
+
 ### [0.4.7](https://github.com/djdembeck/m4b-merge/compare/v0.4.6...v0.4.7) (2022-02-28)
 
 
