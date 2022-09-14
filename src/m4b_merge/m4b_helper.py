@@ -224,20 +224,28 @@ class M4bMerge:
     def find_bitrate(self, file_input):
         # Divide bitrate by 1k, round up,
         # and return back to 1k divisible for round number.
-        target_bitrate = math.ceil(
-            int(mediainfo(file_input)['bit_rate']) / 1000
-        ) * 1000
-        logging.info(f"Source bitrate: {target_bitrate}")
+        try:
+            target_bitrate = math.ceil(
+                int(mediainfo(file_input)['bit_rate']) / 1000
+            ) * 1000
+            logging.info(f"Source bitrate: {target_bitrate}")
+        except KeyError:
+            logging.warning("Unable to determine bitrate, using default")
+            target_bitrate = ''
 
         return target_bitrate
 
     def find_samplerate(self, file_input):
-        target_samplerate = int(
-            mediainfo(
-                file_input
-            )['sample_rate']
-        )
-        logging.info(f"Source samplerate: {target_samplerate}")
+        try:
+            target_samplerate = int(
+                mediainfo(
+                    file_input
+                )['sample_rate']
+            )
+            logging.info(f"Source samplerate: {target_samplerate}")
+        except KeyError:
+            logging.warning("Unable to determine samplerate, using default")
+            target_samplerate = ''
 
         return target_samplerate
 
