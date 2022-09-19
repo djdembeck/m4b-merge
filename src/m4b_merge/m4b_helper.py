@@ -310,6 +310,7 @@ class M4bMerge:
         subprocess.call(args, shell=False)
 
         # Move obsolete input to processed folder
+        self.path_to_move = self.input_path
         self.move_completed_input()
         # Process chapters
         self.fix_chapters()
@@ -331,7 +332,7 @@ class M4bMerge:
         shutil.copy(
             self.input_path,
             f"{self.input_path.parent}/{self.input_path.stem}.new.m4b"
-            )
+        )
 
         # m4b command with passed args
         logging.debug(f"M4B command: {args}")
@@ -344,6 +345,7 @@ class M4bMerge:
         )
 
         # Move obsolete input to processed folder
+        self.path_to_move = self.input_path
         self.move_completed_input()
         # Process chapters
         self.fix_chapters()
@@ -374,6 +376,7 @@ class M4bMerge:
         subprocess.call(args, shell=False)
 
         # Move obsolete input to processed folder
+        self.path_to_move = self.input_path
         self.move_completed_input()
         # Process chapters
         self.fix_chapters()
@@ -446,7 +449,7 @@ class M4bMerge:
                     new_line = (
                         (stripped_line[0:13]) +
                         f'Chapter {"{0:0=2d}".format(counter)}'
-                        )
+                    )
                     new_file_content += new_line + "\n"
 
         with open(chapter_file, 'w') as f:
@@ -482,21 +485,13 @@ class M4bMerge:
         # Cleanup cover file
         if self.cover_path:
             os.remove(self.cover_path)
-        # Move obsolete input to processed folder
-        if Path(self.input_path.parent, 'done') == Path(config.junk_dir):
-            logging.debug("Junk dir is direct parent")
-            move_dir = Path(self.input_path)
-        elif Path(self.input_path.parents[1], 'done') == Path(config.junk_dir):
-            logging.debug("Junk dir is double parent")
-            move_dir = Path(self.input_path.parent)
-        else:
-            logging.warning("Input path vs junk dir:")
-            logging.warning(self.input_path)
-            logging.warning(config.junk_dir)
-            return logging.warning("Couldn't find junk dir relative to input")
+        # Move completed input to junk dir
+        logging.debug(
+            f'Moving completed input {self.path_to_move} to {config.junk_dir}')
+        dest = Path(config.junk_dir, self.path_to_move.name)
 
-        dest = Path(config.junk_dir, move_dir.name)
         try:
-            move_dir.replace(dest)
+            # move_dir.replace(dest)
+            shutil.move(self.path_to_move, dest)
         except OSError:
             logging.warning("Couldn't move input to complete dir")
