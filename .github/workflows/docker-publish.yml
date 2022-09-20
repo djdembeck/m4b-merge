@@ -62,13 +62,14 @@ jobs:
                   push: ${{ github.event_name != 'pull_request' }}
                   tags: ${{ steps.meta.outputs.tags }}
                   labels: ${{ steps.meta.outputs.labels }}
+            - name: Get ref target
+              run: |
+                  echo "ref_object={"ref": ${GITHUB_REF##*/}}" >> $GITHUB_ENV
             # Push updated image to bragibooks
             - name: Dispatch to bragibooks
               run: |
-                  REF_OBJECT='{"ref": ${GITHUB_REF##*/}}'
-                  echo $REF_OBJECT
                   curl -X POST \
                   -H "Authorization: Bearer ${{secrets.ACCESS_TOKEN}}" \
                   -H "Accept: application/vnd.github.v3+json" \
                   https://api.github.com/repos/djdembeck/bragibooks/actions/workflows/docker-publish.yml/dispatches \
-                  -d "$REF_OBJECT"
+                  -d env.ref_object
