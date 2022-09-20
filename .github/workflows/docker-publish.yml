@@ -64,8 +64,9 @@ jobs:
                   labels: ${{ steps.meta.outputs.labels }}
             # Push updated image to bragibooks
             - run: |
+                  GIT_BRANCH=${GITHUB_REF##*/}
                   curl -X POST \
                   -H "Authorization: Bearer ${{secrets.ACCESS_TOKEN}}" \
                   -H "Accept: application/vnd.github.v3+json" \
                   https://api.github.com/repos/djdembeck/bragibooks/actions/workflows/docker-publish.yml/dispatches \
-                  -d '{"ref": ${{GITHUB_REF##*/}}}'
+                  -d '{"ref": "${GIT_BRANCH}"}'
