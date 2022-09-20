@@ -491,7 +491,6 @@ class M4bMerge:
         dest = Path(config.junk_dir, self.path_to_move.name)
 
         try:
-            # move_dir.replace(dest)
             shutil.move(self.path_to_move, dest)
         except OSError:
             logging.warning("Couldn't move input to complete dir")
