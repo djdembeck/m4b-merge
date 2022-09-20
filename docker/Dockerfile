@@ -1,5 +1,7 @@
 FROM sandreas/ffmpeg:5.0.1-3 as ffmpeg
-FROM sandreas/tone:v0.1.0 as tone
+# There is an issue with the tone tagger
+# https://github.com/sandreas/m4b-tool/issues/196
+# FROM sandreas/tone:v0.1.0 as tone
 FROM sandreas/mp4v2:2.1.1 as mp4v2
 FROM sandreas/fdkaac:2.0.1 as fdkaac
 
@@ -31,7 +33,7 @@ RUN apk add --no-cache --update --upgrade --repository=http://dl-cdn.alpinelinux
 # Add ffmpeg, tone, mp4v2 and fdkaac
 COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/
 COPY --from=ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
-COPY --from=tone /usr/local/bin/tone /usr/local/bin/
+# COPY --from=tone /usr/local/bin/tone /usr/local/bin/
 COPY --from=mp4v2 /usr/local/bin/mp4* /usr/local/bin/
 COPY --from=mp4v2 /usr/local/lib/libmp4v2* /usr/local/lib/
 COPY --from=fdkaac /usr/local/bin/fdkaac /usr/local/bin/
