@@ -30,6 +30,7 @@ RUN apk add --no-cache --update --upgrade --repository=http://dl-cdn.alpinelinux
 
 # Add ffmpeg, tone, mp4v2 and fdkaac
 COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/
+COPY --from=ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
 COPY --from=tone /usr/local/bin/tone /usr/local/bin/
 COPY --from=mp4v2 /usr/local/bin/mp4* /usr/local/bin/
 COPY --from=mp4v2 /usr/local/lib/libmp4v2* /usr/local/lib/
