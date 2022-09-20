@@ -63,10 +63,9 @@ jobs:
                   tags: ${{ steps.meta.outputs.tags }}
                   labels: ${{ steps.meta.outputs.labels }}
             # Push updated image to bragibooks
-            run: echo 'running on branch ${GITHUB_REF##*/} ${GITHUB_REF}'
-
             - name: Dispatch to bragibooks
               run: |
+                  echo "running on branch ${GITHUB_REF##*/} ${GITHUB_REF}"
                   curl -X POST \
                   -H "Authorization: Bearer ${{secrets.ACCESS_TOKEN}}" \
                   -H "Accept: application/vnd.github.v3+json" \
