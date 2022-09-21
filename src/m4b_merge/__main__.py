@@ -6,13 +6,13 @@ import os
 from . import audible_helper, config, helpers, m4b_helper
 
 
-def run_all(inputs):
+def run_all(input_path):
     print('-' * 50)
-    print(f"Working on: {inputs}")
+    print(f"Working on: {input_path}")
     print('-' * 50)
     # Validate path, check if it's a directory or a file
     # This will also run find_extension to determine relevant filetype
-    input_data = helpers.get_directory(inputs)
+    input_data = helpers.get_directory(input_path)
 
     # Validate ASIN input
     while True:
@@ -29,7 +29,7 @@ def run_all(inputs):
     chapters = aud.get_chapters()
 
     # Process metadata and run components to merge files
-    m4b = m4b_helper.M4bMerge(input_data, metadata, chapters)
+    m4b = m4b_helper.M4bMerge(input_data, metadata, input_path, chapters)
     m4b.run_merge()
 
 
@@ -87,11 +87,11 @@ def validate_args(args):
     # Inputs
     # Last to be checked
     if args.inputs:
-        for inputs in args.inputs:
-            if inputs.exists():
-                run_all(inputs)
+        for input_path in args.inputs:
+            if input_path.exists():
+                run_all(input_path)
             else:
-                logging.error(f"Input \"{inputs}\" does not exist")
+                logging.error(f"Input \"{input_path}\" does not exist")
 
         print('-' * 25)
         print(f"Done processing {len(args.inputs)} inputs")
