@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.4.10](https://github.com/djdembeck/m4b-merge/compare/v0.4.8...v0.4.10) (2022-09-21)
+
+
+### Bug Fixes
+
+* **merge:** :bug: properly fix moving completed input files ([f0f4ae9](https://github.com/djdembeck/m4b-merge/commit/f0f4ae9468796f13d6738cb4ba9592df9e858d74))
+
 ### [0.4.8](https://github.com/djdembeck/m4b-merge/compare/v0.4.7...v0.4.8) (2022-09-12)
 
 
