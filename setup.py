@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name='m4b-merge',
-    version='0.4.9',
+    version='0.4.10',
     url='https://github.com/djdembeck/m4b-merge',
     description=(
                 "A tool to standardize audiobook files"
@@ -19,9 +19,9 @@ setuptools.setup(
         "Bug Tracker": "https://github.com/djdembeck/m4b-merge/issues",
     },
     classifiers=[
-        "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
         "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
         "Operating System :: OS Independent",
     ],
@@ -33,6 +33,6 @@ setuptools.setup(
     ],
     package_dir={"": "src"},
     packages=["m4b_merge"],
-    python_requires=">=3.6",
+    python_requires=">=3.7",
     entry_points={'console_scripts': ['m4b-merge = m4b_merge.__main__:main']}
 )
