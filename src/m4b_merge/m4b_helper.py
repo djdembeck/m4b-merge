@@ -14,11 +14,12 @@ from . import config, helpers
 
 
 class M4bMerge:
-    def __init__(self, input_data, metadata, chapters=None):
+    def __init__(self, input_data, metadata, original_path, chapters=None):
         self.input_path = input_data[0]
         self.input_extension = input_data[1]
         self.num_of_files = input_data[2]
         self.metadata = metadata
+        self.original_path = original_path
         self.chapters = chapters
 
     def download_cover(self):
@@ -310,7 +311,6 @@ class M4bMerge:
         subprocess.call(args, shell=False)
 
         # Move obsolete input to processed folder
-        self.path_to_move = self.input_path
         self.move_completed_input()
         # Process chapters
         self.fix_chapters()
@@ -345,7 +345,6 @@ class M4bMerge:
         )
 
         # Move obsolete input to processed folder
-        self.path_to_move = self.input_path
         self.move_completed_input()
         # Process chapters
         self.fix_chapters()
@@ -376,7 +375,6 @@ class M4bMerge:
         subprocess.call(args, shell=False)
 
         # Move obsolete input to processed folder
-        self.path_to_move = self.input_path
         self.move_completed_input()
         # Process chapters
         self.fix_chapters()
@@ -487,10 +485,10 @@ class M4bMerge:
             os.remove(self.cover_path)
         # Move completed input to junk dir
         logging.debug(
-            f'Moving completed input {self.path_to_move} to {config.junk_dir}')
-        dest = Path(config.junk_dir, self.path_to_move.name)
+            f'Moving completed input {self.original_path} to {config.junk_dir}')
+        dest = Path(config.junk_dir, self.original_path.name)
 
         try:
-            shutil.move(self.path_to_move, dest)
+            shutil.move(self.original_path, dest)
         except OSError:
             logging.warning("Couldn't move input to complete dir")

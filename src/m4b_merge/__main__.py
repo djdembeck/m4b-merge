@@ -29,7 +29,7 @@ def run_all(input_path):
     chapters = aud.get_chapters()
 
     # Process metadata and run components to merge files
-    m4b = m4b_helper.M4bMerge(input_data, metadata, chapters)
+    m4b = m4b_helper.M4bMerge(input_data, metadata, input_path, chapters)
     m4b.run_merge()
 
 
