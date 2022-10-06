@@ -22,7 +22,7 @@ env:
     REGISTRY: ghcr.io
     # github.repository as <account>/<repo>
     IMAGE_NAME: ${{ github.repository }}
-    M4B_TOOL_DOWNLOAD_LINK: 'https://github.com/sandreas/m4b-tool/files/8304864/m4b-tool.tar.gz'
+    M4B_TOOL_DOWNLOAD_LINK: 'https://github.com/sandreas/m4b-tool/files/9721007/m4b-tool.tar.gz'
 
 jobs:
     build:
