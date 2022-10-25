@@ -5,7 +5,7 @@ FROM sandreas/ffmpeg:5.0.1-3 as ffmpeg
 FROM sandreas/mp4v2:2.1.1 as mp4v2
 FROM sandreas/fdkaac:2.0.1 as fdkaac
 
-FROM python:3.10-alpine
+FROM python:3.11-alpine
 ENV WORKDIR /mnt/
 ENV M4BTOOL_TMP_DIR /tmp/m4b-tool/
 
