@@ -29,7 +29,10 @@ class M4bMerge:
             # Verify image exists
             if cover_request.status_code == 200:
                 # Path to write image to
-                self.cover_path = f"{self.input_path}_cover.jpg"
+                if self.input_path.is_dir():
+                    self.cover_path = self.input_path / "cover.jpg"
+                else:
+                    self.cover_path = f"{self.input_path}_cover.jpg"
                 # Write image
                 with open(self.cover_path, 'wb') as f:
                     f.write(cover_request.content)
