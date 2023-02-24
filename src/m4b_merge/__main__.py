@@ -137,7 +137,7 @@ def main():
         "-p", "--path_format",
         help=(
             "Structure of output path/naming."
-            "Supported terms: author, narrator, "
+            "Supported terms: asin, author, narrator, "
             "series_name, series_position, "
             "subtitle, title, year"
         ),

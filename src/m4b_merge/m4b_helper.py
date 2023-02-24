@@ -185,6 +185,8 @@ class M4bMerge:
             `: subtitle (year)/author - title (year)`
         """
         # First we need to replace the terms with actual data
+        # ASIN
+        self.replace_tag('asin', self.metadata.asin)
         # Author
         self.replace_tag('author', self.path_author)
         # Narrator
