@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.5.1](https://github.com/djdembeck/m4b-merge/compare/v0.5.0...v0.5.1) (2023-02-24)
+
+
+### Bug Fixes
+
+* **merge:** :bug: incorrect dict key ([54d4a8b](https://github.com/djdembeck/m4b-merge/commit/54d4a8b259a0486ace02f69264aeacd7e224f26f))
+
 ## [0.5.0](https://github.com/djdembeck/m4b-merge/compare/v0.4.11...v0.5.0) (2023-02-24)
 
 
