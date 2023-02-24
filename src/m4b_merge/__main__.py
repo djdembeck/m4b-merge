@@ -136,7 +136,7 @@ def main():
     parser.add_argument(
         "-p", "--path_format",
         help=(
-            "Structure of output path/naming."
+            "Structure of output path/naming. "
             "Supported terms: asin, author, narrator, "
             "series_name, series_position, "
             "subtitle, title, year"
