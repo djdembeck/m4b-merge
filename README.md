@@ -112,6 +112,9 @@ optional arguments:
   --num_cpus NUM_CPUS   Number of CPUs to use
   -o OUTPUT, --output OUTPUT
                         Output directory
+  -p PATH_FORMAT, --path_format PATH_FORMAT
+                        Structure of output path/naming.Supported terms: author, narrator, series_name, series_position, subtitle, title, year
+
 ```
 
 #### When installed via `pip`, you can run inputs like so
