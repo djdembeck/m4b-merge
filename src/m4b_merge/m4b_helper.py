@@ -278,7 +278,7 @@ class M4bMerge:
         else:
             logging.error(
                 f"Couldn't determine input type/extension for"
-                f" {self.file_title}")
+                f" {self.title}")
 
     def merge_multiple_files(self):
         logging.info("Processing multiple files in a dir...")
