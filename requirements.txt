@@ -1,4 +1,4 @@
 appdirs==1.4.4
 pathvalidate==2.5.2
 pydub==0.25.1
-requests==2.30.0
+requests==2.31.0
