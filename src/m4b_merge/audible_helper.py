@@ -72,14 +72,34 @@ class BookData:
 
         return chapter_output
 
-    def fetch_api_data(self, api_url):
+    def fetch_api_data(self, api_url, use_audible_chapter_api):
         # metadata dictionary
         book_api_call = requests.get(
             f"{api_url}/books/{self.asin}"
         )
-        chapter_api_call = requests.get(
-            f"{api_url}/books/{self.asin}/chapters"
-        )
+
         self.metadata_dict = book_api_call.json()
-        self.metadata_dict['chapter_info'] = chapter_api_call.json()
-        return self.metadata_dict
+
+        # If applicable, use Audible as source for the chapters
+        if use_audible_chapter_api:
+            response = requests.get(f"https://api.audible.com/1.0/content/{self.asin}/metadata?response_groups=chapter_info&quality=High").json()
+            chapter_info = response["content_metadata"]["chapter_info"]
+            audible_chapter_info = {
+                "isAccurate": chapter_info["is_accurate"],
+                "runtimeLengthMs": chapter_info["runtime_length_ms"],
+                "chapters": [
+                    {
+                        "startOffsetMs": chapter["start_offset_ms"],
+                        "title": chapter["title"]
+                    }
+                    for chapter in chapter_info["chapters"]
+                ]
+            }
+            self.metadata_dict['chapter_info'] = audible_chapter_info
+            return self.metadata_dict     
+        else:
+            chapter_api_call = requests.get(
+                f"{api_url}/books/{self.asin}/chapters"
+            )
+            self.metadata_dict['chapter_info'] = chapter_api_call.json()
+            return self.metadata_dict      

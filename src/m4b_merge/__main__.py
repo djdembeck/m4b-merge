@@ -25,7 +25,7 @@ def run_all(input_path):
 
     # Create BookData object from asin response
     aud = audible_helper.BookData(asin)
-    metadata = aud.fetch_api_data(config.api_url)
+    metadata = aud.fetch_api_data(config.api_url, config.use_audible_chapter_api)
     chapters = aud.get_chapters()
 
     # Process metadata and run components to merge files
@@ -39,6 +39,9 @@ def validate_args(args):
         config.api_url = args.api_url
     else:
         config.api_url = "https://api.audnex.us"
+    # Use Audible API for Chapter Infos
+    if args.use_audible_chapter_api:
+        config.use_audible_chapter_api = True
     # Completed Directory
     if args.completed_directory:
         config.junk_dir = args.completed_directory
@@ -84,6 +87,8 @@ def validate_args(args):
     logging.debug(f'Using CPU cores: {config.num_cpus}')
     logging.debug(f'Using output path: {config.output}')
     logging.debug(f'Using output format: {config.path_format}')
+    logging.debug(f'Using Audible Chapter API: {config.use_audible_chapter_api}')    
+
     # Inputs
     # Last to be checked
     if args.inputs:
@@ -143,6 +148,12 @@ def main():
         ),
         type=str
     )
+    parser.add_argument(
+        "--use_audible_chapter_api",
+        help="Uses the Audible API for gathering chapter information",
+        action="store_true",
+        required=False
+    )    
 
     validate_args(parser.parse_args())
 

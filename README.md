@@ -114,6 +114,8 @@ optional arguments:
                         Output directory
   -p PATH_FORMAT, --path_format PATH_FORMAT
                         Structure of output path/naming.Supported terms: author, narrator, series_name, series_position, subtitle, title, year
+  --use_audible_chapter_api
+                        Sources the chapter information directly from audible.com.                        
 
 ```
 
