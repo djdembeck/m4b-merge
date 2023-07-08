@@ -42,6 +42,8 @@ def validate_args(args):
     # Use Audible API for Chapter Infos
     if args.use_audible_chapter_api:
         config.use_audible_chapter_api = True
+    else:
+        config.use_audible_chapter_api = False
     # Completed Directory
     if args.completed_directory:
         config.junk_dir = args.completed_directory
