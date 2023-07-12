@@ -37,10 +37,13 @@ class BookData:
 
         return timestamp + '.' + '000'
 
-    def get_chapters(self):
+    def get_chapters(self, use_chapters_offset):
         # Select chapter data from json response
         chapter_info = self.metadata_dict['chapter_info']
-
+        if use_chapters_offset:
+            offset = chapter_info.get('brandIntroDurationMs', 0)
+        else:
+            offset = 0    
         # Only use Audible chapters if tagged as accurate
         if 'isAccurate' in chapter_info and chapter_info['isAccurate'] is True:
             chapter_output = []
@@ -54,8 +57,11 @@ class BookData:
             )
 
             # Append each chapter to array
-            for chapter in chapter_info['chapters']:
-                chap_start = self.ms_to_timestamp(chapter['startOffsetMs'])
+            for index, chapter in enumerate(chapter_info['chapters']):
+                if index == 0:
+                    chap_start = self.ms_to_timestamp(chapter['startOffsetMs'])
+                else:
+                    chap_start = self.ms_to_timestamp(chapter['startOffsetMs'] - offset)
                 # Starting chapter title data
                 chapter_title = chapter['title']
                 chapter_output.append(

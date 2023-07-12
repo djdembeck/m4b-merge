@@ -26,7 +26,7 @@ def run_all(input_path):
     # Create BookData object from asin response
     aud = audible_helper.BookData(asin)
     metadata = aud.fetch_api_data(config.api_url)
-    chapters = aud.get_chapters()
+    chapters = aud.get_chapters(config.use_chapters_offset)
 
     # Process metadata and run components to merge files
     m4b = m4b_helper.M4bMerge(input_data, metadata, input_path, chapters)
@@ -39,6 +39,11 @@ def validate_args(args):
         config.api_url = args.api_url
     else:
         config.api_url = "https://api.audnex.us"
+    # Chapter offset for non audible files
+    if args.chapters_offset:
+        config.use_chapters_offset = True
+    else:
+        config.use_chapters_offset = False
     # Completed Directory
     if args.completed_directory:
         config.junk_dir = args.completed_directory
@@ -84,6 +89,7 @@ def validate_args(args):
     logging.debug(f'Using CPU cores: {config.num_cpus}')
     logging.debug(f'Using output path: {config.output}')
     logging.debug(f'Using output format: {config.path_format}')
+    logging.debug(f'Using chapters offset: {config.use_chapters_offset}')
     # Inputs
     # Last to be checked
     if args.inputs:
@@ -142,6 +148,12 @@ def main():
             "subtitle, title, year"
         ),
         type=str
+    )
+    parser.add_argument(
+        "--chapters-offset",
+        help="For files not from Audible, adjust chapters to offset according to brandIntroDurationMs",
+        action="store_true",
+        required=False
     )
 
     validate_args(parser.parse_args())
