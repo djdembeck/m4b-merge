@@ -114,6 +114,7 @@ optional arguments:
                         Output directory
   -p PATH_FORMAT, --path_format PATH_FORMAT
                         Structure of output path/naming.Supported terms: author, narrator, series_name, series_position, subtitle, title, year
+  --chapters-offset     For files not from Audible, adjust chapters to offset according to brandIntroDurationMs
 
 ```
 
