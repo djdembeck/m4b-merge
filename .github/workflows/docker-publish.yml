@@ -56,7 +56,7 @@ jobs:
             # Build and push Docker image with Buildx (don't push on PR)
             # https://github.com/docker/build-push-action
             - name: Build and push Docker image
-              uses: docker/build-push-action@84354d3b32f6fcad27a04f6b82436bfb39425d16
+              uses: docker/build-push-action@cfed4e995e12d7bee5002f066f5649e5f1cc059c
               with:
                   build-args: M4B_TOOL_DOWNLOAD_LINK=${{ env.M4B_TOOL_DOWNLOAD_LINK }}
                   file: docker/Dockerfile
