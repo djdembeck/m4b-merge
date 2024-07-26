@@ -13,7 +13,7 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
-    container: jrottenberg/ffmpeg:5.1-ubuntu
+    container: jrottenberg/ffmpeg:6.0-ubuntu
     strategy:
       fail-fast: false
       matrix:
