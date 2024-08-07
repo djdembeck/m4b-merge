@@ -293,6 +293,7 @@ class M4bMerge:
         args = [
             config.m4b_tool_bin,
             'merge',
+            f"--tmp-dir=/tmp/m4b-tool.{os.getpid()}",
             f"--output-file={self.book_output}.m4b"
         ]
 
@@ -327,6 +328,7 @@ class M4bMerge:
         args = [
             config.m4b_tool_bin,
             'meta',
+            f"--tmp-dir=/tmp/m4b-tool.{os.getpid()}",
             '--ignore-source-tags',
             (f"{self.input_path.parent}/"
                 f"{self.input_path.stem}.new.m4b")
@@ -365,6 +367,7 @@ class M4bMerge:
         args = [
             config.m4b_tool_bin,
             'merge',
+            f"--tmp-dir=/tmp/m4b-tool.{os.getpid()}",
             f"--output-file={self.book_output}.m4b",
             f"--audio-bitrate={target_bitrate}",
             f"--audio-samplerate={target_samplerate}"
