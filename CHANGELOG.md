@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.5.3](https://github.com/djdembeck/m4b-merge/compare/v0.5.2...v0.5.3) (2024-08-07)
+
+### Bug Fixes
+
+  * If junk_dir is not set, do not perform post-process move ([4286a1c](https://github.com/djdembeck/m4b-merge/commit/4286a1ce7c50d56d5d9e22136cbdc292cd3d52e3))
+  * Add --tmp-dir with os.pid to each m4b-tool invocation ([36689e8](https://github.com/djdembeck/m4b-merge/commit/36689e8f52ed7af7e3c70660501529d852dc482e))
+
+
 ### [0.5.2](https://github.com/djdembeck/m4b-merge/compare/v0.5.1...v0.5.2) (2023-04-27)
 
 
