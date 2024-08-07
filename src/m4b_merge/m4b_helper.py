@@ -117,11 +117,12 @@ class M4bMerge:
             exist_ok=True
         )
 
-        # Folder to move original input into
-        Path(config.junk_dir).mkdir(
-            parents=True,
-            exist_ok=True
-        )
+        if config.junk_dir:
+            # Folder to move original input into
+            Path(config.junk_dir).mkdir(
+                parents=True,
+                exist_ok=True
+            )
 
         # Array for argument use
         # main metadata args
@@ -292,6 +293,7 @@ class M4bMerge:
         args = [
             config.m4b_tool_bin,
             'merge',
+            f"--tmp-dir=/tmp/m4b-tool.{os.getpid()}",
             f"--output-file={self.book_output}.m4b"
         ]
 
@@ -326,6 +328,7 @@ class M4bMerge:
         args = [
             config.m4b_tool_bin,
             'meta',
+            f"--tmp-dir=/tmp/m4b-tool.{os.getpid()}",
             '--ignore-source-tags',
             (f"{self.input_path.parent}/"
                 f"{self.input_path.stem}.new.m4b")
@@ -364,6 +367,7 @@ class M4bMerge:
         args = [
             config.m4b_tool_bin,
             'merge',
+            f"--tmp-dir=/tmp/m4b-tool.{os.getpid()}",
             f"--output-file={self.book_output}.m4b",
             f"--audio-bitrate={target_bitrate}",
             f"--audio-samplerate={target_samplerate}"
@@ -485,6 +489,7 @@ class M4bMerge:
         subprocess.call(args, shell=False)
 
     def move_completed_input(self):
+        if not config.junk_dir: return
         # Cleanup cover file
         if self.cover_path:
             os.remove(self.cover_path)
