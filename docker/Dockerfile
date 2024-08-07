@@ -55,7 +55,7 @@ COPY . /src
 
 # run this command to install all dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r /src/requirements.txt \
+    pip install --no-cache-dir -r /src/requirements.txt && \
     pip install --no-cache-dir /src && \
     rm -rf /src/build
 
