@@ -93,23 +93,23 @@ class TestMetadata:
         if metadata['genres'][0]['name'] != "Science Fiction & Fantasy":
             errors.append("Genre 1 is incorrect")
         if metadata['genres'][0]['type'] != "genre":
-            errors.append("Genre  type is incorrect")
+            errors.append("Genre 1 type is incorrect")
         if metadata['genres'][1]['name'] != "Science Fiction":
             errors.append("Genre 2 is incorrect")
-        if metadata['genres'][1]['type'] != "genre":
+        if metadata['genres'][1]['type'] != "tag":
             errors.append("Genre 2 type is incorrect")
         if metadata['genres'][2]['name'] != "Adventure":
-            errors.append("Genre 2 is incorrect")
+            errors.append("Genre 3 is incorrect")
         if metadata['genres'][2]['type'] != "tag":
-            errors.append("Genre 2 type is incorrect")
+            errors.append("Genre 3 type is incorrect")
         if metadata['genres'][3]['name'] != "Hard Science Fiction":
-            errors.append("Genre 2 is incorrect")
+            errors.append("Genre 4 is incorrect")
         if metadata['genres'][3]['type'] != "tag":
-            errors.append("Genre 2 type is incorrect")
+            errors.append("Genre 4 type is incorrect")
         if metadata['genres'][4]['name'] != "Space Opera":
-            errors.append("Genre 2 is incorrect")
+            errors.append("Genre 5 is incorrect")
         if metadata['genres'][4]['type'] != "tag":
-            errors.append("Genre 2 type is incorrect")
+            errors.append("Genre 5 type is incorrect")
         # Check publisher name
         if metadata['publisherName'] != "Audible Studios":
             errors.append("Error with publisher")
@@ -152,7 +152,7 @@ class TestMetadata:
             errors.append("Genre  type is incorrect")
         if metadata['genres'][1]['name'] != "Thriller & Suspense":
             errors.append("Genre 2 is incorrect")
-        if metadata['genres'][1]['type'] != "genre":
+        if metadata['genres'][1]['type'] != "tag":
             errors.append("Genre 2 type is incorrect")
         # Check publisher name
         if metadata['publisherName'] != "Audible Originals":
