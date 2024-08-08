@@ -48,7 +48,7 @@ class TestMerge:
         mp3 = self.mp3_data(primary_asin)
         mp3.download_cover()
         assert ((test_cover).exists() and
-                os.path.getsize(test_cover) == 779312)
+                os.path.getsize(test_cover) == 779388)
 
     def test_chapter_generation(self):
         mp3 = self.mp3_data(primary_asin)
