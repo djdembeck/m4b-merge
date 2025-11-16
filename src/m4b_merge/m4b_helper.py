@@ -132,8 +132,9 @@ class M4bMerge:
         self.metadata_args = [
             f"--name={combined_title}",
             f"--album={self.title}",
-            f"--artist={self.narrator}",
+            f"--artist={self.author}",
             f"--albumartist={self.author}",
+            f"--composer={self.narrator}",
             f"--year={self.year}",
             f"--description={self.summary}",
         ]
