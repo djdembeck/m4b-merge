@@ -1,8 +1,9 @@
 use clap::Parser;
 use std::path::PathBuf;
+use tracing::error;
 
-mod config;
-use config::Config;
+use m4b_merge::audio::FFmpeg;
+use m4b_merge::config::Config;
 
 /// A CLI tool which outputs consistently sorted, tagged, single m4b files
 #[derive(Parser, Debug)]
@@ -42,6 +43,10 @@ struct Args {
     /// Show what would be done without actually doing it
     #[arg(long = "dry-run")]
     pub dry_run: bool,
+
+    /// Check FFmpeg installation and display version information
+    #[arg(long = "check-ffmpeg")]
+    pub check_ffmpeg: bool,
 }
 
 fn main() {
@@ -49,7 +54,10 @@ fn main() {
 
     let args = Args::parse();
 
-    // Create Config from CLI arguments
+    if args.check_ffmpeg {
+        check_ffmpeg_and_exit();
+    }
+
     let _config = Config::new(
         args.inputs,
         args.output,
@@ -62,4 +70,49 @@ fn main() {
     );
 
     println!("m4b-merge configuration loaded");
+}
+
+fn check_ffmpeg_and_exit() {
+    match FFmpeg::discover() {
+        Ok(mut ffmpeg) => {
+            println!("FFmpeg found:");
+            println!("  Binary path: {}", ffmpeg.ffmpeg_path().display());
+            println!("  FFprobe path: {}", ffmpeg.ffprobe_path().display());
+
+            match ffmpeg.check() {
+                Ok(()) => {
+                    println!("  Status: OK");
+                }
+                Err(e) => {
+                    error!("FFmpeg check failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
+            match ffmpeg.version() {
+                Ok(version) => {
+                    println!("  Version: {}", version.version);
+                    println!("  {}", version.copyright);
+                    println!("  {}", version.built_with);
+                    println!("\n  Libraries:");
+                    for lib in &version.libraries {
+                        println!(
+                            "    {}: {} (compiled: {})",
+                            lib.name, lib.current_version, lib.compiled_version
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to get FFmpeg version: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Err(e) => {
+            error!("FFmpeg not found: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    std::process::exit(0);
 }
