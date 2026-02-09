@@ -141,3 +141,5 @@ cython_debug/
 .python-version
 
 .opencode
+# Sisyphus planning files
+.sisyphus/

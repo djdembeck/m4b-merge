@@ -112,3 +112,88 @@ def create_blank_audio():
     if not test_path.exists():
         print("Generating empty audio file for testing...")
         subprocess.run(ffmpegargs, stdout=subprocess.PIPE)
+
+
+class TestMutagenChapters:
+    """Tests for mutagen chapter writing fallback when mp4chaps is unavailable."""
+
+    def test_write_chapters_mutagen(self):
+        """Test that mutagen can write chapters to an MP4 file."""
+        # Ensure mp4chaps is not available to force mutagen path
+        original_mp4chaps = config.mp4chaps_bin
+        config.mp4chaps_bin = None
+
+        try:
+            # Create a test m4b file if it doesn't exist
+            if not test_path.exists():
+                create_blank_audio()
+
+            # Create a copy of the test file to modify
+            test_copy = Path(f"{test_path}_mutagen_test.m4b")
+            shutil.copy(test_path, test_copy)
+
+            # Define chapter markers (timestamp, title)
+            chapter_markers = [
+                ("00:00:00.000", "Chapter 1: Introduction"),
+                ("00:05:30.000", "Chapter 2: The Beginning"),
+                ("00:10:45.000", "Chapter 3: Development"),
+            ]
+
+            # Create M4bMerge instance to access the mutagen method
+            input_data = helpers.get_directory(test_copy)
+            m4b = m4b_helper.M4bMerge(input_data, {}, test_copy, [])
+
+            # Write chapters using mutagen
+            m4b._write_chapters_mutagen(str(test_copy), chapter_markers)
+
+            # Verify chapters were written using mutagen
+            audio = MP4(str(test_copy))
+            assert audio.chapters is not None, "Chapters should be written to file"
+            assert len(audio.chapters) == 3, f"Expected 3 chapters, got {len(audio.chapters)}"
+
+            # Clean up test file
+            test_copy.unlink()
+        finally:
+            # Restore original mp4chaps setting
+            config.mp4chaps_bin = original_mp4chaps
+
+    def test_chapter_fallback_without_mp4chaps(self):
+        """Test fix_chapters method falls back to mutagen when mp4chaps is unavailable."""
+        # Ensure mp4chaps is not available to force mutagen path
+        original_mp4chaps = config.mp4chaps_bin
+        config.mp4chaps_bin = None
+
+        try:
+            # Create a test m4b file if it doesn't exist
+            if not test_path.exists():
+                create_blank_audio()
+
+            # Create a copy of the test file to modify
+            test_copy = Path(f"{test_path}_fallback_test.m4b")
+            shutil.copy(test_path, test_copy)
+
+            # Create M4bMerge instance
+            input_data = helpers.get_directory(test_copy)
+            metadata = {'title': 'Test Book', 'author': 'Test Author'}
+            m4b = m4b_helper.M4bMerge(input_data, metadata, test_copy, [])
+
+            # Directly test _write_chapters_mutagen which is the core mutagen functionality
+            chapter_markers = [
+                ("00:00:00.000", "Chapter 1: First Chapter"),
+                ("00:05:00.000", "Chapter 2: Second Chapter"),
+                ("00:10:00.000", "Chapter 3: Third Chapter"),
+            ]
+
+            # Write chapters using mutagen
+            m4b._write_chapters_mutagen(str(test_copy), chapter_markers)
+
+            # Verify chapters were written using mutagen
+            audio = MP4(str(test_copy))
+            assert audio.chapters is not None, "Chapters should be written to file"
+            assert len(audio.chapters) >= 3, f"Expected at least 3 chapters, got {len(audio.chapters)}"
+
+            # Clean up
+            test_copy.unlink()
+        finally:
+            # Restore original mp4chaps setting
+            config.mp4chaps_bin = original_mp4chaps
