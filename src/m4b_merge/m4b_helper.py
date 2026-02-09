@@ -325,32 +325,77 @@ class M4bMerge:
     def merge_single_aac(self):
         logging.info(f"Processing single {self.input_extension} input...")
 
-        args = [
-            config.m4b_tool_bin,
-            'meta',
-            f"--tmp-dir=/tmp/m4b-tool.{os.getpid()}",
-            '--ignore-source-tags',
-            (f"{self.input_path.parent}/"
-                f"{self.input_path.stem}.new.m4b")
-        ]
-        # Add in main metadata args
-        args.extend(self.metadata_args)
+        # Check if tone is available
+        if config.tone_bin:
+            logging.info("Using tone for metadata tagging...")
 
-        # make backup file
-        shutil.copy(
-            self.input_path,
-            f"{self.input_path.parent}/{self.input_path.stem}.new.m4b"
-        )
+            # Build tone arguments
+            tone_args = [config.tone_bin, 'tag', str(self.input_path)]
 
-        # m4b command with passed args
-        logging.debug(f"M4B command: {args}")
-        subprocess.call(args, shell=False)
+            # Map m4b-tool metadata args to tone format
+            # m4b-tool format: --name=value, --album=value, etc.
+            # tone format: --meta-title=value, --meta-album=value, etc.
+            for arg in self.metadata_args:
+                if arg.startswith('--name='):
+                    tone_args.append(f'--meta-title={arg[7:]}')
+                elif arg.startswith('--album='):
+                    tone_args.append(f'--meta-album={arg[8:]}')
+                elif arg.startswith('--artist='):
+                    tone_args.append(f'--meta-artist={arg[9:]}')
+                elif arg.startswith('--albumartist='):
+                    tone_args.append(f'--meta-album-artist={arg[14:]}')
+                elif arg.startswith('--year='):
+                    tone_args.append(f'--meta-recording-date={arg[7:]}')
+                elif arg.startswith('--description='):
+                    tone_args.append(f'--meta-description={arg[14:]}')
+                elif arg.startswith('--series='):
+                    tone_args.append(f'--meta-movement-name={arg[9:]}')
+                elif arg.startswith('--series-part='):
+                    tone_args.append(f'--meta-part={arg[14:]}')
+                elif arg.startswith('--genre='):
+                    tone_args.append(f'--meta-genre={arg[8:]}')
+                elif arg.startswith('--comment='):
+                    tone_args.append(f'--meta-comment={arg[10:]}')
+                elif arg.startswith('--cover='):
+                    tone_args.append(f'--meta-cover-file={arg[8:]}')
 
-        # Move completed file
-        shutil.move(
-            f"{self.input_path.parent}/{self.input_path.stem}.new.m4b",
-            f"{self.book_output}.m4b"
-        )
+            # Execute tone command
+            logging.debug(f"Tone command: {tone_args}")
+            subprocess.call(tone_args, shell=False)
+
+            # Move completed file
+            shutil.move(self.input_path, f"{self.book_output}.m4b")
+
+        else:
+            # Fall back to m4b-tool meta
+            logging.info("Using m4b-tool for metadata tagging...")
+
+            args = [
+                config.m4b_tool_bin,
+                'meta',
+                f"--tmp-dir=/tmp/m4b-tool.{os.getpid()}",
+                '--ignore-source-tags',
+                (f"{self.input_path.parent}/"
+                    f"{self.input_path.stem}.new.m4b")
+            ]
+            # Add in main metadata args
+            args.extend(self.metadata_args)
+
+            # make backup file
+            shutil.copy(
+                self.input_path,
+                f"{self.input_path.parent}/{self.input_path.stem}.new.m4b"
+            )
+
+            # m4b command with passed args
+            logging.debug(f"M4B command: {args}")
+            subprocess.call(args, shell=False)
+
+            # Move completed file
+            shutil.move(
+                f"{self.input_path.parent}/{self.input_path.stem}.new.m4b",
+                f"{self.book_output}.m4b"
+            )
 
         # Move obsolete input to processed folder
         self.move_completed_input()
@@ -489,7 +534,8 @@ class M4bMerge:
         subprocess.call(args, shell=False)
 
     def move_completed_input(self):
-        if not config.junk_dir: return
+        if not config.junk_dir:
+            return
         # Cleanup cover file
         if self.cover_path:
             os.remove(self.cover_path)
