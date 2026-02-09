@@ -1,5 +1,2 @@
-# Allow cyclomatic complexity up to a reasonable level
-cyclomatic-complexity-threshold = 15
-
-# Allow longer lines in tests
-msrv = "1.0"
+# Allow cognitive complexity up to a reasonable level
+cognitive-complexity-threshold = 15
