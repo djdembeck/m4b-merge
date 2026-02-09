@@ -1,9 +1,10 @@
 use clap::Parser;
 use std::path::PathBuf;
-use tracing::error;
+use tracing::{error, info};
 
 use m4b_merge::audio::FFmpeg;
 use m4b_merge::config::Config;
+use m4b_merge::processor::{Processor, ProcessingProgress, ProcessingStage, ProgressHandler};
 
 /// A CLI tool which outputs consistently sorted, tagged, single m4b files
 #[derive(Parser, Debug)]
@@ -40,6 +41,10 @@ struct Args {
     #[arg(short = 'p', long = "path_format", value_name = "TEMPLATE", default_value = "{author}/{title}")]
     pub path_format: String,
 
+    /// ASIN for metadata lookup (optional)
+    #[arg(short = 'a', long = "asin", value_name = "ASIN")]
+    pub asin: Option<String>,
+
     /// Show what would be done without actually doing it
     #[arg(long = "dry-run")]
     pub dry_run: bool,
@@ -49,18 +54,72 @@ struct Args {
     pub check_ffmpeg: bool,
 }
 
-fn main() {
-    tracing_subscriber::fmt::init();
+/// Console progress handler that prints to stdout
+struct ConsoleProgressHandler;
 
+impl ProgressHandler for ConsoleProgressHandler {
+    fn on_progress(&self, progress: ProcessingProgress) {
+        match progress.stage {
+            ProcessingStage::Complete => {
+                println!("✓ {}", progress.message);
+            }
+            ProcessingStage::Error => {
+                eprintln!("✗ {}", progress.message);
+            }
+            _ => {
+                println!("[{}/{}] [{}] {}",
+                    progress.completed_files,
+                    progress.total_files,
+                    progress.stage,
+                    progress.message
+                );
+            }
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
 
+    // Initialize tracing with the requested log level
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new(&args.log_level)
+                })
+        )
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("Failed to set tracing subscriber");
+
+    // Handle --check-ffmpeg flag
     if args.check_ffmpeg {
         check_ffmpeg_and_exit();
     }
 
-    let _config = Config::new(
-        args.inputs,
-        args.output,
+    // Validate inputs
+    if args.inputs.is_empty() {
+        eprintln!("Error: No input files or directories provided.");
+        eprintln!("Use -i or --inputs to specify input paths.");
+        std::process::exit(1);
+    }
+
+    // Handle dry-run mode before consuming args
+    if args.dry_run {
+        println!("Dry run mode - showing what would be done:");
+        println!("  Inputs: {:?}", args.inputs);
+        println!("  Output: {:?}", args.output);
+        println!("  Completed directory: {:?}", args.completed_directory);
+        std::process::exit(0);
+    }
+
+    // Create configuration
+    let config = Config::new(
+        args.inputs.clone(),
+        args.output.clone(),
         args.api_url,
         args.completed_directory,
         args.num_cpus,
@@ -69,7 +128,40 @@ fn main() {
         args.dry_run,
     );
 
-    println!("m4b-merge configuration loaded");
+    info!("m4b-merge starting with {} input(s)", args.inputs.len());
+
+    // Create and run processor
+    match Processor::new(config) {
+        Ok(processor) => {
+            let progress_handler = ConsoleProgressHandler;
+
+            match processor.process_with_progress(args.inputs, &progress_handler).await {
+                Ok(results) => {
+                    println!("\n=== Processing Complete ===");
+                    println!("Successfully processed {} audiobook(s)", results.len());
+
+                    for (idx, result) in results.iter().enumerate() {
+                        println!("\n{}. {}", idx + 1, result.output_file.display());
+                        println!("   Input files: {}", result.input_files.len());
+                        println!("   Metadata applied: {}", if result.metadata_applied { "Yes" } else { "No" });
+                        println!("   Source files moved: {}", if result.files_moved { "Yes" } else { "No" });
+                    }
+
+                    info!("m4b-merge completed successfully");
+                }
+                Err(e) => {
+                    error!("Processing failed: {}", e);
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Err(e) => {
+            error!("Failed to create processor: {}", e);
+            eprintln!("Error: Failed to initialize: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn check_ffmpeg_and_exit() {
@@ -110,6 +202,7 @@ fn check_ffmpeg_and_exit() {
         }
         Err(e) => {
             error!("FFmpeg not found: {}", e);
+            eprintln!("Error: FFmpeg not found. Please install FFmpeg and ensure it's in your PATH.");
             std::process::exit(1);
         }
     }
