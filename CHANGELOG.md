@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.6.0](https://github.com/djdembeck/m4b-merge/compare/v0.5.3...v0.6.0) (2025-02-09)
+
+### Features
+
+* **tone:** Add tone support for metadata tagging ([a414cde](https://github.com/djdembeck/m4b-merge/commit/a414cde))
+* **tone:** Migrate m4b-tool meta to tone tag ([dfcb254](https://github.com/djdembeck/m4b-merge/commit/dfcb254))
+* **docker:** Add tone to Docker image ([5f71c10](https://github.com/djdembeck/m4b-merge/commit/5f71c10))
+* **mp4chaps:** Replace mp4chaps with mutagen for Ubuntu 22.04+ compatibility ([90fb22c](https://github.com/djdembeck/m4b-merge/commit/90fb22c))
+
+### Bug Fixes
+
+* **config:** Make mp4chaps optional to support Ubuntu 22.04+ ([a414cde](https://github.com/djdembeck/m4b-merge/commit/a414cde))
+* **tests:** Refactor assertions to use equivalent output instead of exact sizes ([a414cde](https://github.com/djdembeck/m4b-merge/commit/a414cde))
+
 ### [0.5.3](https://github.com/djdembeck/m4b-merge/compare/v0.5.2...v0.5.3) (2024-08-07)
 
 ### Bug Fixes

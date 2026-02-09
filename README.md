@@ -141,6 +141,7 @@ For a folder of multiple audio files, simply pass the folder itself as an input,
 
 - [audnexus](https://github.com/laxamentumtech/audnexus) - API backend for metadata
 - [m4b-tool](https://github.com/sandreas/m4b-tool) - File merging and tagging
+- [tone](https://github.com/sandreas/tone) - Metadata tagging (optional, for future-proofing)
 
 ## ✍️ Authors <a name = "authors"></a>
 
@@ -148,4 +149,4 @@ For a folder of multiple audio files, simply pass the folder itself as an input,
 
 ## 🎉 Acknowledgements <a name = "acknowledgement"></a>
 
-- [sandreas](https://github.com/sandreas) for creating and maintaining [m4b-tool](https://github.com/sandreas/m4b-tool)
+- [sandreas](https://github.com/sandreas) for creating and maintaining [m4b-tool](https://github.com/sandreas/m4b-tool) and [tone](https://github.com/sandreas/tone)
