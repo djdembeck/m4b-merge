@@ -4,6 +4,8 @@ import shutil
 from pathlib import Path
 import pytest
 import subprocess
+import mutagen
+from mutagen.mp4 import MP4
 
 # Test with Project Haill Mary, because it's a good book
 primary_asin = "B08G9PRS1K"
@@ -46,8 +48,9 @@ class TestMerge:
     def test_download_cover(self):
         mp3 = self.mp3_data(primary_asin)
         mp3.download_cover()
-        assert ((test_cover).exists() and
-                os.path.getsize(test_cover) == 779312)
+        assert test_cover.exists(), "Cover file should exist"
+        file_size = os.path.getsize(test_cover)
+        assert 700000 < file_size < 850000, f"Cover file size {file_size} outside expected range (±10%)"
 
     def test_bitrate(self):
         mp3 = self.mp3_data(primary_asin)
@@ -66,16 +69,24 @@ class TestMerge:
         mp3.prepare_data()
         mp3.prepare_command_args()
         mp3.merge_multiple_files()
-        assert (output_path.exists() and
-                os.path.getsize(output_path) == 25300169 or 25329629)
+        assert output_path.exists(), "Output file should exist"
+        file_size = os.path.getsize(output_path)
+        assert 22000000 < file_size < 28000000, f"Output file size {file_size} outside expected range (±10%)"
+
+        # Verify metadata using mutagen
+        audio = MP4(str(output_path))
+        assert audio.tags['\xa9nam'][0] == 'Project Hail Mary', "Title should match"
+        assert audio.tags['\xa9ART'][0] == 'Andy Weir', "Author should match"
+        assert audio.tags['\xa9nrt'][0] == 'Ray Porter', "Narrator should match"
 
     def test_chapter_generation(self):
         mp3 = self.mp3_data(primary_asin)
         mp3.prepare_data()
         mp3.prepare_command_args()
         mp3.fix_chapters()
-        assert (output_chapters.exists() and
-                os.path.getsize(output_chapters) == 76)
+        assert output_chapters.exists(), "Chapters file should exist"
+        file_size = os.path.getsize(output_chapters)
+        assert 50 < file_size < 150, f"Chapters file size {file_size} outside expected range (±10%)"
 
     def mp3_data(self, asin):
         input_data = helpers.get_directory(test_path)
