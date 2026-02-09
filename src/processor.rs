@@ -1,0 +1,533 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+use thiserror::Error;
+use tracing::{debug, error, info, warn};
+
+use crate::api::audible::{AudibleClient, AudibleError};
+use crate::audio::ffmpeg::FFmpeg;
+use crate::config::Config;
+use crate::discovery::{discover_and_group, AudioFile, AudioGroup, DiscoveryError};
+use crate::merge::{MergeError, MergeJob, Merger};
+use crate::tagging::{Tagger, TaggingError};
+
+/// Errors that can occur during processing
+#[derive(Error, Debug)]
+pub enum ProcessorError {
+    #[error("Discovery error: {0}")]
+    Discovery(#[from] DiscoveryError),
+
+    #[error("Merge error: {0}")]
+    Merge(#[from] MergeError),
+
+    #[error("API error: {0}")]
+    Api(#[from] AudibleError),
+
+    #[error("Tagging error: {0}")]
+    Tagging(#[from] TaggingError),
+
+    #[error("No input files provided")]
+    NoInputs,
+
+    #[error("No output directory specified")]
+    NoOutputDir,
+
+    #[error("Failed to create output directory: {0}")]
+    OutputDirCreation(String),
+
+    #[error("FFmpeg not found: {0}")]
+    FFmpegNotFound(String),
+
+    #[error("Processing failed for {path}: {reason}")]
+    ProcessingFailed { path: PathBuf, reason: String },
+
+    #[error("Cleanup failed: {0}")]
+    CleanupFailed(String),
+}
+
+/// Result type for processor operations
+pub type Result<T> = std::result::Result<T, ProcessorError>;
+
+/// Processing result for a single audiobook
+#[derive(Debug, Clone)]
+pub struct ProcessingResult {
+    /// Input files that were processed
+    pub input_files: Vec<PathBuf>,
+    /// Output file path
+    pub output_file: PathBuf,
+    /// Whether metadata was applied from API
+    pub metadata_applied: bool,
+    /// Whether source files were moved to completed directory
+    pub files_moved: bool,
+}
+
+/// Progress information during processing
+#[derive(Debug, Clone)]
+pub struct ProcessingProgress {
+    /// Current stage
+    pub stage: ProcessingStage,
+    /// Current file being processed (if applicable)
+    pub current_file: Option<PathBuf>,
+    /// Total files to process
+    pub total_files: usize,
+    /// Files processed so far
+    pub completed_files: usize,
+    /// Current message
+    pub message: String,
+}
+
+/// Processing stages
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessingStage {
+    Discovery,
+    ApiLookup,
+    Merging,
+    Tagging,
+    MovingFiles,
+    Complete,
+    Error,
+}
+
+impl std::fmt::Display for ProcessingStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProcessingStage::Discovery => write!(f, "Discovery"),
+            ProcessingStage::ApiLookup => write!(f, "API Lookup"),
+            ProcessingStage::Merging => write!(f, "Merging"),
+            ProcessingStage::Tagging => write!(f, "Tagging"),
+            ProcessingStage::MovingFiles => write!(f, "Moving Files"),
+            ProcessingStage::Complete => write!(f, "Complete"),
+            ProcessingStage::Error => write!(f, "Error"),
+        }
+    }
+}
+
+/// Trait for handling processing progress callbacks
+pub trait ProgressHandler: Send + Sync {
+    /// Called when progress is updated
+    fn on_progress(&self, progress: ProcessingProgress);
+}
+
+/// Simple progress handler that logs progress
+pub struct LoggingProgressHandler;
+
+impl ProgressHandler for LoggingProgressHandler {
+    fn on_progress(&self, progress: ProcessingProgress) {
+        info!(
+            "[{}] {}/{} - {}",
+            progress.stage,
+            progress.completed_files,
+            progress.total_files,
+            progress.message
+        );
+    }
+}
+
+/// No-op progress handler
+pub struct NoOpProgressHandler;
+
+impl ProgressHandler for NoOpProgressHandler {
+    fn on_progress(&self, _progress: ProcessingProgress) {}
+}
+
+/// Main processor that orchestrates all operations
+pub struct Processor {
+    config: Config,
+    ffmpeg: Arc<FFmpeg>,
+    api_client: Option<AudibleClient>,
+    merger: Merger,
+    tagger: Tagger,
+}
+
+impl Processor {
+    /// Create a new Processor with the given configuration
+    pub fn new(config: Config) -> Result<Self> {
+        // Discover FFmpeg
+        let ffmpeg = Arc::new(
+            FFmpeg::discover()
+                .map_err(|e| ProcessorError::FFmpegNotFound(e.to_string()))?,
+        );
+
+        // Create API client if URL is provided
+        let api_client = if config.api_url.is_empty() {
+            None
+        } else {
+            match AudibleClient::with_base_url(&config.api_url) {
+                Ok(client) => Some(client),
+                Err(e) => {
+                    warn!("Failed to create API client: {}", e);
+                    None
+                }
+            }
+        };
+
+        let merger = Merger::new(ffmpeg.clone());
+        let tagger = Tagger::new();
+
+        Ok(Self {
+            config,
+            ffmpeg,
+            api_client,
+            merger,
+            tagger,
+        })
+    }
+
+    /// Create a new Processor with explicit components (for testing)
+    #[allow(dead_code)]
+    pub fn with_components(
+        config: Config,
+        ffmpeg: Arc<FFmpeg>,
+        api_client: Option<AudibleClient>,
+    ) -> Self {
+        let merger = Merger::new(ffmpeg.clone());
+        let tagger = Tagger::new();
+
+        Self {
+            config,
+            ffmpeg,
+            api_client,
+            merger,
+            tagger,
+        }
+    }
+
+    /// Process all input paths
+    pub async fn process(&self, inputs: Vec<PathBuf>) -> Result<Vec<ProcessingResult>> {
+        self.process_with_progress(inputs, &NoOpProgressHandler).await
+    }
+
+    /// Process all input paths with progress reporting
+    pub async fn process_with_progress(
+        &self,
+        inputs: Vec<PathBuf>,
+        progress_handler: &dyn ProgressHandler,
+    ) -> Result<Vec<ProcessingResult>> {
+        if inputs.is_empty() {
+            return Err(ProcessorError::NoInputs);
+        }
+
+        // Ensure output directory exists
+        if let Some(ref output) = self.config.output {
+            std::fs::create_dir_all(output)
+                .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))?;
+        }
+
+        // Stage 1: Discovery
+        progress_handler.on_progress(ProcessingProgress {
+            stage: ProcessingStage::Discovery,
+            current_file: None,
+            total_files: inputs.len(),
+            completed_files: 0,
+            message: "Discovering audio files...".to_string(),
+        });
+
+        let groups = self.discover_files(&inputs)?;
+        info!("Discovered {} audio groups to process", groups.len());
+
+        if groups.is_empty() {
+            return Err(ProcessorError::NoInputs);
+        }
+
+        // Process each group
+        let mut results = Vec::new();
+        let total_groups = groups.len();
+
+        for (idx, group) in groups.iter().enumerate() {
+            progress_handler.on_progress(ProcessingProgress {
+                stage: ProcessingStage::Merging,
+                current_file: Some(group.files[0].path.clone()),
+                total_files: total_groups,
+                completed_files: idx,
+                message: format!("Processing group '{}'...", group.name),
+            });
+
+            match self.process_group(group, progress_handler).await {
+                Ok(result) => {
+                    results.push(result);
+                }
+                Err(e) => {
+                    error!("Failed to process group '{}': {}", group.name, e);
+                    // Continue processing other groups
+                }
+            }
+        }
+
+        progress_handler.on_progress(ProcessingProgress {
+            stage: ProcessingStage::Complete,
+            current_file: None,
+            total_files: total_groups,
+            completed_files: results.len(),
+            message: format!("Completed processing {} audiobooks", results.len()),
+        });
+
+        Ok(results)
+    }
+
+    /// Process a single audio group (audiobook)
+    async fn process_group(
+        &self,
+        group: &AudioGroup,
+        progress_handler: &dyn ProgressHandler,
+    ) -> Result<ProcessingResult> {
+        let input_paths: Vec<PathBuf> = group.files.iter().map(|f| f.path.clone()).collect();
+
+        debug!("Processing group '{}' with {} files", group.name, input_paths.len());
+
+        // Determine output path
+        let output_path = self.determine_output_path(&group.files)?;
+        debug!("Output path: {}", output_path.display());
+
+        // Stage 2: API Lookup (optional - only if ASIN is provided or can be inferred)
+        let metadata = if let Some(ref client) = self.api_client {
+            // Try to extract ASIN from folder name or existing metadata
+            if let Some(asin) = self.extract_asin(&group) {
+                progress_handler.on_progress(ProcessingProgress {
+                    stage: ProcessingStage::ApiLookup,
+                    current_file: Some(input_paths[0].clone()),
+                    total_files: 1,
+                    completed_files: 0,
+                    message: format!("Fetching metadata for ASIN: {}...", asin),
+                });
+
+                match client.fetch_book(&asin).await {
+                    Ok(book_metadata) => {
+                        info!("Successfully fetched metadata for: {}", book_metadata.title);
+                        Some(book_metadata)
+                    }
+                    Err(e) => {
+                        warn!("Failed to fetch metadata for ASIN {}: {}", asin, e);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Stage 3: Merge
+        progress_handler.on_progress(ProcessingProgress {
+            stage: ProcessingStage::Merging,
+            current_file: Some(input_paths[0].clone()),
+            total_files: 1,
+            completed_files: 0,
+            message: "Merging audio files...".to_string(),
+        });
+
+        let merge_job = MergeJob::new(group.files.clone(), output_path.clone());
+        let merged_path = self.merger.merge(&merge_job).map_err(ProcessorError::Merge)?;
+
+        info!("Successfully merged to: {}", merged_path.display());
+
+        // Stage 4: Tagging
+        progress_handler.on_progress(ProcessingProgress {
+            stage: ProcessingStage::Tagging,
+            current_file: Some(merged_path.clone()),
+            total_files: 1,
+            completed_files: 0,
+            message: "Writing metadata and cover art...".to_string(),
+        });
+
+        let metadata_applied = if let Some(ref metadata) = metadata {
+            // Write metadata tags
+            if let Err(e) = self.tagger.write_metadata(&merged_path, metadata) {
+                warn!("Failed to write metadata: {}", e);
+                false
+            } else {
+                // Download and embed cover art
+                if let Some(ref cover_url) = metadata.cover_url {
+                    if let Err(e) = self.tagger.embed_cover(&merged_path, cover_url).await {
+                        warn!("Failed to embed cover art: {}", e);
+                    }
+                }
+
+                // Write chapters.txt
+                let chapters_txt_path = merged_path.with_extension("").with_extension("chapters.txt");
+                if let Err(e) = self.tagger.write_chapters_txt(&chapters_txt_path, metadata) {
+                    warn!("Failed to write chapters.txt: {}", e);
+                }
+
+                true
+            }
+        } else {
+            false
+        };
+
+        // Stage 5: Move source files
+        let files_moved = if let Some(ref completed_dir) = self.config.completed_directory {
+            progress_handler.on_progress(ProcessingProgress {
+                stage: ProcessingStage::MovingFiles,
+                current_file: Some(input_paths[0].clone()),
+                total_files: input_paths.len(),
+                completed_files: 0,
+                message: "Moving source files to completed directory...".to_string(),
+            });
+
+            match self.tagger.move_completed_files(&input_paths, completed_dir) {
+                Ok(moved) => {
+                    info!("Moved {} files to completed directory", moved.len());
+                    true
+                }
+                Err(e) => {
+                    warn!("Failed to move source files: {}", e);
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        Ok(ProcessingResult {
+            input_files: input_paths,
+            output_file: merged_path,
+            metadata_applied,
+            files_moved,
+        })
+    }
+
+    /// Discover audio files from input paths
+    fn discover_files(&self, inputs: &[PathBuf]) -> Result<Vec<AudioGroup>> {
+        let groups = discover_and_group(inputs)?;
+        Ok(groups)
+    }
+
+    /// Determine output path for a group of files
+    fn determine_output_path(&self, files: &[AudioFile]) -> Result<PathBuf> {
+        let output_dir = self
+            .config
+            .output
+            .clone()
+            .ok_or(ProcessorError::NoOutputDir)?;
+
+        // Use the first file's parent directory name as the base for output filename
+        let first_file = files
+            .first()
+            .ok_or_else(|| ProcessorError::NoInputs)?;
+
+        let output_name = first_file
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "output".to_string());
+
+        // Sanitize filename
+        let safe_name = sanitize_filename::sanitize(&output_name);
+        let output_path = output_dir.join(format!("{}.m4b", safe_name));
+
+        Ok(output_path)
+    }
+
+    /// Extract ASIN from audio group (folder name, existing metadata, etc.)
+    fn extract_asin(&self, _group: &AudioGroup) -> Option<String> {
+        // TODO: Implement ASIN extraction from:
+        // - Folder name (e.g., "Book Title [B08XYZ1234]")
+        // - Existing metadata in first file
+        // - User-provided ASIN via config
+        None
+    }
+
+    /// Get the FFmpeg instance
+    pub fn ffmpeg(&self) -> &FFmpeg {
+        &self.ffmpeg
+    }
+
+    /// Get the API client
+    pub fn api_client(&self) -> Option<&AudibleClient> {
+        self.api_client.as_ref()
+    }
+
+    /// Get the merger
+    pub fn merger(&self) -> &Merger {
+        &self.merger
+    }
+
+    /// Get the tagger
+    pub fn tagger(&self) -> &Tagger {
+        &self.tagger
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::discovery::AudioFormat;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn create_test_config(temp_dir: &TempDir) -> Config {
+        Config::new(
+            vec![],
+            Some(temp_dir.path().join("output")),
+            "https://api.audnex.us".to_string(),
+            Some(temp_dir.path().join("completed")),
+            1,
+            "info".to_string(),
+            "{author}/{title}".to_string(),
+            false,
+        )
+    }
+
+    fn create_test_audio_file(dir: &TempDir, name: &str, content: &[u8]) -> PathBuf {
+        let path = dir.path().join(name);
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(content).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_processor_creation() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+
+        let processor = Processor::new(config);
+        assert!(processor.is_ok());
+    }
+
+    #[test]
+    fn test_determine_output_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let processor = Processor::new(config).unwrap();
+
+        // Create test audio file
+        let test_dir = temp_dir.path().join("My Audiobook");
+        std::fs::create_dir(&test_dir).unwrap();
+        let file_path = create_test_audio_file(&temp_dir, "My Audiobook/chapter1.mp3", b"dummy");
+
+        let audio_file = AudioFile::new(file_path).unwrap();
+        let output_path = processor.determine_output_path(&[audio_file]).unwrap();
+
+        assert!(output_path.to_string_lossy().contains("My Audiobook"));
+        assert!(output_path.extension().unwrap() == "m4b");
+    }
+
+    #[test]
+    fn test_processing_stage_display() {
+        assert_eq!(ProcessingStage::Discovery.to_string(), "Discovery");
+        assert_eq!(ProcessingStage::Merging.to_string(), "Merging");
+        assert_eq!(ProcessingStage::Complete.to_string(), "Complete");
+    }
+
+    #[test]
+    fn test_no_inputs_returns_empty_groups() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let processor = Processor::new(config).unwrap();
+
+        // Empty inputs returns empty groups (not an error at discovery stage)
+        let result = processor.discover_files(&[]);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_empty_inputs() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let processor = Processor::new(config).unwrap();
+
+        let result = processor.process(vec![]).await;
+        assert!(matches!(result, Err(ProcessorError::NoInputs)));
+    }
+}
