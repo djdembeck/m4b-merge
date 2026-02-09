@@ -5,12 +5,16 @@ import os
 import re
 import requests
 import shutil
+import struct
 import subprocess
+from io import BytesIO
 from pathlib import Path
 from pathvalidate import sanitize_filename
 from pydub.utils import mediainfo
 # Local imports
 from . import config, helpers
+# Import mutagen for MP4 chapter manipulation
+from mutagen.mp4 import MP4, MP4Chapters, Atom, Atoms
 
 
 class M4bMerge:
@@ -473,6 +477,138 @@ class M4bMerge:
         )
         return selected_input
 
+    def _parse_timestamp(self, timestamp_str):
+        """Parse a timestamp string (HH:MM:SS.mmm) to seconds."""
+        parts = timestamp_str.split(':')
+        if len(parts) == 3:
+            hours, minutes, seconds = parts
+            return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
+        return 0.0
+
+    def _get_movie_timescale(self, fileobj, atoms):
+        """Get the movie timescale from the mvhd atom."""
+        try:
+            mvhd_atom = atoms.path(b"moov", b"mvhd")[-1]
+        except KeyError:
+            return 1000
+
+        chapters = MP4Chapters()
+        chapters._parse_mvhd(mvhd_atom, fileobj)
+        return chapters._timescale or 1000
+
+    def _build_chpl_payload(self, chapters, timescale):
+        """Build the chpl atom payload from chapter data."""
+        if timescale <= 0:
+            timescale = 1000
+
+        body = bytearray()
+        body.append(len(chapters))
+
+        for seconds, title in chapters:
+            safe_title = (title or "").strip()
+            if not safe_title:
+                safe_title = "Chapter"
+            encoded = safe_title.encode("utf-8")[:255]
+            start = int(round(seconds * timescale * 10000))
+            body.extend(struct.pack(">Q", start))
+            body.append(len(encoded))
+            body.extend(encoded)
+
+        header = struct.pack(">I", 0x01000000) + b"\x00\x00\x00\x00"
+        return header + body
+
+    def _apply_delta(self, helper, fileobj, parents, atoms, delta, offset):
+        """Apply size delta to parent atoms."""
+        if delta == 0:
+            return
+        from mutagen.mp4 import MP4Tags
+        helper._MP4Tags__update_parents(fileobj, list(parents), delta)
+        helper._MP4Tags__update_offsets(fileobj, atoms, delta, offset)
+
+    def _replace_existing_chpl(self, helper, fileobj, atoms, chpl_atom, path):
+        """Replace existing chpl atom with new one."""
+        target = path[-1]
+        offset = target.offset
+        original_length = target.length
+        from mutagen._util import resize_bytes
+        resize_bytes(fileobj, original_length, len(chpl_atom), offset)
+        fileobj.seek(offset)
+        fileobj.write(chpl_atom)
+        delta = len(chpl_atom) - original_length
+        self._apply_delta(helper, fileobj, path[:-1], atoms, delta, offset)
+
+    def _append_to_udta(self, helper, fileobj, atoms, chpl_atom, udta_path):
+        """Append chpl atom to udta container."""
+        from mutagen._util import insert_bytes
+        udta_atom = udta_path[-1]
+        insert_offset = udta_atom.offset + udta_atom.length
+        insert_bytes(fileobj, len(chpl_atom), insert_offset)
+        fileobj.seek(insert_offset)
+        fileobj.write(chpl_atom)
+        self._apply_delta(helper, fileobj, udta_path, atoms, len(chpl_atom), insert_offset)
+
+    def _create_udta_with_chpl(self, helper, fileobj, atoms, chpl_atom, moov_path):
+        """Create new udta container with chpl atom."""
+        from mutagen._util import insert_bytes
+        udta_atom = Atom.render(b"udta", chpl_atom)
+        insert_offset = moov_path[-1].offset + moov_path[-1].length
+        insert_bytes(fileobj, len(udta_atom), insert_offset)
+        fileobj.seek(insert_offset)
+        fileobj.write(udta_atom)
+        self._apply_delta(helper, fileobj, moov_path, atoms, len(udta_atom), insert_offset)
+
+    def _write_chapters_mutagen(self, m4b_path, chapter_markers):
+        """Write chapter markers to MP4 file using mutagen."""
+        if not chapter_markers:
+            return
+
+        seconds_markers = [(self._parse_timestamp(start_ms), title) for start_ms, title in chapter_markers]
+
+        with open(m4b_path, "r+b") as fh:
+            atoms = Atoms(fh)
+            timescale = self._get_movie_timescale(fh, atoms)
+            payload = self._build_chpl_payload(seconds_markers, timescale)
+            chpl_atom = Atom.render(b"chpl", payload)
+            from mutagen.mp4 import MP4Tags
+            helper = MP4Tags()
+
+            try:
+                path = atoms.path(b"moov", b"udta", b"chpl")
+            except KeyError:
+                try:
+                    udta_path = atoms.path(b"moov", b"udta")
+                except KeyError:
+                    moov_path = atoms.path(b"moov")
+                    self._create_udta_with_chpl(helper, fh, atoms, chpl_atom, moov_path)
+                else:
+                    self._append_to_udta(helper, fh, atoms, chpl_atom, udta_path)
+            else:
+                self._replace_existing_chpl(helper, fh, atoms, chpl_atom, path)
+
+        # Verify chapters were written correctly
+        try:
+            mp4 = MP4(m4b_path)
+            _ = mp4.chapters
+        except Exception as e:
+            logging.warning(f"Failed to verify chapters: {e}")
+
+    def _parse_chapter_file(self, chapter_file):
+        """Parse chapter file and return list of (timestamp, title) tuples."""
+        chapters = []
+        with open(chapter_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                # Skip comments and empty lines
+                if not line or line.startswith('#'):
+                    continue
+                # Parse timestamp and title
+                parts = line.split(None, 1)
+                if len(parts) >= 2:
+                    timestamp = parts[0]
+                    title = parts[1]
+                    chapters.append((timestamp, title))
+        return chapters
+
     def fix_chapters(self):
         chapter_file = f"{self.book_output}.chapters.txt"
         m4b_to_modify = f"{self.book_output}.m4b"
@@ -507,31 +643,49 @@ class M4bMerge:
         with open(chapter_file, 'w') as f:
             f.write(new_file_content)
 
-        # Apply chapter arguments/command
-        args = [
-            config.mp4chaps_bin,
-            '-z',
-            m4b_to_modify,
-        ]
+        # Check if mp4chaps is available
+        if config.mp4chaps_bin:
+            logging.info("Using mp4chaps for chapter operations")
+            # Apply chapter arguments/command
+            args = [
+                config.mp4chaps_bin,
+                '-z',
+                m4b_to_modify,
+            ]
 
-        # Check that chapter file is valid
-        # Generally only an issue because of:
-        # https://github.com/sandreas/m4b-tool/issues/141
-        if os.path.getsize(chapter_file) == 0:
-            logging.error("Chapter file is empty, attempting to correct")
-            args.append('-r')
+            # Check that chapter file is valid
+            # Generally only an issue because of:
+            # https://github.com/sandreas/m4b-tool/issues/141
+            if os.path.getsize(chapter_file) == 0:
+                logging.error("Chapter file is empty, attempting to correct")
+                args.append('-r')
+            else:
+                logging.info("Applying chapters to m4b...")
+                args.append('-i')
+
+            # Set logging level of m4bchaps depending upon log_level
+            if logging.root.level == logging.DEBUG:
+                args.append('-v')
+            elif logging.root.level >= logging.WARNING:
+                args.append('-q')
+
+            # Apply fixed chapters to file
+            subprocess.call(args, shell=False)
         else:
-            logging.info("Applying chapters to m4b...")
-            args.append('-i')
-
-        # Set logging level of m4bchaps depending upon log_level
-        if logging.root.level == logging.DEBUG:
-            args.append('-v')
-        elif logging.root.level >= logging.WARNING:
-            args.append('-q')
-
-        # Apply fixed chapters to file
-        subprocess.call(args, shell=False)
+            logging.info("Using mutagen for chapter operations (mp4chaps not available)")
+            # Parse chapter file
+            chapter_markers = self._parse_chapter_file(chapter_file)
+            if not chapter_markers:
+                logging.error("Chapter file is empty, attempting to correct")
+                # Try to repair by using existing chapters from the file
+                try:
+                    mp4 = MP4(m4b_to_modify)
+                    if mp4.chapters:
+                        chapter_markers = [(str(chapter.start), chapter.title) for chapter in mp4.chapters]
+                except Exception as e:
+                    logging.warning(f"Could not repair chapters: {e}")
+            # Write chapters using mutagen
+            self._write_chapters_mutagen(m4b_to_modify, chapter_markers)
 
     def move_completed_input(self):
         if not config.junk_dir:
