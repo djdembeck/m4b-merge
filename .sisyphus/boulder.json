@@ -1,0 +1,21 @@
+{
+  "active_plan": "/home/djdembeck/projects/github/m4b-merge/.sisyphus/plans/m4b-tool-to-tone-migration.md",
+  "started_at": "2026-02-09T17:58:32.634Z",
+  "completed_at": "2026-02-09T20:15:00.000Z",
+  "session_ids": [
+    "ses_3bc900de8ffea52I99uauDB9G0",
+    "ses_3bc43abdbffefeCJrdWi3aK0LS"
+  ],
+  "plan_name": "m4b-tool-to-tone-migration",
+  "agent": "atlas",
+  "status": "completed",
+  "tasks_completed": 9,
+  "tasks_total": 9,
+  "commits": [
+    "a414cde - feat: add tone support and refactor tests for migration",
+    "dfcb254 - feat: migrate m4b-tool meta to tone tag",
+    "5f71c10 - docker: add tone to Docker image",
+    "90fb22c - feat: replace mp4chaps with mutagen for Ubuntu 22.04+ compatibility",
+    "244951c - docs: update README and CHANGELOG for tone migration"
+  ]
+}
