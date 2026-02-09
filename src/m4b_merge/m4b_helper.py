@@ -365,7 +365,10 @@ class M4bMerge:
 
             # Execute tone command
             logging.debug(f"Tone command: {tone_args}")
-            subprocess.call(tone_args, shell=False)
+            result = subprocess.run(tone_args, shell=False, capture_output=True, text=True)
+            if result.returncode != 0:
+                logging.error(f"Tone command failed: {result.stderr}")
+                raise RuntimeError(f"Failed to tag with tone: {result.returncode}")
 
             # Move completed file
             shutil.move(self.input_path, f"{self.book_output}.m4b")
@@ -683,7 +686,7 @@ class M4bMerge:
                     if mp4.chapters:
                         chapter_markers = [(str(chapter.start), chapter.title) for chapter in mp4.chapters]
                 except Exception as e:
-                    logging.warning(f"Could not repair chapters: {e}")
+                    logging.warning(f'Could not repair chapters: {e}')
             # Write chapters using mutagen
             self._write_chapters_mutagen(m4b_to_modify, chapter_markers)
 

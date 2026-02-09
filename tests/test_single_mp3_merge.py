@@ -4,7 +4,6 @@ import shutil
 from pathlib import Path
 import pytest
 import subprocess
-import mutagen
 from mutagen.mp4 import MP4
 
 # Test with Project Haill Mary, because it's a good book
