@@ -49,3 +49,22 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Security
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Development
+.sisyphus/
+.opencode/
+.chunkhound/
+
+# Editor
+*.sublime-*
+
+# Temp
+tmp/
+temp/
