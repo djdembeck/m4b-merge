@@ -464,42 +464,50 @@ impl Processor {
         if let Some(subtitle) = &metadata.subtitle {
             result = result.replace("{subtitle}", subtitle);
         } else {
-            result = result.replace("{subtitle}", "").replace(" - ", "").replace("  ", " ").trim().to_string();
+            result = result.replace("{subtitle}", "");
         }
 
         // Replace {series_name} or remove if none
         if let Some(series) = &metadata.series_name {
             result = result.replace("{series_name}", series);
         } else {
-            result = result.replace("{series_name}", "").replace("/", "").trim().to_string();
+            result = result.replace("{series_name}", "");
         }
 
         // Replace {series_position} or remove if none
         if let Some(pos) = &metadata.series_position {
             result = result.replace("{series_position}", pos);
         } else {
-            result = result.replace("{series_position}", "").replace(" - ", "").replace("  ", " ").trim().to_string();
+            result = result.replace("{series_position}", "");
         }
 
         // Replace {year} or remove if none
         if let Some(year) = metadata.year {
             result = result.replace("{year}", &year.to_string());
         } else {
-            result = result.replace("{year}", "").replace(" ()", "").replace("  ", " ").trim().to_string();
+            result = result.replace("{year}", "");
         }
 
-        // Clean up any remaining artifacts
-        result = result.replace("  ", " ").replace(" / ", "/").replace("//", "/").trim().to_string();
+        // Clean up: remove empty path segments and normalize slashes
+        result = result
+            .split('/')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("/");
 
         result
     }
 
     /// Extract ASIN from audio group (folder name, existing metadata, etc.)
-    fn extract_asin(&self, _group: &AudioGroup) -> Option<String> {
-        // TODO: Implement ASIN extraction from:
-        // - Folder name (e.g., "Book Title [B08XYZ1234]")
-        // - Existing metadata in first file
-        // - User-provided ASIN via config
+    fn extract_asin(&self, group: &AudioGroup) -> Option<String> {
+        // Try to extract ASIN from folder name (e.g., "Book Title [B08XYZ1234]")
+        let re = regex::Regex::new(r"\[([A-Z0-9]{10})\]").ok()?;
+        if let Some(captures) = re.captures(&group.name) {
+            if let Some(asin) = captures.get(1) {
+                return Some(asin.as_str().to_string());
+            }
+        }
         None
     }
 
