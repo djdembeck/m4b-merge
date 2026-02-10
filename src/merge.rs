@@ -370,6 +370,11 @@ impl Merger {
             std::fs::create_dir_all(parent)?;
         }
 
+        // Special case: single file can be copied directly without concat
+        if job.input_files.len() == 1 {
+            return self.copy_single_file(&job.input_files[0], &job.output_path, target_bitrate, progress_handler);
+        }
+
         // Build FFmpeg command
         let mut cmd = Command::new(self.ffmpeg.ffmpeg_path());
 
@@ -472,6 +477,55 @@ impl Merger {
         );
 
         Ok(job.output_path.clone())
+    }
+
+    /// Copy a single file directly without using concat demuxer
+    fn copy_single_file(
+        &self,
+        file: &AudioFile,
+        output_path: &Path,
+        target_bitrate: Option<u32>,
+        progress_handler: &dyn ProgressHandler,
+    ) -> Result<PathBuf> {
+        info!("Copying single file: {} -> {}", file.path.display(), output_path.display());
+
+        let mut cmd = Command::new(self.ffmpeg.ffmpeg_path());
+        cmd.arg("-i").arg(&file.path);
+
+        // Add codec arguments based on mode and target bitrate
+        if let Some(bitrate) = target_bitrate {
+            // Transcode mode
+            cmd.arg("-c:a").arg("aac")
+                .arg("-b:a").arg(format!("{}k", bitrate));
+        } else {
+            // Copy mode
+            cmd.arg("-c").arg("copy");
+        }
+
+        cmd.arg("-y").arg(output_path);
+
+        let output = cmd.output()
+            .map_err(|e| MergeError::OperationFailed(format!("Failed to execute FFmpeg: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(MergeError::OperationFailed(format!(
+                "FFmpeg failed: {}", stderr
+            )));
+        }
+
+        // Report completion
+        progress_handler.on_progress(MergeProgress {
+            current_file: 1,
+            total_files: 1,
+            time: Duration::from_secs(0),
+            speed: 1.0,
+            bitrate: target_bitrate.map(|b| b as u64 * 1000),
+            size: None,
+        });
+
+        info!("Single file copy completed: {}", output_path.display());
+        Ok(output_path.to_path_buf())
     }
 
     /// Merge multiple files with automatic mode detection
