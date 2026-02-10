@@ -1,29 +1,9 @@
 {
-  "active_plan": "/home/djdembeck/projects/github/m4b-merge/.sisyphus/plans/rust-rewrite.md",
-  "started_at": "2026-02-09T22:32:23.668Z",
-  "completed_at": "2026-02-10T01:10:00.000Z",
+  "active_plan": "/home/djdembeck/projects/github/m4b-merge/.sisyphus/plans/fix-rust-critical-bugs.md",
+  "started_at": "2026-02-10T08:00:00.000Z",
   "session_ids": [
-    "ses_3bba064cbffe2qZUMEgnt0wYI1"
+    "ses_3ba00a1eeffeWs8GZiVEa7uOnY"
   ],
-  "plan_name": "rust-rewrite",
-  "agent": "atlas",
-  "status": "completed",
-  "tasks_completed": 22,
-  "tasks_total": 22,
-  "commits": [
-    "4f0bd1d - fix: extract chapters from input file when API has none",
-    "239534f - fix: implement ASIN extraction from folder names", 
-    "7f771e9 - fix: implement path_format template support",
-    "414a0bc - chore: upgrade mp4ameta from 0.8 to 0.13",
-    "f0eb697 - feat: add chapter module with documentation",
-    "0dcb104 - fix: handle single-file processing without concat demuxer",
-    "7dcdf74 - ci: add Docker and GitHub Actions workflow",
-    "4511b68 - feat: integrate all modules and end-to-end workflow",
-    "5ecf3da - feat: implement tagging and file operations",
-    "4ab025e - feat: implement merge and conversion logic",
-    "8ab7f86 - feat: add file discovery and Audible API client",
-    "cc13392 - feat: add FFmpeg wrapper and CLI configuration",
-    "d9d60e1 - chore: initial project scaffolding"
-  ],
-  "note": "All 22 tasks complete (10 implementation + 12 verification items). All 65 checkboxes marked complete."
+  "plan_name": "fix-rust-critical-bugs",
+  "agent": "atlas"
 }

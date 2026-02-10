@@ -63,6 +63,8 @@ impl AudibleClient {
     pub fn with_base_url(base_url: impl Into<String>) -> Result<Self, AudibleError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .connect_timeout(Duration::from_secs(10))  // Connection timeout
+            .pool_idle_timeout(Duration::from_secs(30))  // Connection pool timeout
             .build()?;
 
         Ok(Self {
@@ -78,6 +80,8 @@ impl AudibleClient {
 
         self.client = Client::builder()
             .timeout(timeout)
+            .connect_timeout(Duration::from_secs(10))  // Connection timeout
+            .pool_idle_timeout(Duration::from_secs(30))  // Connection pool timeout
             .build()?;
 
         Ok(self)
