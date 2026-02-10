@@ -30,7 +30,7 @@ RUN cargo build --release --locked
 # =============================================================================
 # Runtime stage - Minimal image with FFmpeg
 # =============================================================================
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 # Install FFmpeg and other runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
