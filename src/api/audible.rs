@@ -73,9 +73,14 @@ impl AudibleClient {
     }
 
     /// Set a custom timeout for requests
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+    pub fn with_timeout(mut self, timeout: Duration) -> Result<Self, AudibleError> {
         self.timeout = timeout;
-        self
+
+        self.client = Client::builder()
+            .timeout(timeout)
+            .build()?;
+
+        Ok(self)
     }
 
     /// Validate ASIN format (10 alphanumeric characters)
@@ -178,12 +183,6 @@ impl AudibleClient {
         })
         .await
         .map_err(|_| AudibleError::RetryExhausted(MAX_RETRIES))
-    }
-}
-
-impl Default for AudibleClient {
-    fn default() -> Self {
-        Self::new().expect("Failed to create default AudibleClient")
     }
 }
 

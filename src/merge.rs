@@ -1,4 +1,4 @@
-use crate::audio::ffmpeg::{FFmpeg, FFmpegError, Result as FFmpegResult};
+use crate::audio::ffmpeg::{FFmpeg, FFmpegError};
 use crate::discovery::{AudioFile, AudioFormat};
 use regex::Regex;
 use std::io::{BufRead, BufReader};
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::NamedTempFile;
 use thiserror::Error;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 /// Errors that can occur during merge operations
 #[derive(Error, Debug)]
@@ -343,7 +343,7 @@ impl Merger {
                 .canonicalize()
                 .unwrap_or_else(|_| file.path.clone());
             let escaped_path = abs_path.to_string_lossy().replace("'", "'\\''");
-            content.push_str(&format!("file '{}\n", escaped_path));
+            content.push_str(&format!("file '{}'\n", escaped_path));
         }
 
         // Write to temp file

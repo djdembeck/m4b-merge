@@ -340,19 +340,47 @@ impl Tagger {
                     }
                     OverwriteBehavior::Force => {
                         warn!("Overwriting existing file: {}", dest_path.display());
+                        std::fs::remove_file(&dest_path).map_err(|e| {
+                            TaggingError::FileMove(format!(
+                                "Failed to remove existing destination {}: {}",
+                                dest_path.display(),
+                                e
+                            ))
+                        })?;
                     }
                 }
             }
 
             // Move the file
-            std::fs::rename(source, &dest_path).map_err(|e| {
-                TaggingError::FileMove(format!(
-                    "Failed to move {} to {}: {}",
-                    source.display(),
-                    dest_path.display(),
-                    e
-                ))
-            })?;
+            if let Err(e) = std::fs::rename(source, &dest_path) {
+                let is_exdev = e.raw_os_error() == Some(18);
+
+                if is_exdev {
+                    std::fs::copy(source, &dest_path).map_err(|copy_err| {
+                        TaggingError::FileMove(format!(
+                            "Failed to copy {} to {} (cross-device fallback): {}",
+                            source.display(),
+                            dest_path.display(),
+                            copy_err
+                        ))
+                    })?;
+
+                    std::fs::remove_file(source).map_err(|remove_err| {
+                        TaggingError::FileMove(format!(
+                            "Failed to remove source {} after copy: {}",
+                            source.display(),
+                            remove_err
+                        ))
+                    })?;
+                } else {
+                    return Err(TaggingError::FileMove(format!(
+                        "Failed to move {} to {}: {}",
+                        source.display(),
+                        dest_path.display(),
+                        e
+                    )));
+                }
+            }
 
             info!(
                 "Moved file: {} -> {}",
@@ -469,7 +497,6 @@ fn format_duration(duration: Duration) -> String {
 mod tests {
     use super::*;
     use crate::metadata::Chapter;
-    use std::io::Write;
     use tempfile::TempDir;
 
     #[test]

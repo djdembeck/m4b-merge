@@ -11,50 +11,73 @@ env:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            artifact_name: m4b-merge-linux
+            binary_name: m4b-merge
+          - os: macos-latest
+            artifact_name: m4b-merge-macos
+            binary_name: m4b-merge
+          - os: windows-latest
+            artifact_name: m4b-merge-windows
+            binary_name: m4b-merge.exe
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build release binaries
         run: |
           cargo build --release --locked
 
-      - name: Upload Linux binary
+      - name: Upload ${{ matrix.artifact_name }} binary
         uses: actions/upload-artifact@v4
         with:
-          name: m4b-merge-linux
-          path: target/release/m4b-merge
-
-      - name: Upload macOS binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: m4b-merge-macos
-          path: target/release/m4b-merge
-
-      - name: Upload Windows binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: m4b-merge-windows
-          path: target/release/m4b-merge
+          name: ${{ matrix.artifact_name }}
+          path: target/release/${{ matrix.binary_name }}
 
   create-release:
     needs: release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: m4b-merge-linux
+          path: target/release/
+
+      - name: Download macOS binary
+        uses: actions/download-artifact@v4
+        with:
+          name: m4b-merge-macos
+          path: target/release/
+
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: m4b-merge-windows
+          path: target/release/
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
             target/release/m4b-merge
+            target/release/m4b-merge.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::api::audible::{AudibleClient, AudibleError};
 use crate::audio::ffmpeg::FFmpeg;
@@ -43,6 +43,9 @@ pub enum ProcessorError {
 
     #[error("Cleanup failed: {0}")]
     CleanupFailed(String),
+
+    #[error("Group processing failed: {group}")]
+    GroupProcessingFailed { group: String, source: Box<dyn std::error::Error + Send + Sync> },
 }
 
 /// Result type for processor operations
@@ -247,8 +250,17 @@ impl Processor {
                     results.push(result);
                 }
                 Err(e) => {
-                    error!("Failed to process group '{}': {}", group.name, e);
-                    // Continue processing other groups
+                    progress_handler.on_progress(ProcessingProgress {
+                        stage: ProcessingStage::Error,
+                        current_file: Some(group.files[0].path.clone()),
+                        total_files: total_groups,
+                        completed_files: idx,
+                        message: format!("Failed to process group '{}': {}", group.name, e),
+                    });
+                    return Err(ProcessorError::GroupProcessingFailed {
+                        group: group.name.clone(),
+                        source: Box::new(e) as Box<dyn std::error::Error + Send + Sync>,
+                    });
                 }
             }
         }
@@ -276,8 +288,11 @@ impl Processor {
 
         // Stage 2: API Lookup (optional - only if ASIN is provided or can be inferred)
         let metadata = if let Some(ref client) = self.api_client {
-            // Try to extract ASIN from folder name or existing metadata
-            if let Some(asin) = self.extract_asin(&group) {
+            let extracted_asin = self.extract_asin(&group);
+
+            let asin = self.config.asin.as_deref().or(extracted_asin.as_deref());
+
+            if let Some(asin) = asin {
                 progress_handler.on_progress(ProcessingProgress {
                     stage: ProcessingStage::ApiLookup,
                     current_file: Some(input_paths[0].clone()),
@@ -286,7 +301,7 @@ impl Processor {
                     message: format!("Fetching metadata for ASIN: {}...", asin),
                 });
 
-                match client.fetch_book(&asin).await {
+                match client.fetch_book(asin).await {
                     Ok(book_metadata) => {
                         info!("Successfully fetched metadata for: {}", book_metadata.title);
                         Some(book_metadata)
@@ -559,7 +574,6 @@ impl Processor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::AudioFormat;
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -573,6 +587,7 @@ mod tests {
             "info".to_string(),
             "{author}/{title}".to_string(),
             false,
+            None,
         )
     }
 

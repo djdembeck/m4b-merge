@@ -16,10 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY Cargo.toml Cargo.lock ./
 
 # Create the src directory structure to prevent build errors
-RUN mkdir -p src && echo "// src lib.rs placeholder" > src/lib.rs
+RUN mkdir -p src && echo "fn main() {}" > src/main.rs
 
 # Build dependencies
-RUN cargo fetch --locked || cargo update
+RUN cargo fetch --locked
 
 # Copy the rest of the source code
 COPY . .

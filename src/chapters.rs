@@ -3,6 +3,8 @@ use std::process::{Command, Stdio};
 use std::io::{Read, Seek, SeekFrom};
 use serde_json::Value;
 
+const MAX_TITLE_LEN: u32 = 10 * 1024;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chapter {
     pub title: String,
@@ -109,12 +111,14 @@ fn read_chapters_from_atom(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::err
         
         let atom_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
         let atom_ident = std::str::from_utf8(&buffer[4..8]).unwrap_or("");
-        
+
         if atom_ident == "moov" {
             let moov_end = file.stream_position()? + (atom_len as u64 - 8);
             return search_chapters_in_moov(&mut file, moov_end);
         } else if atom_len < 8 {
             break;
+        } else if atom_len == 8 {
+            continue;
         } else {
             file.seek(SeekFrom::Current((atom_len as i64) - 8))?;
         }
@@ -133,12 +137,14 @@ fn search_chapters_in_moov(file: &mut std::fs::File, moov_end: u64) -> Result<Ve
         
         let atom_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
         let atom_ident = std::str::from_utf8(&buffer[4..8]).unwrap_or("");
-        
+
         if atom_ident == "udta" {
             let udta_end = file.stream_position()? + (atom_len as u64 - 8);
             return search_chapters_in_udta(file, udta_end);
         } else if atom_len < 8 {
             break;
+        } else if atom_len == 8 {
+            continue;
         } else {
             file.seek(SeekFrom::Current((atom_len as i64) - 8))?;
         }
@@ -157,7 +163,7 @@ fn search_chapters_in_udta(file: &mut std::fs::File, udta_end: u64) -> Result<Ve
         
         let atom_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
         let atom_ident = std::str::from_utf8(&buffer[4..8]).unwrap_or("");
-        
+
         if atom_ident == "meta" {
             let meta_end = file.stream_position()? + (atom_len as u64 - 8);
             return search_chapters_in_meta(file, meta_end);
@@ -165,6 +171,8 @@ fn search_chapters_in_udta(file: &mut std::fs::File, udta_end: u64) -> Result<Ve
             return parse_chpl_atom(file, atom_len - 8);
         } else if atom_len < 8 {
             break;
+        } else if atom_len == 8 {
+            continue;
         } else {
             file.seek(SeekFrom::Current((atom_len as i64) - 8))?;
         }
@@ -189,11 +197,13 @@ fn search_chapters_in_meta(file: &mut std::fs::File, meta_end: u64) -> Result<Ve
         
         let atom_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
         let atom_ident = std::str::from_utf8(&buffer[4..8]).unwrap_or("");
-        
+
         if atom_ident == "chpl" {
             return parse_chpl_atom(file, atom_len - 8);
         } else if atom_len < 8 {
             break;
+        } else if atom_len == 8 {
+            continue;
         } else {
             file.seek(SeekFrom::Current((atom_len as i64) - 8))?;
         }
@@ -254,13 +264,18 @@ fn parse_chpl_atom(file: &mut std::fs::File, content_len: u32) -> Result<Vec<Cha
             buffer[offset + 2],
             buffer[offset + 3],
         ]);
-        offset += 4;
-        
-        if buffer.len() < offset + title_len as usize {
+
+        if title_len == 0 || title_len > MAX_TITLE_LEN {
             break;
         }
-        let title = String::from_utf8_lossy(&buffer[offset..offset + title_len as usize]).to_string();
-        offset += title_len as usize;
+
+        let title_len_usize = title_len as usize;
+        if buffer.len() < offset + 4 + title_len_usize {
+            break;
+        }
+
+        let title = String::from_utf8_lossy(&buffer[offset..offset + title_len_usize]).to_string();
+        offset += title_len_usize;
         
         chapters.push(Chapter {
             title,
@@ -287,6 +302,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    #[ignore = "This is a manual/local integration test. Run with: cargo test -- --ignored"]
     fn test_read_chapters() {
         // Find the test file - it might be in a subdirectory based on path_format
         let possible_paths = [

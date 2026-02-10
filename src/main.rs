@@ -126,6 +126,7 @@ async fn main() {
         args.log_level,
         args.path_format,
         args.dry_run,
+        args.asin,
     );
 
     info!("m4b-merge starting with {} input(s)", args.inputs.len());

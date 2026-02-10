@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use thiserror::Error;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace};
 
 /// Errors that can occur when working with FFmpeg
 #[derive(Error, Debug)]
@@ -278,8 +278,9 @@ impl FFmpeg {
         #[cfg(windows)]
         let binary = format!("{}.exe", binary);
 
-        // Use `which` command to find binary
-        let output = Command::new("which").arg(&binary).output()?;
+        let locator = if cfg!(windows) { "where" } else { "which" };
+
+        let output = Command::new(locator).arg(&binary).output()?;
 
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout);
@@ -552,7 +553,7 @@ impl FFmpeg {
 
             // Escape single quotes in path by replacing ' with '\''
             let escaped_path = path.to_string_lossy().replace("'", "'\\''");
-            content.push_str(&format!("file '{}\n", escaped_path));
+            content.push_str(&format!("file '{}'\n", escaped_path));
         }
 
         std::fs::write(output_path, content)?;
@@ -588,7 +589,7 @@ impl FFmpeg {
 
             // Escape single quotes in path by replacing ' with '\''
             let escaped_path = path.to_string_lossy().replace("'", "'\\''");
-            content.push_str(&format!("file '{}\n", escaped_path));
+            content.push_str(&format!("file '{}'\n", escaped_path));
         }
 
         Ok(content)

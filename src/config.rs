@@ -12,6 +12,7 @@ pub struct Config {
     pub log_level: String,
     pub path_format: String,
     pub dry_run: bool,
+    pub asin: Option<String>,
 }
 
 impl Config {
@@ -26,6 +27,7 @@ impl Config {
         log_level: String,
         path_format: String,
         dry_run: bool,
+        asin: Option<String>,
     ) -> Self {
         Self {
             inputs,
@@ -36,6 +38,7 @@ impl Config {
             log_level,
             path_format,
             dry_run,
+            asin,
         }
     }
 }

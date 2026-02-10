@@ -11,6 +11,7 @@ echo "Generating test audio files in ${TEST_DATA_DIR}..."
 
 # Create test data directories
 mkdir -p "${TEST_DATA_DIR}/single_mp3"
+mkdir -p "${TEST_DATA_DIR}/single_m4b"
 mkdir -p "${TEST_DATA_DIR}/multiple_mp3s/audiobook"
 mkdir -p "${TEST_DATA_DIR}/multi_disc/CD1"
 mkdir -p "${TEST_DATA_DIR}/multi_disc/CD2"
