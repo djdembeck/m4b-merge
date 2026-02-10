@@ -30,12 +30,10 @@ RUN cargo build --release --locked
 # =============================================================================
 # Runtime stage - Minimal image with FFmpeg
 # =============================================================================
-FROM debian:trixie-slim AS runtime
+FROM jrottenberg/ffmpeg:6-debian AS runtime
 
-# Install FFmpeg, CA certificates, and other runtime dependencies
+# Install CA certificates and other runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    libstdc++6 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
