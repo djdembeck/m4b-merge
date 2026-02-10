@@ -1,8 +1,4 @@
 //! Chapter handling for m4b-merge
-//! 
-//! Note: mp4ameta 0.8 does not provide direct chapter read/write APIs.
-//! Chapters are preserved during file copy/merge operations via FFmpeg.
-//! For API-sourced chapters, we generate chapters.txt files alongside the output.
 
 use std::path::Path;
 use std::time::Duration;
@@ -14,17 +10,39 @@ pub use crate::metadata::Chapter;
 pub struct FileChapter {
     pub title: String,
     pub start_time: Duration,
-    pub duration: Duration,
 }
 
-/// Read chapters from an M4B file
-/// 
-/// Note: This uses FFmpeg to extract chapter information since mp4ameta 0.8
-/// does not provide direct chapter access. Returns empty vec if no chapters found.
-pub fn read_chapters(_path: &Path) -> Result<Vec<FileChapter>, Box<dyn std::error::Error>> {
-    // TODO: Implement using FFmpeg chapter extraction if needed
-    // For now, chapters are preserved during copy operations
-    Ok(Vec::new())
+/// Read chapters from an M4B file using mp4ameta 0.13
+pub fn read_chapters(path: &Path) -> Result<Vec<FileChapter>, Box<dyn std::error::Error>> {
+    let tag = mp4ameta::Tag::read_from_path(path)?;
+    
+    let chapters: Vec<FileChapter> = tag.chapters()
+        .iter()
+        .map(|ch| FileChapter {
+            title: ch.title.clone(),
+            start_time: ch.start,
+        })
+        .collect();
+    
+    Ok(chapters)
+}
+
+/// Write chapters to an M4B file using mp4ameta 0.13
+pub fn write_chapters(path: &Path, chapters: &[Chapter]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut tag = mp4ameta::Tag::read_from_path(path)?;
+    
+    // Clear existing chapters and add new ones
+    let chapter_list = tag.chapter_list_mut();
+    chapter_list.clear();
+    
+    // Add chapters
+    for chapter in chapters {
+        let mp4_chapter = mp4ameta::Chapter::new(chapter.start_time, &chapter.title);
+        chapter_list.push(mp4_chapter);
+    }
+    
+    tag.write_to_path(path)?;
+    Ok(())
 }
 
 /// Format chapters for chapters.txt file (mp4v2 format)
@@ -59,6 +77,36 @@ fn format_duration(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_read_chapters() {
+        let test_file = PathBuf::from(
+            std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string())
+                + "/output/Trailer Park Bikini Vampires [B0FDDCDXQ2].m4b",
+        );
+
+        if !test_file.exists() {
+            println!("Test file does not exist, skipping test");
+            return;
+        }
+
+        let chapters = read_chapters(&test_file).expect("Failed to read chapters");
+
+        println!("Found {} chapters:", chapters.len());
+        for (i, chapter) in chapters.iter().enumerate() {
+            println!(
+                "  Chapter {}: '{}' (start: {:?})",
+                i + 1, chapter.title, chapter.start_time
+            );
+        }
+
+        // mp4ameta should now read chapters properly in 0.13
+        // If chapters exist, verify them
+        if !chapters.is_empty() {
+            assert!(!chapters[0].title.is_empty(), "First chapter should have a title");
+        }
+    }
 
     #[test]
     fn test_format_chapters_txt() {
@@ -69,8 +117,9 @@ mod tests {
         
         let txt = format_chapters_txt(&chapters, Duration::from_secs(1200));
         
-        assert!(txt.contains("## total-duration: 00:00:20.000"));
-        assert!(txt.contains("00:00:00.000 Chapter 1"));
-        assert!(txt.contains("00:00:10.000 Chapter 2"));
+        // 1200 seconds = 20 minutes = 00:20:00
+        assert!(txt.contains("## total-duration: 00:20:00.000"), "Total duration format incorrect:\n{}", txt);
+        assert!(txt.contains("00:00:00.000 Chapter 1"), "Chapter 1 format incorrect:\n{}", txt);
+        assert!(txt.contains("00:10:00.000 Chapter 2"), "Chapter 2 format incorrect:\n{}", txt);
     }
 }

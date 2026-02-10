@@ -207,11 +207,12 @@ impl Tagger {
         let mut tag = mp4ameta::Tag::read_from_path(path).unwrap_or_default();
 
         // Set artwork based on format
-        let artwork_data = match format {
-            ImageFormat::Jpeg => mp4ameta::Data::Jpeg(image_data.to_vec()),
-            ImageFormat::Png => mp4ameta::Data::Png(image_data.to_vec()),
+        let img_fmt = match format {
+            ImageFormat::Jpeg => mp4ameta::ImgFmt::Jpeg,
+            ImageFormat::Png => mp4ameta::ImgFmt::Png,
         };
-        tag.set_artwork(artwork_data);
+        let artwork = mp4ameta::Img::new(img_fmt, image_data.to_vec());
+        tag.set_artwork(artwork);
 
         // Write the tag back to file
         tag.write_to_path(path)
