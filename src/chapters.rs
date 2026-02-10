@@ -1,77 +1,284 @@
-//! Chapter handling for m4b-merge
-
 use std::path::Path;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::io::{Read, Seek, SeekFrom};
+use serde_json::Value;
 
-pub use crate::metadata::Chapter;
-
-/// Chapter information extracted from a file
-#[derive(Debug, Clone)]
-pub struct FileChapter {
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chapter {
     pub title: String,
-    pub start_time: Duration,
+    pub start_time: u64,
+    pub duration: u64,
 }
 
-/// Read chapters from an M4B file using mp4ameta 0.13
-pub fn read_chapters(path: &Path) -> Result<Vec<FileChapter>, Box<dyn std::error::Error>> {
-    let tag = mp4ameta::Tag::read_from_path(path)?;
+pub fn read_chapters(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+    // Try to read chapters using ffprobe first
+    if let Ok(chapters) = read_chapters_ffprobe(path) {
+        if !chapters.is_empty() {
+            return Ok(chapters);
+        }
+    }
     
-    let chapters: Vec<FileChapter> = tag.chapters()
-        .iter()
-        .map(|ch| FileChapter {
-            title: ch.title.clone(),
-            start_time: ch.start,
-        })
-        .collect();
+    // Fall back to parsing the chpl atom directly
+    read_chapters_from_atom(path)
+}
+
+/// Read chapters using ffprobe
+fn read_chapters_ffprobe(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+    let output = Command::new("ffprobe")
+        .args(&[
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_chapters",
+            path.to_str().unwrap_or(""),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("ffprobe error: {}", stderr);
+        return Ok(Vec::new());
+    }
+    
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(&stdout)?;
+    
+    if let Some(chapters_array) = json.get("chapters").and_then(|c| c.as_array()) {
+        let mut chapters = Vec::new();
+        
+        for chapter in chapters_array {
+            let start_time = chapter.get("start_time")
+                .and_then(|t| t.as_str())
+                .and_then(|t| t.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            
+            let end_time = chapter.get("end_time")
+                .and_then(|t| t.as_str())
+                .and_then(|t| t.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            
+            let duration = if end_time > start_time {
+                end_time - start_time
+            } else {
+                0.0
+            };
+            
+            let title = chapter.get("tags")
+                .and_then(|t| t.get("title"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            
+            // Convert from seconds to milliseconds
+            chapters.push(Chapter {
+                title,
+                start_time: (start_time * 1000.0) as u64,
+                duration: (duration * 1000.0) as u64,
+            });
+        }
+        
+        return Ok(chapters);
+    }
+    
+    Ok(Vec::new())
+}
+
+/// Read chapters by parsing the chpl atom directly
+fn read_chapters_from_atom(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+    let mut file = std::fs::File::open(path)?;
+    
+    // Read ftyp
+    let mut buffer = [0u8; 8];
+    file.read_exact(&mut buffer)?;
+    let ftyp_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+    let ftyp_ident = std::str::from_utf8(&buffer[4..8]).unwrap_or("");
+    
+    if ftyp_ident != "ftyp" {
+        return Err("Not a valid MP4 file".into());
+    }
+    
+    file.seek(SeekFrom::Start(ftyp_len as u64))?;
+    
+    // Search for moov atom
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read < 8 {
+            break;
+        }
+        
+        let atom_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+        let atom_ident = std::str::from_utf8(&buffer[4..8]).unwrap_or("");
+        
+        if atom_ident == "moov" {
+            let moov_end = file.stream_position()? + (atom_len as u64 - 8);
+            return search_chapters_in_moov(&mut file, moov_end);
+        } else if atom_len < 8 {
+            break;
+        } else {
+            file.seek(SeekFrom::Current((atom_len as i64) - 8))?;
+        }
+    }
+    
+    Ok(Vec::new())
+}
+
+fn search_chapters_in_moov(file: &mut std::fs::File, moov_end: u64) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+    while file.stream_position()? < moov_end {
+        let mut buffer = [0u8; 8];
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read < 8 {
+            break;
+        }
+        
+        let atom_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+        let atom_ident = std::str::from_utf8(&buffer[4..8]).unwrap_or("");
+        
+        if atom_ident == "udta" {
+            let udta_end = file.stream_position()? + (atom_len as u64 - 8);
+            return search_chapters_in_udta(file, udta_end);
+        } else if atom_len < 8 {
+            break;
+        } else {
+            file.seek(SeekFrom::Current((atom_len as i64) - 8))?;
+        }
+    }
+    
+    Ok(Vec::new())
+}
+
+fn search_chapters_in_udta(file: &mut std::fs::File, udta_end: u64) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+    while file.stream_position()? < udta_end {
+        let mut buffer = [0u8; 8];
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read < 8 {
+            break;
+        }
+        
+        let atom_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+        let atom_ident = std::str::from_utf8(&buffer[4..8]).unwrap_or("");
+        
+        if atom_ident == "meta" {
+            let meta_end = file.stream_position()? + (atom_len as u64 - 8);
+            return search_chapters_in_meta(file, meta_end);
+        } else if atom_ident == "chpl" {
+            return parse_chpl_atom(file, atom_len - 8);
+        } else if atom_len < 8 {
+            break;
+        } else {
+            file.seek(SeekFrom::Current((atom_len as i64) - 8))?;
+        }
+    }
+    
+    Ok(Vec::new())
+}
+
+fn search_chapters_in_meta(file: &mut std::fs::File, meta_end: u64) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+    // meta atom has a 4-byte header (version/flags)
+    let mut header = [0u8; 4];
+    if file.read(&mut header)? == 4 {
+        // Header consumed
+    }
+    
+    while file.stream_position()? < meta_end {
+        let mut buffer = [0u8; 8];
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read < 8 {
+            break;
+        }
+        
+        let atom_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+        let atom_ident = std::str::from_utf8(&buffer[4..8]).unwrap_or("");
+        
+        if atom_ident == "chpl" {
+            return parse_chpl_atom(file, atom_len - 8);
+        } else if atom_len < 8 {
+            break;
+        } else {
+            file.seek(SeekFrom::Current((atom_len as i64) - 8))?;
+        }
+    }
+    
+    Ok(Vec::new())
+}
+
+fn parse_chpl_atom(file: &mut std::fs::File, content_len: u32) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+    let mut chapters = Vec::new();
+    let mut buffer = Vec::new();
+    buffer.resize(content_len as usize, 0);
+    file.read_exact(&mut buffer)?;
+    
+    let mut offset = 0;
+    
+    // Skip version (1 byte) and flags (3 bytes)
+    if buffer.len() < 4 {
+        return Ok(chapters);
+    }
+    offset += 4;
+    
+    // Read number of chapters
+    if buffer.len() < offset + 4 {
+        return Ok(chapters);
+    }
+    let num_chapters = u32::from_be_bytes([
+        buffer[offset],
+        buffer[offset + 1],
+        buffer[offset + 2],
+        buffer[offset + 3],
+    ]);
+    offset += 4;
+    
+    for _ in 0..num_chapters {
+        if buffer.len() < offset + 8 {
+            break;
+        }
+        
+        let start_time = u64::from_be_bytes([
+            buffer[offset],
+            buffer[offset + 1],
+            buffer[offset + 2],
+            buffer[offset + 3],
+            buffer[offset + 4],
+            buffer[offset + 5],
+            buffer[offset + 6],
+            buffer[offset + 7],
+        ]);
+        offset += 8;
+        
+        if buffer.len() < offset + 4 {
+            break;
+        }
+        let title_len = u32::from_be_bytes([
+            buffer[offset],
+            buffer[offset + 1],
+            buffer[offset + 2],
+            buffer[offset + 3],
+        ]);
+        offset += 4;
+        
+        if buffer.len() < offset + title_len as usize {
+            break;
+        }
+        let title = String::from_utf8_lossy(&buffer[offset..offset + title_len as usize]).to_string();
+        offset += title_len as usize;
+        
+        chapters.push(Chapter {
+            title,
+            start_time,
+            duration: 0,
+        });
+    }
+    
+    for i in 0..chapters.len() {
+        if i + 1 < chapters.len() {
+            let duration = chapters[i + 1].start_time - chapters[i].start_time;
+            chapters[i].duration = duration;
+        } else {
+            chapters[i].duration = 0;
+        }
+    }
     
     Ok(chapters)
-}
-
-/// Write chapters to an M4B file using mp4ameta 0.13
-pub fn write_chapters(path: &Path, chapters: &[Chapter]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut tag = mp4ameta::Tag::read_from_path(path)?;
-    
-    // Clear existing chapters and add new ones
-    let chapter_list = tag.chapter_list_mut();
-    chapter_list.clear();
-    
-    // Add chapters
-    for chapter in chapters {
-        let mp4_chapter = mp4ameta::Chapter::new(chapter.start_time, &chapter.title);
-        chapter_list.push(mp4_chapter);
-    }
-    
-    tag.write_to_path(path)?;
-    Ok(())
-}
-
-/// Format chapters for chapters.txt file (mp4v2 format)
-pub fn format_chapters_txt(chapters: &[Chapter], total_duration: Duration) -> String {
-    let mut output = String::new();
-    
-    // Add header
-    output.push_str("## total-duration: ");
-    output.push_str(&format_duration(total_duration));
-    output.push('\n');
-    output.push_str("##\n");
-    
-    // Add chapters
-    for (i, chapter) in chapters.iter().enumerate() {
-        let start = format_duration(chapter.start_time);
-        output.push_str(&format!("{} Chapter {}\n", start, i + 1));
-    }
-    
-    output
-}
-
-fn format_duration(duration: Duration) -> String {
-    let total_secs = duration.as_secs();
-    let hours = total_secs / 3600;
-    let mins = (total_secs % 3600) / 60;
-    let secs = total_secs % 60;
-    let millis = duration.subsec_millis();
-    
-    format!("{:02}:{:02}:{:02}.{:03}", hours, mins, secs, millis)
 }
 
 #[cfg(test)]
@@ -81,45 +288,42 @@ mod tests {
 
     #[test]
     fn test_read_chapters() {
-        let test_file = PathBuf::from(
-            std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string())
-                + "/output/Trailer Park Bikini Vampires [B0FDDCDXQ2].m4b",
-        );
+        // Find the test file - it might be in a subdirectory based on path_format
+        let possible_paths = [
+            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string())
+                + "/output/Trailer Park Bikini Vampires [B0FDDCDXQ2].m4b"),
+            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string())
+                + "/output/Virgil Knightley/Trailer Park Bikini Vampires.m4b"),
+        ];
 
-        if !test_file.exists() {
-            println!("Test file does not exist, skipping test");
-            return;
-        }
+        let test_file = possible_paths.iter()
+            .find(|p| p.exists())
+            .cloned()
+            .expect("No test file found. Run: m4b-merge -i ~/input/'Trailer Park Bikini Vampires [B0FDDCDXQ2]' -o ~/output");
 
         let chapters = read_chapters(&test_file).expect("Failed to read chapters");
+
+        assert!(
+            chapters.len() >= 5,
+            "Expected at least 5 chapters, found {}",
+            chapters.len()
+        );
+
+        for chapter in &chapters {
+            assert!(!chapter.title.is_empty(), "Chapter title should not be empty");
+        }
+
+        assert_eq!(
+            chapters[0].start_time, 0,
+            "First chapter should start at time 0"
+        );
 
         println!("Found {} chapters:", chapters.len());
         for (i, chapter) in chapters.iter().enumerate() {
             println!(
-                "  Chapter {}: '{}' (start: {:?})",
-                i + 1, chapter.title, chapter.start_time
+                "  Chapter {}: '{}' (start: {}, duration: {})",
+                i + 1, chapter.title, chapter.start_time, chapter.duration
             );
         }
-
-        // mp4ameta should now read chapters properly in 0.13
-        // If chapters exist, verify them
-        if !chapters.is_empty() {
-            assert!(!chapters[0].title.is_empty(), "First chapter should have a title");
-        }
-    }
-
-    #[test]
-    fn test_format_chapters_txt() {
-        let chapters = vec![
-            Chapter::new("Chapter 1", Duration::from_secs(0), Duration::from_secs(600)),
-            Chapter::new("Chapter 2", Duration::from_secs(600), Duration::from_secs(600)),
-        ];
-        
-        let txt = format_chapters_txt(&chapters, Duration::from_secs(1200));
-        
-        // 1200 seconds = 20 minutes = 00:20:00
-        assert!(txt.contains("## total-duration: 00:20:00.000"), "Total duration format incorrect:\n{}", txt);
-        assert!(txt.contains("00:00:00.000 Chapter 1"), "Chapter 1 format incorrect:\n{}", txt);
-        assert!(txt.contains("00:10:00.000 Chapter 2"), "Chapter 2 format incorrect:\n{}", txt);
     }
 }
