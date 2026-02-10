@@ -58,11 +58,11 @@ Create a Rust CLI tool that replaces the Python m4b-merge with identical functio
 - `README.md` with installation and usage
 
 ### Definition of Done
-- [ ] All existing CLI arguments supported
-- [ ] All path_format templates produce identical output paths
-- [ ] Output files pass mutagen verification (same as Python version)
-- [ ] Docker image runs successfully on test inputs
-- [ ] CI/CD pipeline builds and tests on PR
+- [x] All existing CLI arguments supported
+- [x] All path_format templates produce identical output paths
+- [x] Output files pass mutagen verification (same as Python version)
+- [x] Docker image runs successfully on test inputs
+- [x] CI/CD pipeline builds and tests on PR
 
 ### Must Have
 - Single m4b/m4a/mp3 input → tagged m4b output
@@ -218,7 +218,7 @@ Parallel Speedup: ~30% faster than sequential
 
 ## TODOs
 
-- [ ] 1. Project Scaffolding and Dependencies
+- [x] 1. Project Scaffolding and Dependencies
 
   **What to do**:
   - **Create feature branch first**: `git checkout -b feat/rust-rewrite origin/develop`
@@ -269,10 +269,10 @@ Parallel Speedup: ~30% faster than sequential
   - Current Python: `requirements.txt` - Dependencies to replicate
 
   **Acceptance Criteria**:
-  - [ ] `cargo build` succeeds
-  - [ ] `cargo clippy` shows no warnings
-  - [ ] `cargo test` runs (empty test suite)
-  - [ ] Binary prints help with `--help`
+  - [x] `cargo build` succeeds
+  - [x] `cargo clippy` shows no warnings
+  - [x] `cargo test` runs (empty test suite)
+  - [x] Binary prints help with `--help`
 
   **Agent-Executed QA Scenarios**:
 
@@ -297,7 +297,7 @@ Parallel Speedup: ~30% faster than sequential
 
 ---
 
-- [ ] 2. FFmpeg Discovery and Wrapper
+- [x] 2. FFmpeg Discovery and Wrapper
 
   **What to do**:
   - Implement FFmpeg binary detection (check PATH, common locations)
@@ -331,10 +331,10 @@ Parallel Speedup: ~30% faster than sequential
   - FFmpeg concat demuxer docs: https://ffmpeg.org/ffmpeg-formats.html#concat
 
   **Acceptance Criteria**:
-  - [ ] Detects ffmpeg in PATH
-  - [ ] Returns helpful error if ffmpeg not found
-  - [ ] Can probe duration of test audio file
-  - [ ] Can detect silence boundaries
+  - [x] Detects ffmpeg in PATH
+  - [x] Returns helpful error if ffmpeg not found
+  - [x] Can probe duration of test audio file
+  - [x] Can detect silence boundaries
 
   **Agent-Executed QA Scenarios**:
 
@@ -365,7 +365,7 @@ Parallel Speedup: ~30% faster than sequential
 
 ---
 
-- [ ] 3. Audio File Discovery and Validation
+- [x] 3. Audio File Discovery and Validation
 
   **What to do**:
   - Implement file discovery for input paths (file or directory)
@@ -396,11 +396,11 @@ Parallel Speedup: ~30% faster than sequential
   - Natural sort algorithm: https://github.com/jeremija/natural-sort
 
   **Acceptance Criteria**:
-  - [ ] Discovers all audio files in directory
-  - [ ] Sorts naturally (not lexicographically)
-  - [ ] Handles multi-disc subdirectories
-  - [ ] Returns error for empty directories
-  - [ ] Validates files are readable
+  - [x] Discovers all audio files in directory
+  - [x] Sorts naturally (not lexicographically)
+  - [x] Handles multi-disc subdirectories
+  - [x] Returns error for empty directories
+  - [x] Validates files are readable
 
   **Agent-Executed QA Scenarios**:
 
@@ -422,7 +422,7 @@ Parallel Speedup: ~30% faster than sequential
 
 ---
 
-- [ ] 4. Merge and Conversion Logic
+- [x] 4. Merge and Conversion Logic
 
   **What to do**:
   - Implement FFmpeg concat demuxer for merging multiple files
@@ -454,11 +454,11 @@ Parallel Speedup: ~30% faster than sequential
   - Current Python: `src/m4b_merge/m4b_helper.py:merge_multiple_files`
 
   **Acceptance Criteria**:
-  - [ ] Merges multiple files into single M4B
-  - [ ] Preserves audio quality (no re-encoding for M4A/M4B)
-  - [ ] Matches source bitrate for MP3 conversions
-  - [ ] Produces valid M4B file (ffprobe can read)
-  - [ ] Progress displayed during conversion
+  - [x] Merges multiple files into single M4B
+  - [x] Preserves audio quality (no re-encoding for M4A/M4B)
+  - [x] Matches source bitrate for MP3 conversions
+  - [x] Produces valid M4B file (ffprobe can read)
+  - [x] Progress displayed during conversion
 
   **Agent-Executed QA Scenarios**:
 
@@ -481,7 +481,7 @@ Parallel Speedup: ~30% faster than sequential
 
 ---
 
-- [ ] 5. Configuration and CLI Parsing
+- [x] 5. Configuration and CLI Parsing
 
   **What to do**:
   - Implement CLI with clap derive macros
@@ -517,10 +517,10 @@ Parallel Speedup: ~30% faster than sequential
   - Current Python path_format: supports {author}, {narrator}, {series_name}, {series_position}, {subtitle}, {title}, {year}
 
   **Acceptance Criteria**:
-  - [ ] All existing CLI arguments supported
-  - [ ] Help text matches Python version
-  - [ ] Path format templates work correctly
-  - [ ] Invalid arguments produce helpful errors
+  - [x] All existing CLI arguments supported
+  - [x] Help text matches Python version
+  - [x] Path format templates work correctly
+  - [x] Invalid arguments produce helpful errors
 
   **Agent-Executed QA Scenarios**:
 
@@ -542,7 +542,7 @@ Parallel Speedup: ~30% faster than sequential
 
 ---
 
-- [ ] 6. Metadata Structures and API Client
+- [x] 6. Metadata Structures and API Client
 
   **What to do**:
   - Define structs for audio metadata:
@@ -588,10 +588,10 @@ Parallel Speedup: ~30% faster than sequential
   - reqwest docs: https://docs.rs/reqwest/latest/reqwest/
 
   **Acceptance Criteria**:
-  - [ ] Can fetch metadata for valid ASIN
-  - [ ] Handles API errors gracefully
-  - [ ] Retries on transient failures
-  - [ ] Parses all expected fields from response
+  - [x] Can fetch metadata for valid ASIN
+  - [x] Handles API errors gracefully
+  - [x] Retries on transient failures
+  - [x] Parses all expected fields from response
 
   **Agent-Executed QA Scenarios**:
 
@@ -612,7 +612,7 @@ Parallel Speedup: ~30% faster than sequential
 
 ---
 
-- [ ] 7. Tagging and File Operations
+- [x] 7. Tagging and File Operations
 
   **What to do**:
   - Implement metadata tagging using mp4ameta
@@ -643,11 +643,11 @@ Parallel Speedup: ~30% faster than sequential
   - Current Python: `src/m4b_merge/m4b_helper.py:move_completed_files`
 
   **Acceptance Criteria**:
-  - [ ] Tags written to output M4B
-  - [ ] Cover art embedded
-  - [ ] chapters.txt written
-  - [ ] Source files moved to completed_directory
-  - [ ] Output files pass mutagen verification
+  - [x] Tags written to output M4B
+  - [x] Cover art embedded
+  - [x] chapters.txt written
+  - [x] Source files moved to completed_directory
+  - [x] Output files pass mutagen verification
 
   **Agent-Executed QA Scenarios**:
 
@@ -669,7 +669,7 @@ Parallel Speedup: ~30% faster than sequential
 
 ---
 
-- [ ] 8. Chapter Handling Proof of Concept
+- [x] 8. Chapter Handling Proof of Concept
 
   **What to do**:
   - **CRITICAL: Build POC before implementing in main codebase**
@@ -707,10 +707,10 @@ Parallel Speedup: ~30% faster than sequential
   - mp4ameta chapter example: https://github.com/11Tuvork28/mp4ameta/blob/main/examples/chapters.rs
 
   **Acceptance Criteria**:
-  - [ ] POC can read chapters from existing M4B
-  - [ ] POC can write chapters readable by iTunes
-  - [ ] POC can write chapters readable by VLC
-  - [ ] Chapter timestamps accurate to millisecond
+  - [x] POC can read chapters from existing M4B
+  - [x] POC can write chapters readable by iTunes
+  - [x] POC can write chapters readable by VLC
+  - [x] Chapter timestamps accurate to millisecond
 
   **Agent-Executed QA Scenarios**:
 
@@ -734,7 +734,7 @@ Parallel Speedup: ~30% faster than sequential
 
 ---
 
-- [ ] 9. Integration and End-to-End Testing
+- [x] 9. Integration and End-to-End Testing
 
   **What to do**:
   - Wire all modules together in main.rs
@@ -765,10 +765,10 @@ Parallel Speedup: ~30% faster than sequential
   - Rust testing book: https://doc.rust-lang.org/book/ch11-00-testing.html
 
   **Acceptance Criteria**:
-  - [ ] Full workflow runs end-to-end
-  - [ ] Integration tests pass
-  - [ ] Error cases handled gracefully
-  - [ ] Logging useful for debugging
+  - [x] Full workflow runs end-to-end
+  - [x] Integration tests pass
+  - [x] Error cases handled gracefully
+  - [x] Logging useful for debugging
 
   **Agent-Executed QA Scenarios**:
 
@@ -790,7 +790,7 @@ Parallel Speedup: ~30% faster than sequential
 
 ---
 
-- [ ] 10. Docker and CI/CD
+- [x] 10. Docker and CI/CD
 
   **What to do**:
   - Create Dockerfile with:
@@ -824,10 +824,10 @@ Parallel Speedup: ~30% faster than sequential
   - GitHub Actions Rust: https://github.com/actions-rs
 
   **Acceptance Criteria**:
-  - [ ] Docker image builds successfully
-  - [ ] Docker image runs correctly
-  - [ ] CI passes on PR
-  - [ ] Release binaries built automatically
+  - [x] Docker image builds successfully
+  - [x] Docker image runs correctly
+  - [x] CI passes on PR
+  - [x] Release binaries built automatically
 
   **Agent-Executed QA Scenarios**:
 
@@ -896,10 +896,10 @@ docker run m4b-merge:test --help
 ```
 
 ### Final Checklist
-- [ ] All "Must Have" features implemented
-- [ ] All "Must NOT Have" items excluded
-- [ ] Integration tests pass
-- [ ] Docker image builds and runs
-- [ ] Output files compatible with Python version
-- [ ] Documentation complete
-- [ ] CI/CD pipeline working
+- [x] All "Must Have" features implemented
+- [x] All "Must NOT Have" items excluded
+- [x] Integration tests pass
+- [x] Docker image builds and runs
+- [x] Output files compatible with Python version
+- [x] Documentation complete
+- [x] CI/CD pipeline working
