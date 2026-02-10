@@ -494,9 +494,10 @@ impl Merger {
 
         // Add codec arguments based on mode and target bitrate
         if let Some(bitrate) = target_bitrate {
-            // Transcode mode
+            // Transcode mode: transcode audio, copy video (cover art)
             cmd.arg("-c:a").arg("aac")
-                .arg("-b:a").arg(format!("{}k", bitrate));
+                .arg("-b:a").arg(format!("{}k", bitrate))
+                .arg("-c:v").arg("copy");
         } else {
             // Copy mode
             cmd.arg("-c").arg("copy");
