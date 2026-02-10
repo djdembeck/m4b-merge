@@ -303,6 +303,30 @@ impl Processor {
             None
         };
 
+        // Extract chapters from input file if API didn't provide them
+        let metadata = if let Some(mut meta) = metadata {
+            if meta.chapters.is_empty() && !group.files.is_empty() {
+                // Try to read chapters from the first input file
+                if let Ok(file_chapters) = crate::chapters::read_chapters(&group.files[0].path) {
+                    if !file_chapters.is_empty() {
+                        info!("Extracted {} chapters from input file", file_chapters.len());
+                        // Convert file chapters to metadata chapters
+                        meta.chapters = file_chapters
+                            .into_iter()
+                            .map(|ch| crate::metadata::Chapter::new(
+                                ch.title,
+                                std::time::Duration::from_millis(ch.start_time),
+                                std::time::Duration::from_millis(ch.duration)
+                            ))
+                            .collect();
+                    }
+                }
+            }
+            Some(meta)
+        } else {
+            None
+        };
+
         // Determine output path (after API lookup so we have metadata for path formatting)
         let output_path = self.determine_output_path(&group.files, metadata.as_ref())?;
         debug!("Output path: {}", output_path.display());
