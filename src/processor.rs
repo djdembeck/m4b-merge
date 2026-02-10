@@ -8,6 +8,7 @@ use crate::audio::ffmpeg::FFmpeg;
 use crate::config::Config;
 use crate::discovery::{discover_and_group, AudioFile, AudioGroup, DiscoveryError};
 use crate::merge::{MergeError, MergeJob, Merger};
+use crate::metadata::BookMetadata;
 use crate::tagging::{Tagger, TaggingError};
 
 /// Errors that can occur during processing
@@ -273,10 +274,6 @@ impl Processor {
 
         debug!("Processing group '{}' with {} files", group.name, input_paths.len());
 
-        // Determine output path
-        let output_path = self.determine_output_path(&group.files)?;
-        debug!("Output path: {}", output_path.display());
-
         // Stage 2: API Lookup (optional - only if ASIN is provided or can be inferred)
         let metadata = if let Some(ref client) = self.api_client {
             // Try to extract ASIN from folder name or existing metadata
@@ -305,6 +302,10 @@ impl Processor {
         } else {
             None
         };
+
+        // Determine output path (after API lookup so we have metadata for path formatting)
+        let output_path = self.determine_output_path(&group.files, metadata.as_ref())?;
+        debug!("Output path: {}", output_path.display());
 
         // Stage 3: Merge
         progress_handler.on_progress(ProcessingProgress {
@@ -393,29 +394,104 @@ impl Processor {
     }
 
     /// Determine output path for a group of files
-    fn determine_output_path(&self, files: &[AudioFile]) -> Result<PathBuf> {
+    fn determine_output_path(&self, files: &[AudioFile], metadata: Option<&BookMetadata>) -> Result<PathBuf> {
         let output_dir = self
             .config
             .output
             .clone()
             .ok_or(ProcessorError::NoOutputDir)?;
 
-        // Use the first file's parent directory name as the base for output filename
+        // Get the first file for fallback
         let first_file = files
             .first()
             .ok_or_else(|| ProcessorError::NoInputs)?;
 
-        let output_name = first_file
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "output".to_string());
+        // Format the path based on metadata and path_format template
+        let formatted_path = if let Some(meta) = metadata {
+            self.format_path(&self.config.path_format, meta)
+        } else {
+            // Fallback: use parent directory name
+            first_file
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "output".to_string())
+        };
 
-        // Sanitize filename
-        let safe_name = sanitize_filename::sanitize(&output_name);
-        let output_path = output_dir.join(format!("{}.m4b", safe_name));
+        // Split by '/' to create subdirectories and sanitize each component
+        let path_components: Vec<String> = formatted_path
+            .split('/')
+            .map(|s| sanitize_filename::sanitize(s))
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Join components with output directory
+        let mut output_path = output_dir;
+        for component in &path_components[..path_components.len().saturating_sub(1)] {
+            output_path = output_path.join(component);
+        }
+        
+        // Add the filename with .m4b extension
+        let filename = path_components
+            .last()
+            .map(|s| format!("{}.m4b", s))
+            .unwrap_or_else(|| "output.m4b".to_string());
+        output_path = output_path.join(filename);
 
         Ok(output_path)
+    }
+
+    /// Format path using template with metadata replacement
+    fn format_path(&self, template: &str, metadata: &BookMetadata) -> String {
+        let mut result = template.to_string();
+
+        // Replace {author} with first author
+        let author = metadata.authors.first()
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown");
+        result = result.replace("{author}", author);
+
+        // Replace {narrator} with first narrator
+        let narrator = metadata.narrators.first()
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown");
+        result = result.replace("{narrator}", narrator);
+
+        // Replace {title}
+        result = result.replace("{title}", &metadata.title);
+
+        // Replace {subtitle} or remove if none
+        if let Some(subtitle) = &metadata.subtitle {
+            result = result.replace("{subtitle}", subtitle);
+        } else {
+            result = result.replace("{subtitle}", "").replace(" - ", "").replace("  ", " ").trim().to_string();
+        }
+
+        // Replace {series_name} or remove if none
+        if let Some(series) = &metadata.series_name {
+            result = result.replace("{series_name}", series);
+        } else {
+            result = result.replace("{series_name}", "").replace("/", "").trim().to_string();
+        }
+
+        // Replace {series_position} or remove if none
+        if let Some(pos) = &metadata.series_position {
+            result = result.replace("{series_position}", pos);
+        } else {
+            result = result.replace("{series_position}", "").replace(" - ", "").replace("  ", " ").trim().to_string();
+        }
+
+        // Replace {year} or remove if none
+        if let Some(year) = metadata.year {
+            result = result.replace("{year}", &year.to_string());
+        } else {
+            result = result.replace("{year}", "").replace(" ()", "").replace("  ", " ").trim().to_string();
+        }
+
+        // Clean up any remaining artifacts
+        result = result.replace("  ", " ").replace(" / ", "/").replace("//", "/").trim().to_string();
+
+        result
     }
 
     /// Extract ASIN from audio group (folder name, existing metadata, etc.)
@@ -496,7 +572,7 @@ mod tests {
         let file_path = create_test_audio_file(&temp_dir, "My Audiobook/chapter1.mp3", b"dummy");
 
         let audio_file = AudioFile::new(file_path).unwrap();
-        let output_path = processor.determine_output_path(&[audio_file]).unwrap();
+        let output_path = processor.determine_output_path(&[audio_file], None).unwrap();
 
         assert!(output_path.to_string_lossy().contains("My Audiobook"));
         assert!(output_path.extension().unwrap() == "m4b");
