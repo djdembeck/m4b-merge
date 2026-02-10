@@ -32,10 +32,11 @@ RUN cargo build --release --locked
 # =============================================================================
 FROM debian:trixie-slim AS runtime
 
-# Install FFmpeg and other runtime dependencies
+# Install FFmpeg, CA certificates, and other runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libstdc++6 \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 

@@ -126,8 +126,12 @@ impl AudibleClient {
         asin: &str,
     ) -> Result<BookMetadata, AudibleError> {
         let url = format!("{}/books/{}", base_url, asin);
+        tracing::debug!("Fetching metadata from: {}", url);
 
-        let response = client.get(&url).send().await?;
+        let response = client.get(&url).send().await.map_err(|e| {
+            tracing::debug!("Request failed: {}", e);
+            e
+        })?;
 
         match response.status() {
             StatusCode::OK => {
