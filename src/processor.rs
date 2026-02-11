@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
@@ -10,6 +11,16 @@ use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group
 use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
 use crate::tagging::{Tagger, TaggingError};
+
+/// Static ASIN regex compiled once at startup
+static ASIN_REGEX: OnceLock<regex::Regex> = OnceLock::new();
+
+/// Get the static ASIN regex or initialize it
+fn get_asin_regex() -> &'static regex::Regex {
+    ASIN_REGEX.get_or_init(|| {
+        regex::Regex::new(r"\[([A-Z0-9]{10})\]").expect("Invalid ASIN regex pattern")
+    })
+}
 
 /// Errors that can occur during processing
 #[derive(Error, Debug)]
@@ -368,9 +379,8 @@ impl Processor {
                     }
                 }
 
-                // Write chapters.txt
-                let chapters_txt_path =
-                    merged_path.with_extension("").with_extension("chapters.txt");
+                // Write chapters.txt next to the output file
+                let chapters_txt_path = merged_path.with_extension("chapters.txt");
                 if let Err(e) = self.tagger.write_chapters_txt(&chapters_txt_path, metadata) {
                     warn!("Failed to write chapters.txt: {}", e);
                 }
@@ -521,8 +531,7 @@ impl Processor {
 
     /// Extract ASIN from audio group (folder name, existing metadata, etc.)
     fn extract_asin(&self, group: &AudioGroup) -> Option<String> {
-        // Try to extract ASIN from folder name (e.g., "Book Title [B08XYZ1234]")
-        let re = regex::Regex::new(r"\[([A-Z0-9]{10})\]").ok()?;
+        let re = get_asin_regex();
         if let Some(captures) = re.captures(&group.name) {
             if let Some(asin) = captures.get(1) {
                 return Some(asin.as_str().to_string());

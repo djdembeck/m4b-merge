@@ -5,10 +5,11 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tempfile::NamedTempFile;
 use thiserror::Error;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
 /// Errors that can occur during merge operations
 #[derive(Error, Debug)]
@@ -73,10 +74,29 @@ impl MergeMode {
                     "aac".to_string(),
                     "-b:a".to_string(),
                     format!("{}k", bitrate),
+                    "-c:v".to_string(),
+                    "copy".to_string(),
+                    "-map".to_string(),
+                    "0:v?".to_string(),
+                    "-map".to_string(),
+                    "0:a".to_string(),
                 ]
             }
         }
     }
+}
+
+/// Static progress regex compiled once at startup
+static PROGRESS_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// Get the static progress regex or initialize it
+fn get_progress_regex() -> &'static Regex {
+    PROGRESS_REGEX.get_or_init(|| {
+        Regex::new(
+            r"time=(\d+:\d+:\d+\.\d+)\s+.*?(?:bitrate=\s*([\d.]+)kbits/s)?\s+.*?speed=\s*([\d.]+)x",
+        )
+        .expect("Invalid progress regex pattern")
+    })
 }
 
 /// Merge job configuration
@@ -139,7 +159,7 @@ impl MergeJob {
                 .input_files
                 .iter()
                 .filter(|f| !matches!(f.format, AudioFormat::M4A | AudioFormat::M4B))
-                .map(|f| f.format.clone())
+                .map(|f| f.format)
                 .collect();
 
             if !non_m4.is_empty() {
@@ -226,7 +246,7 @@ impl Merger {
     }
 
     /// Detect the optimal bitrate from source files
-    /// Returns the most common bitrate among input files, rounded to standard values
+    /// Returns the average bitrate among input files, rounded to standard values
     pub fn detect_bitrate(&self, files: &[AudioFile]) -> Result<u32> {
         if files.is_empty() {
             return Err(MergeError::BitrateDetectionFailed);
@@ -248,7 +268,7 @@ impl Merger {
             let bitrate = metadata.bitrate.ok_or(MergeError::BitrateDetectionFailed)?;
             Ok(Self::round_to_standard_bitrate((bitrate / 1000) as u32))
         } else {
-            // Use the most common bitrate
+            // Use the average bitrate
             let avg_bitrate = bitrates.iter().sum::<u32>() / bitrates.len() as u32;
             Ok(Self::round_to_standard_bitrate(avg_bitrate))
         }
@@ -299,16 +319,13 @@ impl Merger {
 
         // Create temporary concat file list
         let temp_file = self.create_concat_file_list(&job.input_files)?;
-        let temp_path = temp_file.path().to_path_buf();
+        // Convert to persisted path to take ownership of cleanup
+        let temp_path = temp_file.into_temp_path();
 
-        // Ensure temp file cleanup on failure
+        // Execute merge and pass temp_path for cleanup
         let result = self.execute_merge(job, &temp_path, target_bitrate, progress_handler);
 
-        // Clean up temp file
-        if let Err(e) = std::fs::remove_file(&temp_path) {
-            warn!("Failed to remove temp file {}: {}", temp_path.display(), e);
-        }
-
+        // temp_path is dropped here, triggering NamedTempFile cleanup
         result
     }
 
@@ -317,17 +334,14 @@ impl Merger {
         let mut temp_file =
             NamedTempFile::new().map_err(|e| MergeError::TempFileCreation(e.to_string()))?;
 
-        // Build concat file list content
-        let mut content = String::new();
-        for file in files {
-            // Get absolute path and escape single quotes
-            let abs_path = file.path.canonicalize().unwrap_or_else(|_| file.path.clone());
-            let escaped_path = abs_path.to_string_lossy().replace("'", "'\\''");
-            content.push_str(&format!("file '{}'\n", escaped_path));
-        }
+        // Use FFmpeg's helper to create the concat content
+        let paths: Vec<&Path> = files.iter().map(|f| f.path.as_ref()).collect();
+        let content =
+            self.ffmpeg.create_concat_file_list(&paths).map_err(|e| MergeError::FFmpeg(e))?;
 
         // Write to temp file
-        std::io::Write::write_all(&mut temp_file, content.as_bytes())?;
+        std::io::Write::write_all(&mut temp_file, content.as_bytes())
+            .map_err(|e| MergeError::Io(e))?;
 
         debug!("Created concat file list with {} entries", files.len());
 
@@ -377,11 +391,7 @@ impl Merger {
         // Add output path (overwrite if exists)
         cmd.arg("-y").arg(&job.output_path);
 
-        // Setup progress parsing
-        let progress_regex = Regex::new(
-            r"time=(\d+:\d+:\d+\.\d+)\s+.*?(?:bitrate=\s*([\d.]+)kbits/s)?\s+.*?speed=\s*([\d.]+)x",
-        )
-        .map_err(|e| MergeError::ProgressParseError(e.to_string()))?;
+        let progress_regex = get_progress_regex();
 
         debug!("Running FFmpeg command: {:?}", cmd);
 
@@ -674,13 +684,19 @@ mod tests {
         let copy_args = MergeMode::Copy.codec_args(None);
         assert_eq!(copy_args, vec!["-c", "copy"]);
 
-        // Transcode mode with default bitrate
+        // Transcode mode with default bitrate (includes video copy and mapping)
         let transcode_args = MergeMode::Transcode.codec_args(None);
-        assert_eq!(transcode_args, vec!["-c:a", "aac", "-b:a", "128k"]);
+        assert_eq!(
+            transcode_args,
+            vec!["-c:a", "aac", "-b:a", "128k", "-c:v", "copy", "-map", "0:v?", "-map", "0:a"]
+        );
 
-        // Transcode mode with custom bitrate
+        // Transcode mode with custom bitrate (includes video copy and mapping)
         let transcode_args_192 = MergeMode::Transcode.codec_args(Some(192));
-        assert_eq!(transcode_args_192, vec!["-c:a", "aac", "-b:a", "192k"]);
+        assert_eq!(
+            transcode_args_192,
+            vec!["-c:a", "aac", "-b:a", "192k", "-c:v", "copy", "-map", "0:v?", "-map", "0:a"]
+        );
     }
 
     #[test]
