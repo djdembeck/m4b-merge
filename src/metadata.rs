@@ -138,8 +138,10 @@ impl BookMetadata {
             return None;
         }
 
-        let last_chapter = self.chapters.last()?;
-        Some(last_chapter.end_time())
+        // Find the maximum end time across all chapters to handle unsorted chapters
+        let max_end_time = self.chapters.iter().map(|chapter| chapter.end_time()).max()?;
+
+        Some(max_end_time)
     }
 }
 

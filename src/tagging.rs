@@ -219,9 +219,10 @@ impl Tagger {
         let response = self
             .http_client
             .get(url)
+            .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
-            .map_err(|e| TaggingError::CoverDownload(format!("Request failed: {}", e)))?;
+            .map_err(|e| TaggingError::CoverDownload(format!("Request failed/timeout: {}", e)))?;
 
         if !response.status().is_success() {
             return Err(TaggingError::CoverDownload(format!("HTTP error: {}", response.status())));
@@ -342,9 +343,7 @@ impl Tagger {
 
             // Move the file
             if let Err(e) = std::fs::rename(source, &dest_path) {
-                let is_exdev = e.raw_os_error() == Some(18);
-
-                if is_exdev {
+                if is_cross_device_error(&e) {
                     std::fs::copy(source, &dest_path).map_err(|copy_err| {
                         TaggingError::FileMove(format!(
                             "Failed to copy {} to {} (cross-device fallback): {}",
@@ -472,6 +471,14 @@ fn format_duration(duration: Duration) -> String {
     let millis = total_millis % 1_000;
 
     format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis)
+}
+
+/// Check if an IO error indicates a cross-device link (EXDEV on Unix)
+/// Note: On Windows, cross-device moves fail with ERROR_NOT_SAME_DEVICE (17).
+/// This function only checks for Unix errno 18 (EXDEV).
+fn is_cross_device_error(err: &std::io::Error) -> bool {
+    // Unix: errno 18 is EXDEV (Invalid cross-device link)
+    err.raw_os_error() == Some(18)
 }
 
 #[cfg(test)]
