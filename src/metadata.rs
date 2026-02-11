@@ -11,11 +11,7 @@ pub struct Chapter {
 impl Chapter {
     /// Create a new chapter with the given title, start time, and duration
     pub fn new(title: impl Into<String>, start_time: Duration, duration: Duration) -> Self {
-        Self {
-            title: title.into(),
-            start_time,
-            duration,
-        }
+        Self { title: title.into(), start_time, duration }
     }
 
     /// Get the end time of this chapter
@@ -95,11 +91,7 @@ impl BookMetadata {
     }
 
     /// Set the series information
-    pub fn with_series(
-        mut self,
-        name: impl Into<String>,
-        position: impl Into<String>,
-    ) -> Self {
+    pub fn with_series(mut self, name: impl Into<String>, position: impl Into<String>) -> Self {
         self.series_name = Some(name.into());
         self.series_position = Some(position.into());
         self
@@ -162,11 +154,7 @@ mod tests {
 
     #[test]
     fn test_chapter_creation() {
-        let chapter = Chapter::new(
-            "Chapter 1",
-            Duration::from_secs(0),
-            Duration::from_secs(600),
-        );
+        let chapter = Chapter::new("Chapter 1", Duration::from_secs(0), Duration::from_secs(600));
         assert_eq!(chapter.title, "Chapter 1");
         assert_eq!(chapter.start_time, Duration::from_secs(0));
         assert_eq!(chapter.duration, Duration::from_secs(600));
@@ -219,8 +207,8 @@ mod tests {
 
     #[test]
     fn test_full_title() {
-        let metadata_with_subtitle = BookMetadata::new("A1", "Title", "Desc")
-            .with_subtitle("The Sequel");
+        let metadata_with_subtitle =
+            BookMetadata::new("A1", "Title", "Desc").with_subtitle("The Sequel");
         assert_eq!(metadata_with_subtitle.full_title(), "Title: The Sequel");
 
         let metadata_no_subtitle = BookMetadata::new("A1", "Title", "Desc");
@@ -230,8 +218,16 @@ mod tests {
     #[test]
     fn test_total_duration() {
         let metadata = BookMetadata::new("A1", "Title", "Desc")
-            .add_chapter(Chapter::new("Chapter 1", Duration::from_secs(0), Duration::from_secs(600)))
-            .add_chapter(Chapter::new("Chapter 2", Duration::from_secs(600), Duration::from_secs(600)));
+            .add_chapter(Chapter::new(
+                "Chapter 1",
+                Duration::from_secs(0),
+                Duration::from_secs(600),
+            ))
+            .add_chapter(Chapter::new(
+                "Chapter 2",
+                Duration::from_secs(600),
+                Duration::from_secs(600),
+            ));
 
         assert_eq!(metadata.total_duration(), Some(Duration::from_secs(1200)));
 

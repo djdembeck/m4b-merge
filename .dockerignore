@@ -26,6 +26,8 @@ LICENSE
 
 # Docker
 docker/
+!docker/Dockerfile
+!docker/entrypoint.sh
 Dockerfile
 .dockerignore
 

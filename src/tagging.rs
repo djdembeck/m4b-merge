@@ -164,11 +164,7 @@ impl Tagger {
     }
 
     /// Download cover art from URL and embed it in the MP4 file
-    pub async fn embed_cover<P: AsRef<Path>>(
-        &self,
-        file_path: P,
-        cover_url: &str,
-    ) -> Result<()> {
+    pub async fn embed_cover<P: AsRef<Path>>(&self, file_path: P, cover_url: &str) -> Result<()> {
         let path = file_path.as_ref();
 
         if !path.exists() {
@@ -187,11 +183,7 @@ impl Tagger {
     }
 
     /// Embed pre-downloaded cover image data into an MP4 file
-    pub fn embed_cover_data<P: AsRef<Path>>(
-        &self,
-        file_path: P,
-        image_data: &[u8],
-    ) -> Result<()> {
+    pub fn embed_cover_data<P: AsRef<Path>>(&self, file_path: P, image_data: &[u8]) -> Result<()> {
         let path = file_path.as_ref();
 
         if !path.exists() {
@@ -232,10 +224,7 @@ impl Tagger {
             .map_err(|e| TaggingError::CoverDownload(format!("Request failed: {}", e)))?;
 
         if !response.status().is_success() {
-            return Err(TaggingError::CoverDownload(format!(
-                "HTTP error: {}",
-                response.status()
-            )));
+            return Err(TaggingError::CoverDownload(format!("HTTP error: {}", response.status())));
         }
 
         let bytes = response
@@ -382,11 +371,7 @@ impl Tagger {
                 }
             }
 
-            info!(
-                "Moved file: {} -> {}",
-                source.display(),
-                dest_path.display()
-            );
+            info!("Moved file: {} -> {}", source.display(), dest_path.display());
             moved_files.push(dest_path);
         }
 
@@ -454,9 +439,7 @@ enum ImageFormat {
 /// Detect image format from magic bytes
 fn detect_image_format(data: &[u8]) -> Result<ImageFormat> {
     if data.len() < 8 {
-        return Err(TaggingError::InvalidFormat(
-            "Image data too short".to_string(),
-        ));
+        return Err(TaggingError::InvalidFormat("Image data too short".to_string()));
     }
 
     // JPEG magic bytes: FF D8 FF
@@ -477,9 +460,7 @@ fn detect_image_format(data: &[u8]) -> Result<ImageFormat> {
         return Ok(ImageFormat::Png);
     }
 
-    Err(TaggingError::InvalidFormat(
-        "Unknown image format".to_string(),
-    ))
+    Err(TaggingError::InvalidFormat("Unknown image format".to_string()))
 }
 
 /// Format a Duration as HH:MM:SS.mmm
@@ -501,22 +482,10 @@ mod tests {
 
     #[test]
     fn test_format_duration() {
-        assert_eq!(
-            format_duration(Duration::from_secs(0)),
-            "00:00:00.000"
-        );
-        assert_eq!(
-            format_duration(Duration::from_secs(90)),
-            "00:01:30.000"
-        );
-        assert_eq!(
-            format_duration(Duration::from_millis(5432100)),
-            "01:30:32.100"
-        );
-        assert_eq!(
-            format_duration(Duration::from_millis(3661001)),
-            "01:01:01.001"
-        );
+        assert_eq!(format_duration(Duration::from_secs(0)), "00:00:00.000");
+        assert_eq!(format_duration(Duration::from_secs(90)), "00:01:30.000");
+        assert_eq!(format_duration(Duration::from_millis(5432100)), "01:30:32.100");
+        assert_eq!(format_duration(Duration::from_millis(3661001)), "01:01:01.001");
     }
 
     #[test]
@@ -569,8 +538,16 @@ mod tests {
 
         let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Description")
             .add_author("Test Author")
-            .add_chapter(Chapter::new("Chapter 1", Duration::from_secs(0), Duration::from_secs(600)))
-            .add_chapter(Chapter::new("Chapter 2", Duration::from_secs(600), Duration::from_secs(600)));
+            .add_chapter(Chapter::new(
+                "Chapter 1",
+                Duration::from_secs(0),
+                Duration::from_secs(600),
+            ))
+            .add_chapter(Chapter::new(
+                "Chapter 2",
+                Duration::from_secs(600),
+                Duration::from_secs(600),
+            ));
 
         let tagger = Tagger::new();
         tagger.write_chapters_txt(&chapters_path, &metadata).unwrap();
@@ -597,9 +574,8 @@ mod tests {
         std::fs::write(&file2, "content2").unwrap();
 
         let tagger = Tagger::new();
-        let moved = tagger
-            .move_completed_files(&[file1.clone(), file2.clone()], &dest_dir)
-            .unwrap();
+        let moved =
+            tagger.move_completed_files(&[file1.clone(), file2.clone()], &dest_dir).unwrap();
 
         assert_eq!(moved.len(), 2);
         assert!(dest_dir.join("file1.txt").exists());
@@ -628,10 +604,7 @@ mod tests {
 
         assert_eq!(moved.len(), 0);
         assert!(file1.exists()); // Should not be moved
-        assert_eq!(
-            std::fs::read_to_string(&existing_file).unwrap(),
-            "existing content"
-        );
+        assert_eq!(std::fs::read_to_string(&existing_file).unwrap(), "existing content");
     }
 
     #[test]
@@ -675,10 +648,7 @@ mod tests {
 
         assert_eq!(moved.len(), 1);
         assert!(!file1.exists());
-        assert_eq!(
-            std::fs::read_to_string(&existing_file).unwrap(),
-            "new content"
-        );
+        assert_eq!(std::fs::read_to_string(&existing_file).unwrap(), "new content");
     }
 
     #[test]
@@ -699,9 +669,21 @@ mod tests {
             .add_author("Author One")
             .add_author("Author Two")
             .with_year(2023)
-            .add_chapter(Chapter::new("Intro", Duration::from_millis(0), Duration::from_millis(5000)))
-            .add_chapter(Chapter::new("Chapter 1", Duration::from_millis(5000), Duration::from_millis(10000)))
-            .add_chapter(Chapter::new("Chapter 2", Duration::from_millis(15000), Duration::from_millis(10000)));
+            .add_chapter(Chapter::new(
+                "Intro",
+                Duration::from_millis(0),
+                Duration::from_millis(5000),
+            ))
+            .add_chapter(Chapter::new(
+                "Chapter 1",
+                Duration::from_millis(5000),
+                Duration::from_millis(10000),
+            ))
+            .add_chapter(Chapter::new(
+                "Chapter 2",
+                Duration::from_millis(15000),
+                Duration::from_millis(10000),
+            ));
 
         let tagger = Tagger::new();
         tagger.write_chapters_txt(&chapters_path, &metadata).unwrap();

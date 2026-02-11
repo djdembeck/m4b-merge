@@ -25,12 +25,18 @@ fn ffmpeg_available() -> bool {
 fn generate_test_mp3(path: &PathBuf, duration_secs: u32) {
     let status = Command::new("ffmpeg")
         .args(&[
-            "-f", "lavfi",
-            "-i", &format!("sine=frequency=1000:duration={}", duration_secs),
-            "-acodec", "libmp3lame",
-            "-b:a", "128k",
-            "-ar", "44100",
-            "-ac", "2",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=1000:duration={}", duration_secs),
+            "-acodec",
+            "libmp3lame",
+            "-b:a",
+            "128k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
             "-y",
         ])
         .arg(path)
@@ -44,12 +50,18 @@ fn generate_test_mp3(path: &PathBuf, duration_secs: u32) {
 fn generate_test_m4a(path: &PathBuf, duration_secs: u32) {
     let status = Command::new("ffmpeg")
         .args(&[
-            "-f", "lavfi",
-            "-i", &format!("sine=frequency=1000:duration={}", duration_secs),
-            "-acodec", "aac",
-            "-b:a", "128k",
-            "-ar", "44100",
-            "-ac", "2",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=1000:duration={}", duration_secs),
+            "-acodec",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
             "-y",
         ])
         .arg(path)
@@ -61,10 +73,7 @@ fn generate_test_m4a(path: &PathBuf, duration_secs: u32) {
 
 #[test]
 fn test_cli_help() {
-    let output = Command::new(bin_path())
-        .arg("--help")
-        .output()
-        .expect("Failed to run m4b-merge");
+    let output = Command::new(bin_path()).arg("--help").output().expect("Failed to run m4b-merge");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -75,10 +84,8 @@ fn test_cli_help() {
 
 #[test]
 fn test_cli_version() {
-    let output = Command::new(bin_path())
-        .arg("--version")
-        .output()
-        .expect("Failed to run m4b-merge");
+    let output =
+        Command::new(bin_path()).arg("--version").output().expect("Failed to run m4b-merge");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -87,10 +94,8 @@ fn test_cli_version() {
 
 #[test]
 fn test_check_ffmpeg() {
-    let output = Command::new(bin_path())
-        .arg("--check-ffmpeg")
-        .output()
-        .expect("Failed to run m4b-merge");
+    let output =
+        Command::new(bin_path()).arg("--check-ffmpeg").output().expect("Failed to run m4b-merge");
 
     if ffmpeg_available() {
         assert!(output.status.success(), "FFmpeg check should succeed when FFmpeg is available");
@@ -103,9 +108,7 @@ fn test_check_ffmpeg() {
 
 #[test]
 fn test_cli_no_inputs() {
-    let output = Command::new(bin_path())
-        .output()
-        .expect("Failed to run m4b-merge");
+    let output = Command::new(bin_path()).output().expect("Failed to run m4b-merge");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -135,9 +138,12 @@ fn test_single_mp3_merge() {
     // Run m4b-merge
     let output = Command::new(bin_path())
         .args(&[
-            "-i", input_file.to_str().unwrap(),
-            "-o", output_dir.to_str().unwrap(),
-            "--completed_directory", completed_dir.to_str().unwrap(),
+            "-i",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_dir.to_str().unwrap(),
+            "--completed_directory",
+            completed_dir.to_str().unwrap(),
         ])
         .output()
         .expect("Failed to run m4b-merge");
@@ -187,9 +193,12 @@ fn test_multiple_mp3_merge() {
     // Run m4b-merge on the directory
     let output = Command::new(bin_path())
         .args(&[
-            "-i", input_dir.to_str().unwrap(),
-            "-o", output_dir.to_str().unwrap(),
-            "--completed_directory", completed_dir.to_str().unwrap(),
+            "-i",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output_dir.to_str().unwrap(),
+            "--completed_directory",
+            completed_dir.to_str().unwrap(),
         ])
         .output()
         .expect("Failed to run m4b-merge");
@@ -236,10 +245,7 @@ fn test_m4a_copy_merge() {
 
     // Run m4b-merge
     let output = Command::new(bin_path())
-        .args(&[
-            "-i", input_dir.to_str().unwrap(),
-            "-o", output_dir.to_str().unwrap(),
-        ])
+        .args(&["-i", input_dir.to_str().unwrap(), "-o", output_dir.to_str().unwrap()])
         .output()
         .expect("Failed to run m4b-merge");
 
@@ -278,11 +284,7 @@ fn test_dry_run() {
 
     // Run m4b-merge in dry-run mode
     let output = Command::new(bin_path())
-        .args(&[
-            "--dry-run",
-            "-i", input_dir.to_str().unwrap(),
-            "-o", output_dir.to_str().unwrap(),
-        ])
+        .args(&["--dry-run", "-i", input_dir.to_str().unwrap(), "-o", output_dir.to_str().unwrap()])
         .output()
         .expect("Failed to run m4b-merge");
 

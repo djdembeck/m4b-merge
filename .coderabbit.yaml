@@ -45,10 +45,6 @@ reviews:
   tools:
     clippy:
       enabled: true
-    cargo:
-      enabled: true
-    rustfmt:
-      enabled: true
     actionlint:
       enabled: true
     yamllint:

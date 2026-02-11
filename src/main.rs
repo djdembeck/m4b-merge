@@ -4,13 +4,13 @@ use tracing::{error, info};
 
 use m4b_merge::audio::FFmpeg;
 use m4b_merge::config::Config;
-use m4b_merge::processor::{Processor, ProcessingProgress, ProcessingStage, ProgressHandler};
+use m4b_merge::processor::{ProcessingProgress, ProcessingStage, Processor, ProgressHandler};
 
 /// A CLI tool which outputs consistently sorted, tagged, single m4b files
 #[derive(Parser, Debug)]
 #[command(name = "m4b-merge")]
 #[command(author = "djdembeck")]
-#[command(version = "0.1.0")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "A CLI tool which outputs consistently sorted, tagged, single m4b files", long_about = None)]
 struct Args {
     /// Input files or directories to process (required)
@@ -38,7 +38,12 @@ struct Args {
     pub log_level: String,
 
     /// Structure of output path/naming template
-    #[arg(short = 'p', long = "path_format", value_name = "TEMPLATE", default_value = "{author}/{title}")]
+    #[arg(
+        short = 'p',
+        long = "path_format",
+        value_name = "TEMPLATE",
+        default_value = "{author}/{title}"
+    )]
     pub path_format: String,
 
     /// ASIN for metadata lookup (optional)
@@ -67,7 +72,8 @@ impl ProgressHandler for ConsoleProgressHandler {
                 eprintln!("✗ {}", progress.message);
             }
             _ => {
-                println!("[{}/{}] [{}] {}",
+                println!(
+                    "[{}/{}] [{}] {}",
                     progress.completed_files,
                     progress.total_files,
                     progress.stage,
@@ -86,14 +92,14 @@ async fn main() {
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new(&args.log_level)
-                })
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&args.log_level)),
         )
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set tracing subscriber");
+    if let Err(err) = tracing::subscriber::set_global_default(subscriber) {
+        eprintln!("Warning: Failed to set tracing subscriber: {}", err);
+        // Continue anyway - logging setup failure shouldn't prevent the app from running
+    }
 
     // Handle --check-ffmpeg flag
     if args.check_ffmpeg {
@@ -144,8 +150,14 @@ async fn main() {
                     for (idx, result) in results.iter().enumerate() {
                         println!("\n{}. {}", idx + 1, result.output_file.display());
                         println!("   Input files: {}", result.input_files.len());
-                        println!("   Metadata applied: {}", if result.metadata_applied { "Yes" } else { "No" });
-                        println!("   Source files moved: {}", if result.files_moved { "Yes" } else { "No" });
+                        println!(
+                            "   Metadata applied: {}",
+                            if result.metadata_applied { "Yes" } else { "No" }
+                        );
+                        println!(
+                            "   Source files moved: {}",
+                            if result.files_moved { "Yes" } else { "No" }
+                        );
                     }
 
                     info!("m4b-merge completed successfully");
@@ -165,7 +177,7 @@ async fn main() {
     }
 }
 
-fn check_ffmpeg_and_exit() {
+fn check_ffmpeg_and_exit() -> ! {
     match FFmpeg::discover() {
         Ok(mut ffmpeg) => {
             println!("FFmpeg found:");
@@ -194,6 +206,7 @@ fn check_ffmpeg_and_exit() {
                             lib.name, lib.current_version, lib.compiled_version
                         );
                     }
+                    std::process::exit(0);
                 }
                 Err(e) => {
                     error!("Failed to get FFmpeg version: {}", e);
@@ -203,10 +216,10 @@ fn check_ffmpeg_and_exit() {
         }
         Err(e) => {
             error!("FFmpeg not found: {}", e);
-            eprintln!("Error: FFmpeg not found. Please install FFmpeg and ensure it's in your PATH.");
+            eprintln!(
+                "Error: FFmpeg not found. Please install FFmpeg and ensure it's in your PATH."
+            );
             std::process::exit(1);
         }
     }
-
-    std::process::exit(0);
 }

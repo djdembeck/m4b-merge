@@ -57,15 +57,9 @@ impl MergeMode {
     /// Determine merge mode from input files
     /// Returns Copy if all files are M4A/M4B, Transcode otherwise
     pub fn from_files(files: &[AudioFile]) -> Self {
-        let all_m4 = files.iter().all(|f| {
-            matches!(f.format, AudioFormat::M4A | AudioFormat::M4B)
-        });
+        let all_m4 = files.iter().all(|f| matches!(f.format, AudioFormat::M4A | AudioFormat::M4B));
 
-        if all_m4 {
-            MergeMode::Copy
-        } else {
-            MergeMode::Transcode
-        }
+        if all_m4 { MergeMode::Copy } else { MergeMode::Transcode }
     }
 
     /// Get FFmpeg codec arguments for this mode
@@ -105,13 +99,7 @@ impl MergeJob {
     pub fn new(input_files: Vec<AudioFile>, output_path: PathBuf) -> Self {
         let mode = MergeMode::from_files(&input_files);
 
-        Self {
-            input_files,
-            output_path,
-            mode,
-            target_bitrate: None,
-            num_threads: None,
-        }
+        Self { input_files, output_path, mode, target_bitrate: None, num_threads: None }
     }
 
     /// Set the merge mode explicitly
@@ -141,9 +129,7 @@ impl MergeJob {
         // Check that all input files exist
         for file in &self.input_files {
             if !file.path.exists() {
-                return Err(MergeError::FFmpeg(FFmpegError::FileNotFound(
-                    file.path.clone(),
-                )));
+                return Err(MergeError::FFmpeg(FFmpegError::FileNotFound(file.path.clone())));
             }
         }
 
@@ -256,10 +242,8 @@ impl Merger {
         if bitrates.is_empty() {
             // Probe the first file if metadata not available
             let first_file = &files[0];
-            let metadata = self
-                .ffmpeg
-                .get_metadata(&first_file.path)
-                .map_err(MergeError::FFmpeg)?;
+            let metadata =
+                self.ffmpeg.get_metadata(&first_file.path).map_err(MergeError::FFmpeg)?;
 
             let bitrate = metadata.bitrate.ok_or(MergeError::BitrateDetectionFailed)?;
             Ok(Self::round_to_standard_bitrate((bitrate / 1000) as u32))
@@ -299,11 +283,10 @@ impl Merger {
         // Determine target bitrate if not set and in transcode mode
         let target_bitrate = match job.mode {
             MergeMode::Copy => None,
-            MergeMode::Transcode => {
-                Some(job.target_bitrate.unwrap_or_else(|| {
-                    self.detect_bitrate(&job.input_files).unwrap_or(128)
-                }))
-            }
+            MergeMode::Transcode => Some(
+                job.target_bitrate
+                    .unwrap_or_else(|| self.detect_bitrate(&job.input_files).unwrap_or(128)),
+            ),
         };
 
         info!(
@@ -331,17 +314,14 @@ impl Merger {
 
     /// Create a temporary concat file list for FFmpeg
     fn create_concat_file_list(&self, files: &[AudioFile]) -> Result<NamedTempFile> {
-        let mut temp_file = NamedTempFile::new()
-            .map_err(|e| MergeError::TempFileCreation(e.to_string()))?;
+        let mut temp_file =
+            NamedTempFile::new().map_err(|e| MergeError::TempFileCreation(e.to_string()))?;
 
         // Build concat file list content
         let mut content = String::new();
         for file in files {
             // Get absolute path and escape single quotes
-            let abs_path = file
-                .path
-                .canonicalize()
-                .unwrap_or_else(|_| file.path.clone());
+            let abs_path = file.path.canonicalize().unwrap_or_else(|_| file.path.clone());
             let escaped_path = abs_path.to_string_lossy().replace("'", "'\\''");
             content.push_str(&format!("file '{}'\n", escaped_path));
         }
@@ -349,10 +329,7 @@ impl Merger {
         // Write to temp file
         std::io::Write::write_all(&mut temp_file, content.as_bytes())?;
 
-        debug!(
-            "Created concat file list with {} entries",
-            files.len()
-        );
+        debug!("Created concat file list with {} entries", files.len());
 
         Ok(temp_file)
     }
@@ -372,7 +349,12 @@ impl Merger {
 
         // Special case: single file can be copied directly without concat
         if job.input_files.len() == 1 {
-            return self.copy_single_file(&job.input_files[0], &job.output_path, target_bitrate, progress_handler);
+            return self.copy_single_file(
+                &job.input_files[0],
+                &job.output_path,
+                target_bitrate,
+                progress_handler,
+            );
         }
 
         // Build FFmpeg command
@@ -384,12 +366,7 @@ impl Merger {
         }
 
         // Add concat demuxer input
-        cmd.arg("-f")
-            .arg("concat")
-            .arg("-safe")
-            .arg("0")
-            .arg("-i")
-            .arg(concat_list_path);
+        cmd.arg("-f").arg("concat").arg("-safe").arg("0").arg("-i").arg(concat_list_path);
 
         // Add codec arguments based on mode
         let codec_args = job.mode.codec_args(target_bitrate);
@@ -402,17 +379,17 @@ impl Merger {
 
         // Setup progress parsing
         let progress_regex = Regex::new(
-            r"time=(\d+:\d+:\d+\.\d+)\s+.*?(?:bitrate=\s*([\d.]+)kbits/s)?\s+.*?speed=\s*([\d.]+)x"
-        ).map_err(|e| MergeError::ProgressParseError(e.to_string()))?;
+            r"time=(\d+:\d+:\d+\.\d+)\s+.*?(?:bitrate=\s*([\d.]+)kbits/s)?\s+.*?speed=\s*([\d.]+)x",
+        )
+        .map_err(|e| MergeError::ProgressParseError(e.to_string()))?;
 
         debug!("Running FFmpeg command: {:?}", cmd);
 
         // Execute FFmpeg with stderr capture for progress
-        let mut child = cmd
-            .stderr(Stdio::piped())
-            .stdout(Stdio::null())
-            .spawn()
-            .map_err(|e| MergeError::OperationFailed(format!("Failed to spawn FFmpeg: {}", e)))?;
+        let mut child =
+            cmd.stderr(Stdio::piped()).stdout(Stdio::null()).spawn().map_err(|e| {
+                MergeError::OperationFailed(format!("Failed to spawn FFmpeg: {}", e))
+            })?;
 
         // Parse progress from stderr
         if let Some(stderr) = child.stderr.take() {
@@ -430,10 +407,8 @@ impl Merger {
                         .get(2)
                         .and_then(|m| m.as_str().parse::<f64>().ok())
                         .map(|b| b as u64);
-                    let speed = captures
-                        .get(3)
-                        .and_then(|m| m.as_str().parse::<f64>().ok())
-                        .unwrap_or(0.0);
+                    let speed =
+                        captures.get(3).and_then(|m| m.as_str().parse::<f64>().ok()).unwrap_or(0.0);
 
                     if let Ok(time) = parse_ffmpeg_time(time_str) {
                         let progress = MergeProgress {
@@ -457,17 +432,12 @@ impl Merger {
 
         if !status.success() {
             let code = status.code().unwrap_or(-1);
-            return Err(MergeError::OperationFailed(format!(
-                "FFmpeg exited with code {}",
-                code
-            )));
+            return Err(MergeError::OperationFailed(format!("FFmpeg exited with code {}", code)));
         }
 
         // Verify output file was created
         if !job.output_path.exists() {
-            return Err(MergeError::OperationFailed(
-                "Output file was not created".to_string(),
-            ));
+            return Err(MergeError::OperationFailed("Output file was not created".to_string()));
         }
 
         info!(
@@ -495,9 +465,12 @@ impl Merger {
         // Add codec arguments based on mode and target bitrate
         if let Some(bitrate) = target_bitrate {
             // Transcode mode: transcode audio, copy video (cover art)
-            cmd.arg("-c:a").arg("aac")
-                .arg("-b:a").arg(format!("{}k", bitrate))
-                .arg("-c:v").arg("copy");
+            cmd.arg("-c:a")
+                .arg("aac")
+                .arg("-b:a")
+                .arg(format!("{}k", bitrate))
+                .arg("-c:v")
+                .arg("copy");
         } else {
             // Copy mode
             cmd.arg("-c").arg("copy");
@@ -505,14 +478,13 @@ impl Merger {
 
         cmd.arg("-y").arg(output_path);
 
-        let output = cmd.output()
+        let output = cmd
+            .output()
             .map_err(|e| MergeError::OperationFailed(format!("Failed to execute FFmpeg: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(MergeError::OperationFailed(format!(
-                "FFmpeg failed: {}", stderr
-            )));
+            return Err(MergeError::OperationFailed(format!("FFmpeg failed: {}", stderr)));
         }
 
         // Report completion
@@ -530,20 +502,14 @@ impl Merger {
     }
 
     /// Merge multiple files with automatic mode detection
-    pub fn merge_files<P: AsRef<Path>>(
-        &self,
-        files: &[AudioFile],
-        output: P,
-    ) -> Result<PathBuf> {
+    pub fn merge_files<P: AsRef<Path>>(&self, files: &[AudioFile], output: P) -> Result<PathBuf> {
         let job = MergeJob::new(files.to_vec(), output.as_ref().to_path_buf());
         self.merge(&job)
     }
 
     /// Check if files can be merged without re-encoding
     pub fn can_copy_merge(&self, files: &[AudioFile]) -> bool {
-        files
-            .iter()
-            .all(|f| matches!(f.format, AudioFormat::M4A | AudioFormat::M4B))
+        files.iter().all(|f| matches!(f.format, AudioFormat::M4A | AudioFormat::M4B))
     }
 
     /// Get recommended bitrate for a set of files
@@ -556,10 +522,7 @@ impl Merger {
 fn parse_ffmpeg_time(time_str: &str) -> Result<Duration> {
     let parts: Vec<&str> = time_str.split(':').collect();
     if parts.len() != 3 {
-        return Err(MergeError::ProgressParseError(format!(
-            "Invalid time format: {}",
-            time_str
-        )));
+        return Err(MergeError::ProgressParseError(format!("Invalid time format: {}", time_str)));
     }
 
     let hours: u64 = parts[0]
@@ -661,14 +624,14 @@ mod tests {
         let path = dir.path().join(name);
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(content).unwrap();
-        
+
         AudioFile::new(path).unwrap()
     }
 
     #[test]
     fn test_merge_mode_from_files() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // All M4A files
         let m4a_files = vec![
             create_test_audio_file(&temp_dir, "file1.m4a", b"dummy"),

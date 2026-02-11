@@ -58,26 +58,27 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: m4b-merge-linux
-          path: target/release/
+          path: target/release/m4b-merge-linux
 
       - name: Download macOS binary
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: m4b-merge-macos
-          path: target/release/
+          path: target/release/m4b-merge-macos
 
       - name: Download Windows binary
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: m4b-merge-windows
-          path: target/release/
+          path: target/release/m4b-merge-windows.exe
 
       - name: Create Release
         uses: softprops/action-gh-release@26994186c0ac3ef5cae75ac16aa32e8153525f77
         with:
           files: |
-            target/release/m4b-merge
-            target/release/m4b-merge.exe
+            target/release/m4b-merge-linux/m4b-merge
+            target/release/m4b-merge-macos/m4b-merge
+            target/release/m4b-merge-windows.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

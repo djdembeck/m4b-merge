@@ -7,5 +7,5 @@ blank_lines_upper_bound = 2
 blank_lines_lower_bound = 1
 reorder_impl_items = true
 struct_field_align_threshold = 0
-group_imports = "Std"
+group_imports = "StdExternalCrate"
 use_small_heuristics = "Max"

@@ -6,7 +6,7 @@ use tracing::{debug, info, warn};
 use crate::api::audible::{AudibleClient, AudibleError};
 use crate::audio::ffmpeg::FFmpeg;
 use crate::config::Config;
-use crate::discovery::{discover_and_group, AudioFile, AudioGroup, DiscoveryError};
+use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
 use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
 use crate::tagging::{Tagger, TaggingError};
@@ -118,10 +118,7 @@ impl ProgressHandler for LoggingProgressHandler {
     fn on_progress(&self, progress: ProcessingProgress) {
         info!(
             "[{}] {}/{} - {}",
-            progress.stage,
-            progress.completed_files,
-            progress.total_files,
-            progress.message
+            progress.stage, progress.completed_files, progress.total_files, progress.message
         );
     }
 }
@@ -147,8 +144,7 @@ impl Processor {
     pub fn new(config: Config) -> Result<Self> {
         // Discover FFmpeg
         let ffmpeg = Arc::new(
-            FFmpeg::discover()
-                .map_err(|e| ProcessorError::FFmpegNotFound(e.to_string()))?,
+            FFmpeg::discover().map_err(|e| ProcessorError::FFmpegNotFound(e.to_string()))?,
         );
 
         // Create API client if URL is provided
@@ -167,13 +163,7 @@ impl Processor {
         let merger = Merger::new(ffmpeg.clone());
         let tagger = Tagger::new();
 
-        Ok(Self {
-            config,
-            ffmpeg,
-            api_client,
-            merger,
-            tagger,
-        })
+        Ok(Self { config, ffmpeg, api_client, merger, tagger })
     }
 
     /// Create a new Processor with explicit components (for testing)
@@ -186,13 +176,7 @@ impl Processor {
         let merger = Merger::new(ffmpeg.clone());
         let tagger = Tagger::new();
 
-        Self {
-            config,
-            ffmpeg,
-            api_client,
-            merger,
-            tagger,
-        }
+        Self { config, ffmpeg, api_client, merger, tagger }
     }
 
     /// Process all input paths
@@ -328,11 +312,13 @@ impl Processor {
                         // Convert file chapters to metadata chapters
                         meta.chapters = file_chapters
                             .into_iter()
-                            .map(|ch| crate::metadata::Chapter::new(
-                                ch.title,
-                                std::time::Duration::from_millis(ch.start_time),
-                                std::time::Duration::from_millis(ch.duration)
-                            ))
+                            .map(|ch| {
+                                crate::metadata::Chapter::new(
+                                    ch.title,
+                                    std::time::Duration::from_millis(ch.start_time),
+                                    std::time::Duration::from_millis(ch.duration),
+                                )
+                            })
                             .collect();
                     }
                 }
@@ -383,7 +369,8 @@ impl Processor {
                 }
 
                 // Write chapters.txt
-                let chapters_txt_path = merged_path.with_extension("").with_extension("chapters.txt");
+                let chapters_txt_path =
+                    merged_path.with_extension("").with_extension("chapters.txt");
                 if let Err(e) = self.tagger.write_chapters_txt(&chapters_txt_path, metadata) {
                     warn!("Failed to write chapters.txt: {}", e);
                 }
@@ -433,17 +420,15 @@ impl Processor {
     }
 
     /// Determine output path for a group of files
-    fn determine_output_path(&self, files: &[AudioFile], metadata: Option<&BookMetadata>) -> Result<PathBuf> {
-        let output_dir = self
-            .config
-            .output
-            .clone()
-            .ok_or(ProcessorError::NoOutputDir)?;
+    fn determine_output_path(
+        &self,
+        files: &[AudioFile],
+        metadata: Option<&BookMetadata>,
+    ) -> Result<PathBuf> {
+        let output_dir = self.config.output.clone().ok_or(ProcessorError::NoOutputDir)?;
 
         // Get the first file for fallback
-        let first_file = files
-            .first()
-            .ok_or_else(|| ProcessorError::NoInputs)?;
+        let first_file = files.first().ok_or_else(|| ProcessorError::NoInputs)?;
 
         // Format the path based on metadata and path_format template
         let formatted_path = if let Some(meta) = metadata {
@@ -469,7 +454,7 @@ impl Processor {
         for component in &path_components[..path_components.len().saturating_sub(1)] {
             output_path = output_path.join(component);
         }
-        
+
         // Add the filename with .m4b extension
         let filename = path_components
             .last()
@@ -485,15 +470,11 @@ impl Processor {
         let mut result = template.to_string();
 
         // Replace {author} with first author
-        let author = metadata.authors.first()
-            .map(|s| s.as_str())
-            .unwrap_or("Unknown");
+        let author = metadata.authors.first().map(|s| s.as_str()).unwrap_or("Unknown");
         result = result.replace("{author}", author);
 
         // Replace {narrator} with first narrator
-        let narrator = metadata.narrators.first()
-            .map(|s| s.as_str())
-            .unwrap_or("Unknown");
+        let narrator = metadata.narrators.first().map(|s| s.as_str()).unwrap_or("Unknown");
         result = result.replace("{narrator}", narrator);
 
         // Replace {title}

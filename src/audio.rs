@@ -6,8 +6,14 @@ pub use ffmpeg::{
 
 pub struct AudioProcessor;
 
+impl Default for AudioProcessor {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
 impl AudioProcessor {
     pub fn new() -> Self {
-        Self {}
+        Self::default()
     }
 }

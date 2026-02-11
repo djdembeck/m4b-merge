@@ -1,8 +1,10 @@
 use crate::audio::{AudioMetadata, FFmpeg, FFmpegError};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -80,9 +82,7 @@ impl AudioFormat {
 
     /// Detect format from a path
     pub fn from_path(path: &Path) -> Option<Self> {
-        path.extension()
-            .and_then(|e| e.to_str())
-            .and_then(Self::from_extension)
+        path.extension().and_then(|e| e.to_str()).and_then(Self::from_extension)
     }
 }
 
@@ -110,7 +110,7 @@ impl From<AudioMetadata> for FileMetadata {
     fn from(metadata: AudioMetadata) -> Self {
         Self {
             duration: metadata.duration.unwrap_or_default(),
-            bitrate: metadata.bitrate.unwrap_or(0) as u32,
+            bitrate: metadata.bitrate.unwrap_or(0).try_into().unwrap_or(u32::MAX),
             sample_rate: metadata.sample_rate.unwrap_or(0),
             channels: metadata.channels.unwrap_or(0) as u8,
             codec: metadata.codec.unwrap_or_default(),
@@ -139,23 +139,20 @@ impl AudioFile {
             return Err(DiscoveryError::InvalidPath(path));
         }
 
-        // Check readability
-        if let Err(e) = std::fs::metadata(&path) {
-            if e.kind() == std::io::ErrorKind::PermissionDenied {
+        // Check permissions by attempting to open the file
+        match std::fs::File::open(&path) {
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 return Err(DiscoveryError::PermissionDenied(path));
             }
-            return Err(DiscoveryError::IoError(e));
+            Err(e) => return Err(DiscoveryError::IoError(e)),
         }
 
         // Detect format from extension
         let format = AudioFormat::from_path(&path)
             .ok_or_else(|| DiscoveryError::InvalidFormat(path.clone()))?;
 
-        Ok(Self {
-            path,
-            format,
-            metadata: None,
-        })
+        Ok(Self { path, format, metadata: None })
     }
 
     /// Probe and populate metadata using FFmpeg
@@ -167,10 +164,7 @@ impl AudioFile {
 
     /// Get the filename as a string
     pub fn filename(&self) -> String {
-        self.path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default()
+        self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
     }
 
     /// Get the parent directory
@@ -190,11 +184,7 @@ pub struct AudioGroup {
 impl AudioGroup {
     pub fn new(name: String, files: Vec<AudioFile>) -> Self {
         let disc_number = detect_disc_number(&name);
-        Self {
-            name,
-            files,
-            disc_number,
-        }
+        Self { name, files, disc_number }
     }
 
     /// Get total duration of all files in this group
@@ -217,23 +207,31 @@ impl AudioGroup {
 
 /// Multi-disc detection patterns
 const DISC_PATTERNS: &[&str] = &[
-    r"(?i)^CD\s*(\d+)",        // CD1, CD 1, CD01
-    r"(?i)^DISC\s*(\d+)",      // Disc1, Disc 1, DISC 01
-    r"(?i)^DISK\s*(\d+)",      // Disk1, Disk 1, DISK 01
-    r"(?i)^PART\s*(\d+)",      // Part1, Part 1, PART 01
-    r"(?i)^DISC[_-]?(\d+)",     // Disc_1, Disc-1
-    r"(?i)^CD[_-]?(\d+)",       // CD_1, CD-1
+    r"(?i)^CD\s*(\d+)",     // CD1, CD 1, CD01
+    r"(?i)^DISC\s*(\d+)",   // Disc1, Disc 1, DISC 01
+    r"(?i)^DISK\s*(\d+)",   // Disk1, Disk 1, DISK 01
+    r"(?i)^PART\s*(\d+)",   // Part1, Part 1, PART 01
+    r"(?i)^DISC[_-]?(\d+)", // Disc_1, Disc-1
+    r"(?i)^CD[_-]?(\d+)",   // CD_1, CD-1
 ];
+
+/// Precompiled regex patterns for disc number detection
+static DISC_REGEX_CACHE: OnceLock<Vec<Regex>> = OnceLock::new();
+
+/// Get or initialize the precompiled regex patterns
+fn get_disc_regexes() -> &'static Vec<Regex> {
+    DISC_REGEX_CACHE.get_or_init(|| {
+        DISC_PATTERNS.iter().filter_map(|pattern| Regex::new(pattern).ok()).collect()
+    })
+}
 
 /// Detect disc number from directory name
 fn detect_disc_number(name: &str) -> Option<u32> {
-    for pattern in DISC_PATTERNS {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            if let Some(captures) = re.captures(name) {
-                if let Some(num_match) = captures.get(1) {
-                    if let Ok(num) = num_match.as_str().parse::<u32>() {
-                        return Some(num);
-                    }
+    for re in get_disc_regexes() {
+        if let Some(captures) = re.captures(name) {
+            if let Some(num_match) = captures.get(1) {
+                if let Ok(num) = num_match.as_str().parse::<u32>() {
+                    return Some(num);
                 }
             }
         }
@@ -349,8 +347,7 @@ fn discover_multi_disc_dir(dir: &Path) -> Result<Vec<AudioFile>> {
     let mut all_files: Vec<(Option<u32>, AudioFile)> = Vec::new();
 
     // Read directory entries
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| DiscoveryError::IoError(e))?;
+    let entries = std::fs::read_dir(dir).map_err(|e| DiscoveryError::IoError(e))?;
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -358,10 +355,7 @@ fn discover_multi_disc_dir(dir: &Path) -> Result<Vec<AudioFile>> {
             continue;
         }
 
-        let name = entry
-            .file_name()
-            .to_string_lossy()
-            .to_string();
+        let name = entry.file_name().to_string_lossy().to_string();
 
         // Check if this is a disc directory
         let disc_num = detect_disc_number(&name);
@@ -458,32 +452,23 @@ pub fn discover_and_group(paths: &[PathBuf]) -> Result<Vec<AudioGroup>> {
     }
 
     // Sort groups by disc number if present
-    groups.sort_by(|a, b| {
-        match (a.disc_number, b.disc_number) {
-            (Some(n1), Some(n2)) => n1.cmp(&n2),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }
+    groups.sort_by(|a, b| match (a.disc_number, b.disc_number) {
+        (Some(n1), Some(n2)) => n1.cmp(&n2),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
     });
 
     Ok(groups)
 }
 
 /// Discover files and probe metadata for each
-pub fn discover_with_metadata(
-    paths: &[PathBuf],
-    ffmpeg: &FFmpeg,
-) -> Result<Vec<AudioFile>> {
+pub fn discover_with_metadata(paths: &[PathBuf], ffmpeg: &FFmpeg) -> Result<Vec<AudioFile>> {
     let mut files = discover_files(paths)?;
 
     for file in &mut files {
         if let Err(e) = file.probe_metadata(ffmpeg) {
-            warn!(
-                "Failed to probe metadata for {}: {}",
-                file.path.display(),
-                e
-            );
+            warn!("Failed to probe metadata for {}: {}", file.path.display(), e);
         }
     }
 
@@ -515,18 +500,9 @@ mod tests {
 
     #[test]
     fn test_audio_format_from_path() {
-        assert_eq!(
-            AudioFormat::from_path(Path::new("/path/to/file.mp3")),
-            Some(AudioFormat::MP3)
-        );
-        assert_eq!(
-            AudioFormat::from_path(Path::new("/path/to/file.m4b")),
-            Some(AudioFormat::M4B)
-        );
-        assert_eq!(
-            AudioFormat::from_path(Path::new("/path/to/file.txt")),
-            None
-        );
+        assert_eq!(AudioFormat::from_path(Path::new("/path/to/file.mp3")), Some(AudioFormat::MP3));
+        assert_eq!(AudioFormat::from_path(Path::new("/path/to/file.m4b")), Some(AudioFormat::M4B));
+        assert_eq!(AudioFormat::from_path(Path::new("/path/to/file.txt")), None);
     }
 
     #[test]
@@ -630,10 +606,8 @@ mod tests {
         assert_eq!(files.len(), 3);
 
         // Check that only audio files were collected
-        let extensions: Vec<_> = files
-            .iter()
-            .filter_map(|p| p.extension().and_then(|e| e.to_str()))
-            .collect();
+        let extensions: Vec<_> =
+            files.iter().filter_map(|p| p.extension().and_then(|e| e.to_str())).collect();
         assert!(extensions.contains(&"mp3"));
         assert!(extensions.contains(&"m4a"));
         assert!(!extensions.contains(&"txt"));
@@ -745,9 +719,12 @@ mod tests {
         std::fs::create_dir(&dir1).unwrap();
         std::fs::create_dir(&dir2).unwrap();
 
-        let file1 = AudioFile::new(create_test_file(&temp_dir, "Book1/chapter1.mp3", b"content")).unwrap();
-        let file2 = AudioFile::new(create_test_file(&temp_dir, "Book1/chapter2.mp3", b"content")).unwrap();
-        let file3 = AudioFile::new(create_test_file(&temp_dir, "Book2/chapter1.mp3", b"content")).unwrap();
+        let file1 =
+            AudioFile::new(create_test_file(&temp_dir, "Book1/chapter1.mp3", b"content")).unwrap();
+        let file2 =
+            AudioFile::new(create_test_file(&temp_dir, "Book1/chapter2.mp3", b"content")).unwrap();
+        let file3 =
+            AudioFile::new(create_test_file(&temp_dir, "Book2/chapter1.mp3", b"content")).unwrap();
 
         let files = vec![file1, file2, file3];
         let groups = group_files_by_directory(files);

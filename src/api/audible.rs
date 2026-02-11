@@ -3,8 +3,8 @@ use std::time::Duration;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use thiserror::Error;
-use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
+use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
 use crate::metadata::{BookMetadata, Chapter};
 
@@ -63,8 +63,8 @@ impl AudibleClient {
     pub fn with_base_url(base_url: impl Into<String>) -> Result<Self, AudibleError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .connect_timeout(Duration::from_secs(10))  // Connection timeout
-            .pool_idle_timeout(Duration::from_secs(30))  // Connection pool timeout
+            .connect_timeout(Duration::from_secs(10)) // Connection timeout
+            .pool_idle_timeout(Duration::from_secs(30)) // Connection pool timeout
             .build()?;
 
         Ok(Self {
@@ -80,8 +80,8 @@ impl AudibleClient {
 
         self.client = Client::builder()
             .timeout(timeout)
-            .connect_timeout(Duration::from_secs(10))  // Connection timeout
-            .pool_idle_timeout(Duration::from_secs(30))  // Connection pool timeout
+            .connect_timeout(Duration::from_secs(10)) // Connection timeout
+            .pool_idle_timeout(Duration::from_secs(30)) // Connection pool timeout
             .build()?;
 
         Ok(self)
@@ -100,9 +100,7 @@ impl AudibleClient {
     pub async fn fetch_book(&self, asin: &str) -> Result<BookMetadata, AudibleError> {
         Self::validate_asin(asin)?;
 
-        let retry_strategy = ExponentialBackoff::from_millis(1000)
-            .map(jitter)
-            .take(MAX_RETRIES);
+        let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
 
         let base_url = self.base_url.clone();
         let client = self.client.clone();
@@ -143,26 +141,18 @@ impl AudibleClient {
             StatusCode::REQUEST_TIMEOUT => Err(AudibleError::Timeout),
             status if status.is_server_error() => {
                 let message = response.text().await.unwrap_or_default();
-                Err(AudibleError::ApiError {
-                    status: status.as_u16(),
-                    message,
-                })
+                Err(AudibleError::ApiError { status: status.as_u16(), message })
             }
             status => {
                 let message = response.text().await.unwrap_or_default();
-                Err(AudibleError::ApiError {
-                    status: status.as_u16(),
-                    message,
-                })
+                Err(AudibleError::ApiError { status: status.as_u16(), message })
             }
         }
     }
 
     /// Download cover image bytes from the cover URL
     pub async fn download_cover(&self, cover_url: &str) -> Result<Vec<u8>, AudibleError> {
-        let retry_strategy = ExponentialBackoff::from_millis(1000)
-            .map(jitter)
-            .take(MAX_RETRIES);
+        let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
 
         let client = self.client.clone();
         let url = cover_url.to_string();
@@ -317,10 +307,7 @@ mod tests {
             AudibleClient::validate_asin("B08-XYZ123"),
             Err(AudibleError::InvalidAsin(_))
         ));
-        assert!(matches!(
-            AudibleClient::validate_asin(""),
-            Err(AudibleError::InvalidAsin(_))
-        ));
+        assert!(matches!(AudibleClient::validate_asin(""), Err(AudibleError::InvalidAsin(_))));
     }
 
     #[test]
