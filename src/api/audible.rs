@@ -96,6 +96,22 @@ impl AudibleClient {
         }
     }
 
+    /// Determine if an error is transient and should trigger retry
+    fn is_transient_error(error: &AudibleError) -> bool {
+        match error {
+            // Network errors (timeouts, connection issues)
+            AudibleError::Network(_) => true,
+            // Rate limiting (should retry with backoff)
+            AudibleError::RateLimited => true,
+            // Request timeout
+            AudibleError::Timeout => true,
+            // Server errors (5xx)
+            AudibleError::ApiError { status, .. } => *status >= 500,
+            // All other errors are permanent
+            _ => false,
+        }
+    }
+
     /// Fetch book metadata by ASIN with retry logic
     pub async fn fetch_book(&self, asin: &str) -> Result<BookMetadata, AudibleError> {
         Self::validate_asin(asin)?;
@@ -111,10 +127,20 @@ impl AudibleClient {
             let base_url = base_url.clone();
             let asin = asin.clone();
 
-            async move { Self::fetch_book_once(&client, &base_url, &asin).await }
+            async move {
+                let result = Self::fetch_book_once(&client, &base_url, &asin).await;
+
+                // Return Ok for success, Err for retry
+                match result {
+                    Ok(metadata) => Ok(metadata),
+                    Err(e) if Self::is_transient_error(&e) => {
+                        Err(AudibleError::RetryExhausted(MAX_RETRIES))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
         })
         .await
-        .map_err(|_| AudibleError::RetryExhausted(MAX_RETRIES))
     }
 
     /// Single fetch attempt without retry logic
@@ -162,25 +188,38 @@ impl AudibleClient {
             let url = url.clone();
 
             async move {
-                let response = client.get(&url).send().await?;
+                let result = Self::download_cover_once(&client, &url).await;
 
-                match response.status() {
-                    StatusCode::OK => Ok(response.bytes().await?.to_vec()),
-                    StatusCode::NOT_FOUND => Err(AudibleError::NotFound("cover".to_string())),
-                    StatusCode::TOO_MANY_REQUESTS => Err(AudibleError::RateLimited),
-                    status if status.is_server_error() => Err(AudibleError::ApiError {
-                        status: status.as_u16(),
-                        message: "Server error".to_string(),
-                    }),
-                    status => Err(AudibleError::ApiError {
-                        status: status.as_u16(),
-                        message: "Failed to download cover".to_string(),
-                    }),
+                // Return Ok for success, Err for retry
+                match result {
+                    Ok(bytes) => Ok(bytes),
+                    Err(e) if Self::is_transient_error(&e) => {
+                        Err(AudibleError::RetryExhausted(MAX_RETRIES))
+                    }
+                    Err(e) => Err(e),
                 }
             }
         })
         .await
-        .map_err(|_| AudibleError::RetryExhausted(MAX_RETRIES))
+    }
+
+    /// Single download attempt without retry logic
+    async fn download_cover_once(client: &Client, url: &str) -> Result<Vec<u8>, AudibleError> {
+        let response = client.get(url).send().await?;
+
+        match response.status() {
+            StatusCode::OK => Ok(response.bytes().await?.to_vec()),
+            StatusCode::NOT_FOUND => Err(AudibleError::NotFound("cover".to_string())),
+            StatusCode::TOO_MANY_REQUESTS => Err(AudibleError::RateLimited),
+            status if status.is_server_error() => Err(AudibleError::ApiError {
+                status: status.as_u16(),
+                message: "Server error".to_string(),
+            }),
+            status => Err(AudibleError::ApiError {
+                status: status.as_u16(),
+                message: "Failed to download cover".to_string(),
+            }),
+        }
     }
 }
 
