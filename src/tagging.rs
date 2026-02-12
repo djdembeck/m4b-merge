@@ -59,9 +59,10 @@ fn convert_chapters_for_embedding(chapters: &[crate::metadata::Chapter]) -> Vec<
 
     for chapter in metadata_chapters.iter() {
         // Truncate title to 255 characters (chpl atom limit)
-        let title = if chapter.title.len() > 255 { &chapter.title[..255] } else { &chapter.title };
+        // Use character-aware truncation to safely handle multi-byte UTF-8 characters
+        let title: String = chapter.title.chars().take(255).collect();
 
-        result.push(mp4ameta::Chapter::new(chapter.start_time, title));
+        result.push(mp4ameta::Chapter::new(chapter.start_time, &title));
     }
 
     result
@@ -317,6 +318,8 @@ impl Tagger {
 
     /// Download image from URL
     async fn download_image(&self, url: &str) -> Result<Vec<u8>> {
+        const MAX_SIZE: usize = 5 * 1024 * 1024; // 5 MB
+
         let response = self
             .http_client
             .get(url)
@@ -329,10 +332,28 @@ impl Tagger {
             return Err(TaggingError::CoverDownload(format!("HTTP error: {}", response.status())));
         }
 
+        // Check content-length header for size limit
+        if let Some(content_length) = response.content_length() {
+            if content_length > MAX_SIZE as u64 {
+                return Err(TaggingError::CoverDownload(format!(
+                    "Image size {} bytes exceeds 5MB limit",
+                    content_length
+                )));
+            }
+        }
+
+        // Download and verify size
         let bytes = response
             .bytes()
             .await
             .map_err(|e| TaggingError::CoverDownload(format!("Failed to read bytes: {}", e)))?;
+
+        if bytes.len() > MAX_SIZE {
+            return Err(TaggingError::CoverDownload(format!(
+                "Image size {} bytes exceeds 5MB limit",
+                bytes.len()
+            )));
+        }
 
         Ok(bytes.to_vec())
     }
@@ -852,6 +873,22 @@ mod tests {
         let mp4_chapters = convert_chapters_for_embedding(&chapters);
         assert_eq!(mp4_chapters.len(), 1);
         assert_eq!(mp4_chapters[0].title.len(), 255);
+    }
+
+    #[test]
+    fn test_convert_chapters_for_embedding_utf8_safe_truncation() {
+        // Test that multi-byte UTF-8 characters are handled safely without panicking
+        // Each emoji is 4 bytes in UTF-8, so 300 emojis would be 1200 bytes
+        let emoji_title = "😀".repeat(300);
+        let chapters =
+            vec![Chapter::new(emoji_title.clone(), Duration::ZERO, Duration::from_secs(60))];
+
+        let mp4_chapters = convert_chapters_for_embedding(&chapters);
+        assert_eq!(mp4_chapters.len(), 1);
+        // Should have exactly 255 characters (not bytes)
+        assert_eq!(mp4_chapters[0].title.chars().count(), 255);
+        // Verify the title starts with the emoji character
+        assert!(mp4_chapters[0].title.starts_with('😀'));
     }
 
     #[test]

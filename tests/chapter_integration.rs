@@ -36,7 +36,6 @@ fn create_test_m4b(path: &PathBuf, duration_secs: u32) {
 }
 
 #[test]
-#[ignore = "requires FFmpeg"]
 fn test_chapter_embed_and_read_roundtrip() {
     if !ffmpeg_available() {
         return;
@@ -90,7 +89,6 @@ fn test_chapter_embed_and_read_roundtrip() {
 }
 
 #[test]
-#[ignore = "requires FFmpeg"]
 fn test_chapter_embed_empty_chapters() {
     if !ffmpeg_available() {
         return;
@@ -111,7 +109,6 @@ fn test_chapter_embed_empty_chapters() {
 }
 
 #[test]
-#[ignore = "requires FFmpeg"]
 fn test_chapter_embed_single_chapter() {
     if !ffmpeg_available() {
         return;
@@ -143,7 +140,6 @@ fn test_chapter_embed_single_chapter() {
 }
 
 #[test]
-#[ignore = "requires FFmpeg"]
 fn test_chapter_embed_multiple_chapters() {
     if !ffmpeg_available() {
         return;
@@ -200,7 +196,6 @@ fn test_chapter_embed_multiple_chapters() {
 }
 
 #[test]
-#[ignore = "requires FFmpeg"]
 fn test_chapter_embed_replaces_existing() {
     if !ffmpeg_available() {
         return;
@@ -270,7 +265,6 @@ fn test_chapter_embed_replaces_existing() {
 }
 
 #[test]
-#[ignore = "requires FFmpeg"]
 fn test_chapter_read_from_file_without_chapters() {
     if !ffmpeg_available() {
         return;

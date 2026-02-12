@@ -402,9 +402,9 @@ pub fn group_files_by_directory(files: Vec<AudioFile>) -> Vec<AudioGroup> {
     let mut groups: HashMap<PathBuf, Vec<AudioFile>> = HashMap::new();
 
     for file in files {
-        if let Some(parent) = file.parent() {
-            groups.entry(parent.to_path_buf()).or_default().push(file);
-        }
+        let key =
+            file.path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| file.path.to_path_buf());
+        groups.entry(key).or_default().push(file);
     }
 
     groups

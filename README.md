@@ -23,7 +23,7 @@ A blazing fast CLI tool for merging audiobook files into sorted, tagged M4B file
 ### From Source
 
 ```bash
-cargo install m4b-merge
+cargo install --path .
 ```
 
 ### Pre-built Binaries
@@ -59,7 +59,7 @@ docker run --rm \
   -v /my/merged:/output \
   ghcr.io/djdembeck/m4b-merge:latest \
   -i /input/book.mp3 \
-  -a B0123456789
+  -a B012345678
 ```
 
 #### Named Container (persistent volumes)
@@ -72,7 +72,7 @@ docker create --name m4b-merge \
   ghcr.io/djdembeck/m4b-merge:latest
 
 # Run commands
-docker start m4b-merge -i /input/book.mp3 -a B0123456789
+docker start m4b-merge -i /input/book.mp3 -a B012345678
 docker start m4b-merge -i /input/*.mp3
 ```
 
@@ -139,10 +139,10 @@ m4b-merge -i input_folder/
 
 ```bash
 # Provide ASIN for automatic metadata fetch
-m4b-merge -i input/file.mp3 -a B0123456789
+m4b-merge -i input/file.mp3 -a B012345678
 
 # Custom Audnexus API endpoint
-m4b-merge -i input/file.mp3 -a B0123456789 --api_url https://api.audnex.us
+m4b-merge -i input/file.mp3 -a B012345678 --api_url https://api.audnex.us
 ```
 
 ### Output Options
