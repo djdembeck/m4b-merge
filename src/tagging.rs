@@ -25,6 +25,9 @@ pub enum TaggingError {
 
     #[error("File move error: {0}")]
     FileMove(String),
+
+    #[error("Duplicate chapter start times detected")]
+    DuplicateChapterTimes,
 }
 
 /// Result type for tagging operations
@@ -40,6 +43,53 @@ pub enum OverwriteBehavior {
     Error,
     /// Overwrite the existing file
     Force,
+}
+
+/// Convert metadata chapters to mp4ameta chapters
+///
+/// Sorts chapters by start_time and converts each to mp4ameta::Chapter.
+/// The mp4ameta crate handles duration calculation internally based on chapter start times.
+fn convert_chapters_for_embedding(
+    chapters: &[crate::metadata::Chapter],
+    _total_duration: Option<Duration>,
+) -> Vec<mp4ameta::Chapter> {
+    let mut metadata_chapters = chapters.to_vec();
+
+    // Sort by start_time
+    metadata_chapters.sort_by_key(|c| c.start_time);
+
+    let mut result = Vec::with_capacity(metadata_chapters.len());
+
+    for chapter in metadata_chapters.iter() {
+        // Truncate title to 255 characters (chpl atom limit)
+        let title = if chapter.title.len() > 255 { &chapter.title[..255] } else { &chapter.title };
+
+        result.push(mp4ameta::Chapter::new(chapter.start_time, title));
+    }
+
+    result
+}
+
+/// Validate chapters before embedding
+///
+/// Sorts chapters by start_time and checks for duplicate start times.
+/// Returns an error if duplicates are found.
+fn validate_and_sort_chapters(chapters: &mut Vec<crate::metadata::Chapter>) -> Result<()> {
+    if chapters.is_empty() {
+        return Ok(());
+    }
+
+    // Sort by start_time
+    chapters.sort_by_key(|c| c.start_time);
+
+    // Check for duplicates
+    for i in 1..chapters.len() {
+        if chapters[i].start_time == chapters[i - 1].start_time {
+            return Err(TaggingError::DuplicateChapterTimes);
+        }
+    }
+
+    Ok(())
 }
 
 /// Handles metadata tagging and file operations for audiobooks
@@ -206,6 +256,67 @@ impl Tagger {
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to embed cover: {}", e)))?;
 
         info!("Successfully embedded cover art in: {}", path.display());
+        Ok(())
+    }
+
+    /// Embed chapters into an M4B file
+    ///
+    /// This method writes chapters to the MP4 container using the chapter list (chpl atom).
+    /// Any existing chapters in the file are replaced.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the M4B file
+    /// * `chapters` - Slice of chapters to embed
+    /// * `total_duration` - Optional total duration of the audio (for calculating last chapter duration)
+    ///
+    /// # Errors
+    ///
+    /// Returns `TaggingError` if:
+    /// - File doesn't exist
+    /// - Chapters are invalid (empty, duplicates)
+    /// - Writing to file fails
+    pub fn embed_chapters<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+        chapters: &[crate::metadata::Chapter],
+        _total_duration: Option<Duration>,
+    ) -> Result<()> {
+        let path = file_path.as_ref();
+
+        // Validate file exists
+        if !path.exists() {
+            return Err(TaggingError::FileNotFound(path.to_path_buf()));
+        }
+
+        // Skip if empty (with debug log)
+        if chapters.is_empty() {
+            debug!("No chapters to embed, skipping");
+            return Ok(());
+        }
+
+        // Validate chapters (using helper from Task 2)
+        let mut chapters_vec = chapters.to_vec();
+        validate_and_sort_chapters(&mut chapters_vec)?;
+
+        info!("Embedding {} chapters into: {}", chapters_vec.len(), path.display());
+
+        // Read existing tag
+        let mut tag = mp4ameta::Tag::read_from_path(path)
+            .map_err(|e| TaggingError::Mp4Meta(format!("Failed to read tag: {}", e)))?;
+
+        // Clear existing chapters
+        tag.chapter_list_mut().clear();
+
+        // Convert and add chapters (using helper from Task 2)
+        let mp4_chapters = convert_chapters_for_embedding(&chapters_vec, _total_duration);
+        tag.chapter_list_mut().extend(mp4_chapters);
+
+        // Write back to file
+        tag.write_to_path(path)
+            .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write chapters: {}", e)))?;
+
+        info!("Successfully embedded {} chapters", chapters_vec.len());
         Ok(())
     }
 
