@@ -1,13 +1,13 @@
 [package]
 name = "m4b-merge"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "A CLI tool which outputs consistently sorted, tagged, single m4b files"
 authors = ["djdembeck"]
 license = "MIT"
 repository = "https://github.com/djdembeck/m4b-merge"
 homepage = "https://github.com/djdembeck/m4b-merge"
-rust-version = "1.70"
+rust-version = "1.85"
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
