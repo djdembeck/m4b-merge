@@ -813,4 +813,253 @@ mod tests {
         assert!(content.contains("00:00:05.000 Chapter 1"));
         assert!(content.contains("00:00:15.000 Chapter 2"));
     }
+
+    // Chapter embedding helper function tests
+
+    #[test]
+    fn test_convert_chapters_for_embedding() {
+        let chapters = vec![
+            Chapter::new("Ch1", Duration::ZERO, Duration::from_secs(60)),
+            Chapter::new("Ch2", Duration::from_secs(60), Duration::from_secs(60)),
+        ];
+
+        let mp4_chapters = convert_chapters_for_embedding(&chapters, None);
+        assert_eq!(mp4_chapters.len(), 2);
+        assert_eq!(mp4_chapters[0].title, "Ch1");
+        assert_eq!(mp4_chapters[0].start, Duration::ZERO);
+        assert_eq!(mp4_chapters[1].title, "Ch2");
+        assert_eq!(mp4_chapters[1].start, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_convert_chapters_for_embedding_sorts_chapters() {
+        // Test that chapters are sorted by start_time
+        let chapters = vec![
+            Chapter::new("Ch2", Duration::from_secs(60), Duration::from_secs(60)),
+            Chapter::new("Ch1", Duration::ZERO, Duration::from_secs(60)),
+            Chapter::new("Ch3", Duration::from_secs(120), Duration::from_secs(60)),
+        ];
+
+        let mp4_chapters = convert_chapters_for_embedding(&chapters, None);
+        assert_eq!(mp4_chapters.len(), 3);
+        assert_eq!(mp4_chapters[0].title, "Ch1");
+        assert_eq!(mp4_chapters[1].title, "Ch2");
+        assert_eq!(mp4_chapters[2].title, "Ch3");
+    }
+
+    #[test]
+    fn test_convert_chapters_for_embedding_title_truncation() {
+        // Test that titles longer than 255 characters are truncated
+        let long_title = "A".repeat(300);
+        let chapters =
+            vec![Chapter::new(long_title.clone(), Duration::ZERO, Duration::from_secs(60))];
+
+        let mp4_chapters = convert_chapters_for_embedding(&chapters, None);
+        assert_eq!(mp4_chapters.len(), 1);
+        assert_eq!(mp4_chapters[0].title.len(), 255);
+    }
+
+    #[test]
+    fn test_convert_chapters_for_embedding_empty() {
+        let chapters: Vec<Chapter> = vec![];
+        let mp4_chapters = convert_chapters_for_embedding(&chapters, None);
+        assert!(mp4_chapters.is_empty());
+    }
+
+    #[test]
+    fn test_validate_and_sort_chapters_empty() {
+        let mut chapters: Vec<Chapter> = vec![];
+        let result = validate_and_sort_chapters(&mut chapters);
+        assert!(result.is_ok());
+        assert!(chapters.is_empty());
+    }
+
+    #[test]
+    fn test_validate_and_sort_chapters_single() {
+        let mut chapters = vec![Chapter::new("Ch1", Duration::ZERO, Duration::from_secs(60))];
+        let result = validate_and_sort_chapters(&mut chapters);
+        assert!(result.is_ok());
+        assert_eq!(chapters.len(), 1);
+    }
+
+    #[test]
+    fn test_validate_and_sort_chapters_unsorted_gets_sorted() {
+        let mut chapters = vec![
+            Chapter::new("Ch2", Duration::from_secs(60), Duration::from_secs(60)),
+            Chapter::new("Ch1", Duration::ZERO, Duration::from_secs(60)),
+            Chapter::new("Ch3", Duration::from_secs(120), Duration::from_secs(60)),
+        ];
+
+        validate_and_sort_chapters(&mut chapters).unwrap();
+
+        assert_eq!(chapters[0].title, "Ch1");
+        assert_eq!(chapters[0].start_time, Duration::ZERO);
+        assert_eq!(chapters[1].title, "Ch2");
+        assert_eq!(chapters[1].start_time, Duration::from_secs(60));
+        assert_eq!(chapters[2].title, "Ch3");
+        assert_eq!(chapters[2].start_time, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_validate_and_sort_chapters_duplicates() {
+        let chapters = vec![
+            Chapter::new("Ch1", Duration::ZERO, Duration::from_secs(60)),
+            Chapter::new("Ch2", Duration::ZERO, Duration::from_secs(60)),
+        ];
+        let mut chapters_copy = chapters;
+        let result = validate_and_sort_chapters(&mut chapters_copy);
+        assert!(matches!(result, Err(TaggingError::DuplicateChapterTimes)));
+    }
+
+    #[test]
+    fn test_validate_and_sort_chapters_already_sorted() {
+        let mut chapters = vec![
+            Chapter::new("Ch1", Duration::ZERO, Duration::from_secs(60)),
+            Chapter::new("Ch2", Duration::from_secs(60), Duration::from_secs(60)),
+        ];
+
+        let result = validate_and_sort_chapters(&mut chapters);
+        assert!(result.is_ok());
+        assert_eq!(chapters[0].title, "Ch1");
+        assert_eq!(chapters[1].title, "Ch2");
+    }
+
+    // Helper function to create a minimal M4B file for testing
+    fn create_minimal_m4b(dir: &TempDir) -> PathBuf {
+        use std::process::Command;
+
+        let path = dir.path().join("test.m4b");
+        let status = Command::new("ffmpeg")
+            .args(&[
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=mono",
+                "-t",
+                "10",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "64k",
+                "-y",
+                path.to_str().unwrap(),
+            ])
+            .status();
+
+        match status {
+            Ok(s) if s.success() => path,
+            _ => panic!("FFmpeg required for tests"),
+        }
+    }
+
+    #[test]
+    fn test_embed_chapters_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let m4b_path = create_minimal_m4b(&temp_dir);
+
+        let tagger = Tagger::new();
+        let chapters: Vec<Chapter> = vec![];
+
+        let result = tagger.embed_chapters(&m4b_path, &chapters, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_embed_chapters_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let m4b_path = create_minimal_m4b(&temp_dir);
+
+        let chapters = vec![
+            Chapter::new("Chapter 1", Duration::ZERO, Duration::from_secs(5)),
+            Chapter::new("Chapter 2", Duration::from_secs(5), Duration::from_secs(5)),
+        ];
+
+        let tagger = Tagger::new();
+        let result = tagger.embed_chapters(&m4b_path, &chapters, None);
+        assert!(result.is_ok());
+
+        // Verify chapters were embedded by reading the file
+        let tag = mp4ameta::Tag::read_from_path(&m4b_path).unwrap();
+        let chapter_list = tag.chapter_list();
+        assert_eq!(chapter_list.len(), 2);
+        assert_eq!(chapter_list[0].title, "Chapter 1");
+        assert_eq!(chapter_list[1].title, "Chapter 2");
+    }
+
+    #[test]
+    fn test_embed_chapters_replaces_existing() {
+        let temp_dir = TempDir::new().unwrap();
+        let m4b_path = create_minimal_m4b(&temp_dir);
+
+        // First embed some chapters
+        let initial_chapters =
+            vec![Chapter::new("Initial Chapter", Duration::ZERO, Duration::from_secs(10))];
+        let tagger = Tagger::new();
+        tagger.embed_chapters(&m4b_path, &initial_chapters, None).unwrap();
+
+        // Verify initial chapters
+        let tag = mp4ameta::Tag::read_from_path(&m4b_path).unwrap();
+        assert_eq!(tag.chapter_list().len(), 1);
+
+        // Now embed new chapters (should replace)
+        let new_chapters = vec![
+            Chapter::new("New Chapter 1", Duration::ZERO, Duration::from_secs(5)),
+            Chapter::new("New Chapter 2", Duration::from_secs(5), Duration::from_secs(5)),
+        ];
+        tagger.embed_chapters(&m4b_path, &new_chapters, None).unwrap();
+
+        // Verify chapters were replaced
+        let tag = mp4ameta::Tag::read_from_path(&m4b_path).unwrap();
+        let chapter_list = tag.chapter_list();
+        assert_eq!(chapter_list.len(), 2);
+        assert_eq!(chapter_list[0].title, "New Chapter 1");
+        assert_eq!(chapter_list[1].title, "New Chapter 2");
+    }
+
+    #[test]
+    fn test_embed_chapters_sorts_unsorted_input() {
+        let temp_dir = TempDir::new().unwrap();
+        let m4b_path = create_minimal_m4b(&temp_dir);
+
+        // Provide chapters out of order
+        let chapters = vec![
+            Chapter::new("Chapter 2", Duration::from_secs(5), Duration::from_secs(5)),
+            Chapter::new("Chapter 1", Duration::ZERO, Duration::from_secs(5)),
+        ];
+
+        let tagger = Tagger::new();
+        let result = tagger.embed_chapters(&m4b_path, &chapters, None);
+        assert!(result.is_ok());
+
+        // Verify chapters were sorted
+        let tag = mp4ameta::Tag::read_from_path(&m4b_path).unwrap();
+        let chapter_list = tag.chapter_list();
+        assert_eq!(chapter_list.len(), 2);
+        assert_eq!(chapter_list[0].title, "Chapter 1");
+        assert_eq!(chapter_list[1].title, "Chapter 2");
+    }
+
+    #[test]
+    fn test_embed_chapters_file_not_found() {
+        let tagger = Tagger::new();
+        let chapters = vec![Chapter::new("Ch1", Duration::ZERO, Duration::from_secs(60))];
+
+        let result = tagger.embed_chapters("/nonexistent/path/file.m4b", &chapters, None);
+        assert!(matches!(result, Err(TaggingError::FileNotFound(_))));
+    }
+
+    #[test]
+    fn test_embed_chapters_duplicate_times_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let m4b_path = create_minimal_m4b(&temp_dir);
+
+        let chapters = vec![
+            Chapter::new("Ch1", Duration::ZERO, Duration::from_secs(60)),
+            Chapter::new("Ch2", Duration::ZERO, Duration::from_secs(60)),
+        ];
+
+        let tagger = Tagger::new();
+        let result = tagger.embed_chapters(&m4b_path, &chapters, None);
+        assert!(matches!(result, Err(TaggingError::DuplicateChapterTimes)));
+    }
 }
