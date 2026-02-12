@@ -49,10 +49,7 @@ pub enum OverwriteBehavior {
 ///
 /// Sorts chapters by start_time and converts each to mp4ameta::Chapter.
 /// The mp4ameta crate handles duration calculation internally based on chapter start times.
-fn convert_chapters_for_embedding(
-    chapters: &[crate::metadata::Chapter],
-    _total_duration: Option<Duration>,
-) -> Vec<mp4ameta::Chapter> {
+fn convert_chapters_for_embedding(chapters: &[crate::metadata::Chapter]) -> Vec<mp4ameta::Chapter> {
     let mut metadata_chapters = chapters.to_vec();
 
     // Sort by start_time
@@ -268,7 +265,6 @@ impl Tagger {
     ///
     /// * `file_path` - Path to the M4B file
     /// * `chapters` - Slice of chapters to embed
-    /// * `total_duration` - Optional total duration of the audio (for calculating last chapter duration)
     ///
     /// # Errors
     ///
@@ -280,7 +276,6 @@ impl Tagger {
         &self,
         file_path: P,
         chapters: &[crate::metadata::Chapter],
-        _total_duration: Option<Duration>,
     ) -> Result<()> {
         let path = file_path.as_ref();
 
@@ -295,7 +290,7 @@ impl Tagger {
             return Ok(());
         }
 
-        // Validate chapters (using helper from Task 2)
+        // Validate and sort chapters by start time
         let mut chapters_vec = chapters.to_vec();
         validate_and_sort_chapters(&mut chapters_vec)?;
 
@@ -308,8 +303,8 @@ impl Tagger {
         // Clear existing chapters
         tag.chapter_list_mut().clear();
 
-        // Convert and add chapters (using helper from Task 2)
-        let mp4_chapters = convert_chapters_for_embedding(&chapters_vec, _total_duration);
+        // Convert to mp4ameta chapters and add to tag
+        let mp4_chapters = convert_chapters_for_embedding(&chapters_vec);
         tag.chapter_list_mut().extend(mp4_chapters);
 
         // Write back to file
@@ -823,7 +818,7 @@ mod tests {
             Chapter::new("Ch2", Duration::from_secs(60), Duration::from_secs(60)),
         ];
 
-        let mp4_chapters = convert_chapters_for_embedding(&chapters, None);
+        let mp4_chapters = convert_chapters_for_embedding(&chapters);
         assert_eq!(mp4_chapters.len(), 2);
         assert_eq!(mp4_chapters[0].title, "Ch1");
         assert_eq!(mp4_chapters[0].start, Duration::ZERO);
@@ -840,7 +835,7 @@ mod tests {
             Chapter::new("Ch3", Duration::from_secs(120), Duration::from_secs(60)),
         ];
 
-        let mp4_chapters = convert_chapters_for_embedding(&chapters, None);
+        let mp4_chapters = convert_chapters_for_embedding(&chapters);
         assert_eq!(mp4_chapters.len(), 3);
         assert_eq!(mp4_chapters[0].title, "Ch1");
         assert_eq!(mp4_chapters[1].title, "Ch2");
@@ -854,7 +849,7 @@ mod tests {
         let chapters =
             vec![Chapter::new(long_title.clone(), Duration::ZERO, Duration::from_secs(60))];
 
-        let mp4_chapters = convert_chapters_for_embedding(&chapters, None);
+        let mp4_chapters = convert_chapters_for_embedding(&chapters);
         assert_eq!(mp4_chapters.len(), 1);
         assert_eq!(mp4_chapters[0].title.len(), 255);
     }
@@ -862,7 +857,7 @@ mod tests {
     #[test]
     fn test_convert_chapters_for_embedding_empty() {
         let chapters: Vec<Chapter> = vec![];
-        let mp4_chapters = convert_chapters_for_embedding(&chapters, None);
+        let mp4_chapters = convert_chapters_for_embedding(&chapters);
         assert!(mp4_chapters.is_empty());
     }
 
@@ -960,7 +955,7 @@ mod tests {
         let tagger = Tagger::new();
         let chapters: Vec<Chapter> = vec![];
 
-        let result = tagger.embed_chapters(&m4b_path, &chapters, None);
+        let result = tagger.embed_chapters(&m4b_path, &chapters);
         assert!(result.is_ok());
     }
 
@@ -975,7 +970,7 @@ mod tests {
         ];
 
         let tagger = Tagger::new();
-        let result = tagger.embed_chapters(&m4b_path, &chapters, None);
+        let result = tagger.embed_chapters(&m4b_path, &chapters);
         assert!(result.is_ok());
 
         // Verify chapters were embedded by reading the file
@@ -995,7 +990,7 @@ mod tests {
         let initial_chapters =
             vec![Chapter::new("Initial Chapter", Duration::ZERO, Duration::from_secs(10))];
         let tagger = Tagger::new();
-        tagger.embed_chapters(&m4b_path, &initial_chapters, None).unwrap();
+        tagger.embed_chapters(&m4b_path, &initial_chapters).unwrap();
 
         // Verify initial chapters
         let tag = mp4ameta::Tag::read_from_path(&m4b_path).unwrap();
@@ -1006,7 +1001,7 @@ mod tests {
             Chapter::new("New Chapter 1", Duration::ZERO, Duration::from_secs(5)),
             Chapter::new("New Chapter 2", Duration::from_secs(5), Duration::from_secs(5)),
         ];
-        tagger.embed_chapters(&m4b_path, &new_chapters, None).unwrap();
+        tagger.embed_chapters(&m4b_path, &new_chapters).unwrap();
 
         // Verify chapters were replaced
         let tag = mp4ameta::Tag::read_from_path(&m4b_path).unwrap();
@@ -1028,7 +1023,7 @@ mod tests {
         ];
 
         let tagger = Tagger::new();
-        let result = tagger.embed_chapters(&m4b_path, &chapters, None);
+        let result = tagger.embed_chapters(&m4b_path, &chapters);
         assert!(result.is_ok());
 
         // Verify chapters were sorted
@@ -1044,7 +1039,7 @@ mod tests {
         let tagger = Tagger::new();
         let chapters = vec![Chapter::new("Ch1", Duration::ZERO, Duration::from_secs(60))];
 
-        let result = tagger.embed_chapters("/nonexistent/path/file.m4b", &chapters, None);
+        let result = tagger.embed_chapters("/nonexistent/path/file.m4b", &chapters);
         assert!(matches!(result, Err(TaggingError::FileNotFound(_))));
     }
 
@@ -1059,7 +1054,7 @@ mod tests {
         ];
 
         let tagger = Tagger::new();
-        let result = tagger.embed_chapters(&m4b_path, &chapters, None);
+        let result = tagger.embed_chapters(&m4b_path, &chapters);
         assert!(matches!(result, Err(TaggingError::DuplicateChapterTimes)));
     }
 }

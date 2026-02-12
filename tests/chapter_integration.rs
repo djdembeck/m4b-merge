@@ -61,9 +61,7 @@ fn test_chapter_embed_and_read_roundtrip() {
 
     // Embed chapters using Tagger
     let tagger = m4b_merge::tagging::Tagger::new();
-    tagger
-        .embed_chapters(&m4b_path, &chapters, Some(Duration::from_secs(10)))
-        .expect("Failed to embed chapters");
+    tagger.embed_chapters(&m4b_path, &chapters).expect("Failed to embed chapters");
 
     // Read back chapters using the chapters module
     let read_chapters =
@@ -107,7 +105,7 @@ fn test_chapter_embed_empty_chapters() {
     // Embed empty chapters (should succeed without error)
     let tagger = m4b_merge::tagging::Tagger::new();
     let empty_chapters: Vec<m4b_merge::metadata::Chapter> = vec![];
-    let result = tagger.embed_chapters(&m4b_path, &empty_chapters, None);
+    let result = tagger.embed_chapters(&m4b_path, &empty_chapters);
 
     assert!(result.is_ok(), "Embedding empty chapters should succeed");
 }
@@ -133,9 +131,7 @@ fn test_chapter_embed_single_chapter() {
     )];
 
     let tagger = m4b_merge::tagging::Tagger::new();
-    tagger
-        .embed_chapters(&m4b_path, &chapters, Some(Duration::from_secs(10)))
-        .expect("Failed to embed single chapter");
+    tagger.embed_chapters(&m4b_path, &chapters).expect("Failed to embed single chapter");
 
     // Read back and verify
     let read_chapters =
@@ -180,9 +176,7 @@ fn test_chapter_embed_multiple_chapters() {
     ];
 
     let tagger = m4b_merge::tagging::Tagger::new();
-    tagger
-        .embed_chapters(&m4b_path, &chapters, Some(Duration::from_secs(60)))
-        .expect("Failed to embed chapters");
+    tagger.embed_chapters(&m4b_path, &chapters).expect("Failed to embed chapters");
 
     // Read back and verify
     let read_chapters =
@@ -233,9 +227,7 @@ fn test_chapter_embed_replaces_existing() {
             Duration::from_secs(5),
         ),
     ];
-    tagger
-        .embed_chapters(&m4b_path, &initial_chapters, Some(Duration::from_secs(10)))
-        .expect("Failed to embed initial chapters");
+    tagger.embed_chapters(&m4b_path, &initial_chapters).expect("Failed to embed initial chapters");
 
     // Verify initial chapters
     let read_chapters =
@@ -256,9 +248,7 @@ fn test_chapter_embed_replaces_existing() {
             Duration::from_secs(4),
         ),
     ];
-    tagger
-        .embed_chapters(&m4b_path, &new_chapters, Some(Duration::from_secs(10)))
-        .expect("Failed to embed new chapters");
+    tagger.embed_chapters(&m4b_path, &new_chapters).expect("Failed to embed new chapters");
 
     // Verify chapters were replaced
     let read_chapters =
