@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [Unreleased]
+
+### Added
+- Chapter embedding into M4B files using native mp4ameta library
+- Chapters are now embedded directly into the M4B container, not just written to chapters.txt
+- Full chapter metadata round-trip: extraction from source → embedding in output
+
 ### [0.5.3](https://github.com/djdembeck/m4b-merge/compare/v0.5.2...v0.5.3) (2024-08-07)
 
 ### Bug Fixes

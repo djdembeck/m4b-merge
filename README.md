@@ -8,6 +8,7 @@ A blazing fast CLI tool for merging audiobook files into sorted, tagged M4B file
 - **Smart merging** — Preserves original bitrate and sample rate
 - **Metadata fetching** — Automatic metadata lookup from [Audnexus](https://github.com/laxamentumtech/audnexus) via ASIN
 - **Chapter preservation** — Maintains chapter markers from source M4B files
+- **Chapter embedding** — Embeds chapters directly into output M4B files
 - **Cover art** — Embeds high-resolution (2000x2000+) cover art
 - **Customizable output** — Configurable path templates
 - **Dry-run mode** — Preview operations without making changes
