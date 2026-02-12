@@ -108,9 +108,16 @@ pub struct FileMetadata {
 
 impl From<AudioMetadata> for FileMetadata {
     fn from(metadata: AudioMetadata) -> Self {
+        let bitrate_val = metadata.bitrate.unwrap_or(0);
         Self {
             duration: metadata.duration.unwrap_or_default(),
-            bitrate: metadata.bitrate.unwrap_or(0).try_into().unwrap_or(u32::MAX),
+            bitrate: match bitrate_val.try_into() {
+                Ok(v) => v,
+                Err(_) => {
+                    warn!("Bitrate {} exceeds u32::MAX, clamping to u32::MAX", bitrate_val);
+                    u32::MAX
+                }
+            },
             sample_rate: metadata.sample_rate.unwrap_or(0),
             channels: metadata.channels.unwrap_or(0) as u8,
             codec: metadata.codec.unwrap_or_default(),
@@ -261,14 +268,19 @@ fn has_multi_disc_subdirs(dir: &Path) -> bool {
 fn collect_files_from_dir(dir: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
-    for entry in walkdir::WalkDir::new(dir)
-        .max_depth(if recursive { usize::MAX } else { 1 })
-        .into_iter()
-        .filter_map(|e| e.ok())
+    for entry in
+        walkdir::WalkDir::new(dir).max_depth(if recursive { usize::MAX } else { 1 }).into_iter()
     {
-        let path = entry.path();
-        if path.is_file() && AudioFormat::from_path(path).is_some() {
-            files.push(path.to_path_buf());
+        match entry {
+            Ok(entry) => {
+                let path = entry.path();
+                if path.is_file() && AudioFormat::from_path(path).is_some() {
+                    files.push(path.to_path_buf());
+                }
+            }
+            Err(err) => {
+                warn!("WalkDir error: {}", err);
+            }
         }
     }
 

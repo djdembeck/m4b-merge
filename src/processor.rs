@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 use crate::api::audible::{AudibleClient, AudibleError};
 use crate::audio::ffmpeg::FFmpeg;
 use crate::config::Config;
-use crate::discovery::{discover_and_group, AudioFile, AudioGroup, DiscoveryError};
+use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
 use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
 use crate::tagging::{Tagger, TaggingError};
@@ -479,41 +479,41 @@ impl Processor {
     fn format_path(&self, template: &str, metadata: &BookMetadata) -> String {
         let mut result = template.to_string();
 
-        // Replace {author} with first author
-        let author = metadata.authors.first().map(|s| s.as_str()).unwrap_or("Unknown");
+        // Replace {author} with first author (trimmed)
+        let author = metadata.authors.first().map(|s| s.trim()).unwrap_or("Unknown");
         result = result.replace("{author}", author);
 
-        // Replace {narrator} with first narrator
-        let narrator = metadata.narrators.first().map(|s| s.as_str()).unwrap_or("Unknown");
+        // Replace {narrator} with first narrator (trimmed)
+        let narrator = metadata.narrators.first().map(|s| s.trim()).unwrap_or("Unknown");
         result = result.replace("{narrator}", narrator);
 
-        // Replace {title}
-        result = result.replace("{title}", &metadata.title);
+        // Replace {title} (trimmed)
+        result = result.replace("{title}", metadata.title.trim());
 
-        // Replace {subtitle} or remove if none
+        // Replace {subtitle} or remove if none (trimmed)
         if let Some(subtitle) = &metadata.subtitle {
-            result = result.replace("{subtitle}", subtitle);
+            result = result.replace("{subtitle}", subtitle.trim());
         } else {
             result = result.replace("{subtitle}", "");
         }
 
-        // Replace {series_name} or remove if none
+        // Replace {series_name} or remove if none (trimmed)
         if let Some(series) = &metadata.series_name {
-            result = result.replace("{series_name}", series);
+            result = result.replace("{series_name}", series.trim());
         } else {
             result = result.replace("{series_name}", "");
         }
 
-        // Replace {series_position} or remove if none
+        // Replace {series_position} or remove if none (trimmed)
         if let Some(pos) = &metadata.series_position {
-            result = result.replace("{series_position}", pos);
+            result = result.replace("{series_position}", pos.trim());
         } else {
             result = result.replace("{series_position}", "");
         }
 
-        // Replace {year} or remove if none
+        // Replace {year} or remove if none (trimmed)
         if let Some(year) = metadata.year {
-            result = result.replace("{year}", &year.to_string());
+            result = result.replace("{year}", year.to_string().trim());
         } else {
             result = result.replace("{year}", "");
         }
