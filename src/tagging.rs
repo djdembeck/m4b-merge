@@ -31,20 +31,15 @@ pub enum TaggingError {
 pub type Result<T> = std::result::Result<T, TaggingError>;
 
 /// Behavior when destination file already exists
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OverwriteBehavior {
     /// Skip the file, don't overwrite
     Skip,
     /// Return an error
+    #[default]
     Error,
     /// Overwrite the existing file
     Force,
-}
-
-impl Default for OverwriteBehavior {
-    fn default() -> Self {
-        Self::Error
-    }
 }
 
 /// Handles metadata tagging and file operations for audiobooks
@@ -137,7 +132,7 @@ impl Tagger {
         if !metadata.narrators.is_empty() {
             let narrators = metadata.narrators.join(", ");
             // Use grouping atom for narrator (custom convention)
-            tag.set_grouping(&format!("Narrator: {}", narrators));
+            tag.set_grouping(format!("Narrator: {}", narrators));
         }
 
         // Series information
@@ -149,9 +144,9 @@ impl Tagger {
             // Add to grouping if not already set, otherwise append
             let existing_grouping = tag.grouping().map(|s| s.to_string()).unwrap_or_default();
             if existing_grouping.is_empty() {
-                tag.set_grouping(&format!("Series: {}", series_info));
+                tag.set_grouping(format!("Series: {}", series_info));
             } else {
-                tag.set_grouping(&format!("{} | Series: {}", existing_grouping, series_info));
+                tag.set_grouping(format!("{} | Series: {}", existing_grouping, series_info));
             }
         }
 

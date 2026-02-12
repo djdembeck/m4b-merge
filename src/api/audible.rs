@@ -3,8 +3,8 @@ use std::time::Duration;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use thiserror::Error;
+use tokio_retry::strategy::{jitter, ExponentialBackoff};
 use tokio_retry::Retry;
-use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
 use crate::metadata::{BookMetadata, Chapter};
 

@@ -267,10 +267,8 @@ fn collect_files_from_dir(dir: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-        if path.is_file() {
-            if AudioFormat::from_path(path).is_some() {
-                files.push(path.to_path_buf());
-            }
+        if path.is_file() && AudioFormat::from_path(path).is_some() {
+            files.push(path.to_path_buf());
         }
     }
 
@@ -347,7 +345,7 @@ fn discover_multi_disc_dir(dir: &Path) -> Result<Vec<AudioFile>> {
     let mut all_files: Vec<(Option<u32>, AudioFile)> = Vec::new();
 
     // Read directory entries
-    let entries = std::fs::read_dir(dir).map_err(|e| DiscoveryError::IoError(e))?;
+    let entries = std::fs::read_dir(dir).map_err(DiscoveryError::IoError)?;
 
     for entry in entries.flatten() {
         let path = entry.path();

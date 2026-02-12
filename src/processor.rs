@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 use crate::api::audible::{AudibleClient, AudibleError};
 use crate::audio::ffmpeg::FFmpeg;
 use crate::config::Config;
-use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
+use crate::discovery::{discover_and_group, AudioFile, AudioGroup, DiscoveryError};
 use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
 use crate::tagging::{Tagger, TaggingError};
@@ -283,7 +283,7 @@ impl Processor {
 
         // Stage 2: API Lookup (optional - only if ASIN is provided or can be inferred)
         let metadata = if let Some(ref client) = self.api_client {
-            let extracted_asin = self.extract_asin(&group);
+            let extracted_asin = self.extract_asin(group);
 
             let asin = self.config.asin.as_deref().or(extracted_asin.as_deref());
 
@@ -455,7 +455,7 @@ impl Processor {
         // Split by '/' to create subdirectories and sanitize each component
         let path_components: Vec<String> = formatted_path
             .split('/')
-            .map(|s| sanitize_filename::sanitize(s))
+            .map(sanitize_filename::sanitize)
             .filter(|s| !s.is_empty())
             .collect();
 

@@ -27,7 +27,7 @@ pub fn read_chapters(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::error::Er
 /// Read chapters using ffprobe
 fn read_chapters_ffprobe(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
     let output = Command::new("ffprobe")
-        .args(&["-v", "quiet", "-print_format", "json", "-show_chapters"])
+        .args(["-v", "quiet", "-print_format", "json", "-show_chapters"])
         .arg(path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -221,8 +221,7 @@ fn parse_chpl_atom(
     content_len: u32,
 ) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
     let mut chapters = Vec::new();
-    let mut buffer = Vec::new();
-    buffer.resize(content_len as usize, 0);
+    let mut buffer = vec![0; content_len as usize];
     file.read_exact(&mut buffer)?;
 
     let mut offset = 0;

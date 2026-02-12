@@ -60,7 +60,11 @@ impl MergeMode {
     pub fn from_files(files: &[AudioFile]) -> Self {
         let all_m4 = files.iter().all(|f| matches!(f.format, AudioFormat::M4A | AudioFormat::M4B));
 
-        if all_m4 { MergeMode::Copy } else { MergeMode::Transcode }
+        if all_m4 {
+            MergeMode::Copy
+        } else {
+            MergeMode::Transcode
+        }
     }
 
     /// Get FFmpeg codec arguments for this mode
@@ -323,10 +327,8 @@ impl Merger {
         let temp_path = temp_file.into_temp_path();
 
         // Execute merge and pass temp_path for cleanup
-        let result = self.execute_merge(job, &temp_path, target_bitrate, progress_handler);
-
+        self.execute_merge(job, &temp_path, target_bitrate, progress_handler)
         // temp_path is dropped here, triggering NamedTempFile cleanup
-        result
     }
 
     /// Create a temporary concat file list for FFmpeg
@@ -336,12 +338,10 @@ impl Merger {
 
         // Use FFmpeg's helper to create the concat content
         let paths: Vec<&Path> = files.iter().map(|f| f.path.as_ref()).collect();
-        let content =
-            self.ffmpeg.create_concat_file_list(&paths).map_err(|e| MergeError::FFmpeg(e))?;
+        let content = self.ffmpeg.create_concat_file_list(&paths).map_err(MergeError::FFmpeg)?;
 
         // Write to temp file
-        std::io::Write::write_all(&mut temp_file, content.as_bytes())
-            .map_err(|e| MergeError::Io(e))?;
+        std::io::Write::write_all(&mut temp_file, content.as_bytes()).map_err(MergeError::Io)?;
 
         debug!("Created concat file list with {} entries", files.len());
 

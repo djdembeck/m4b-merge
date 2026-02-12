@@ -138,19 +138,18 @@ impl FFmpegVersion {
             if trimmed.starts_with("lib") && trimmed.contains(" / ") {
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 // Find the position of "/" separator
-                if let Some(sep_pos) = parts.iter().position(|&p| p == "/")
-                    && sep_pos >= 2
-                    && parts.len() > sep_pos + 1
-                {
-                    // Join version parts before "/"
-                    let current_version = parts[1..sep_pos].join(" ");
-                    // Join version parts after "/"
-                    let compiled_version = parts[sep_pos + 1..].join(" ");
-                    libraries.push(LibraryVersion {
-                        name: parts[0].to_string(),
-                        current_version,
-                        compiled_version,
-                    });
+                if let Some(sep_pos) = parts.iter().position(|&p| p == "/") {
+                    if sep_pos >= 2 && parts.len() > sep_pos + 1 {
+                        // Join version parts before "/"
+                        let current_version = parts[1..sep_pos].join(" ");
+                        // Join version parts after "/"
+                        let compiled_version = parts[sep_pos + 1..].join(" ");
+                        libraries.push(LibraryVersion {
+                            name: parts[0].to_string(),
+                            current_version,
+                            compiled_version,
+                        });
+                    }
                 }
             }
         }
@@ -238,11 +237,11 @@ impl FFmpeg {
     /// Discover FFmpeg binaries in PATH or common locations
     pub fn discover() -> Result<Self> {
         // Try to find ffmpeg in PATH first
-        if let Ok(ffmpeg_path) = Self::find_in_path("ffmpeg")
-            && let Ok(ffprobe_path) = Self::find_in_path("ffprobe")
-        {
-            info!("Found FFmpeg in PATH: {}", ffmpeg_path.display());
-            return Ok(Self { ffmpeg_path, ffprobe_path, version: None });
+        if let Ok(ffmpeg_path) = Self::find_in_path("ffmpeg") {
+            if let Ok(ffprobe_path) = Self::find_in_path("ffprobe") {
+                info!("Found FFmpeg in PATH: {}", ffmpeg_path.display());
+                return Ok(Self { ffmpeg_path, ffprobe_path, version: None });
+            }
         }
 
         // Try common installation locations
@@ -375,16 +374,16 @@ impl FFmpeg {
             metadata.format_long_name = format.format_long_name;
             metadata.tags = format.tags;
 
-            if let Some(duration_str) = format.duration
-                && let Ok(secs) = duration_str.parse::<f64>()
-            {
-                metadata.duration = Some(Duration::from_secs_f64(secs));
+            if let Some(duration_str) = format.duration {
+                if let Ok(secs) = duration_str.parse::<f64>() {
+                    metadata.duration = Some(Duration::from_secs_f64(secs));
+                }
             }
 
-            if let Some(bitrate_str) = format.bit_rate
-                && let Ok(bitrate) = bitrate_str.parse::<u64>()
-            {
-                metadata.bitrate = Some(bitrate);
+            if let Some(bitrate_str) = format.bit_rate {
+                if let Ok(bitrate) = bitrate_str.parse::<u64>() {
+                    metadata.bitrate = Some(bitrate);
+                }
             }
         }
 
@@ -395,26 +394,28 @@ impl FFmpeg {
                     metadata.codec = stream.codec_name;
                     metadata.channels = stream.channels;
 
-                    if let Some(sample_rate) = stream.sample_rate
-                        && let Ok(rate) = sample_rate.parse::<u32>()
-                    {
-                        metadata.sample_rate = Some(rate);
+                    if let Some(sample_rate) = stream.sample_rate {
+                        if let Ok(rate) = sample_rate.parse::<u32>() {
+                            metadata.sample_rate = Some(rate);
+                        }
                     }
 
                     // Use stream duration if format duration wasn't available
-                    if metadata.duration.is_none()
-                        && let Some(duration_str) = stream.duration
-                        && let Ok(secs) = duration_str.parse::<f64>()
-                    {
-                        metadata.duration = Some(Duration::from_secs_f64(secs));
+                    if metadata.duration.is_none() {
+                        if let Some(duration_str) = stream.duration {
+                            if let Ok(secs) = duration_str.parse::<f64>() {
+                                metadata.duration = Some(Duration::from_secs_f64(secs));
+                            }
+                        }
                     }
 
                     // Use stream bitrate if format bitrate wasn't available
-                    if metadata.bitrate.is_none()
-                        && let Some(bitrate_str) = stream.bit_rate
-                        && let Ok(bitrate) = bitrate_str.parse::<u64>()
-                    {
-                        metadata.bitrate = Some(bitrate);
+                    if metadata.bitrate.is_none() {
+                        if let Some(bitrate_str) = stream.bit_rate {
+                            if let Ok(bitrate) = bitrate_str.parse::<u64>() {
+                                metadata.bitrate = Some(bitrate);
+                            }
+                        }
                     }
 
                     break; // Only use first audio stream
@@ -475,31 +476,33 @@ impl FFmpeg {
             trace!("FFmpeg stderr: {}", line);
 
             if line.contains("silence_start:") {
-                if let Some(start_str) = line.split("silence_start:").nth(1)
-                    && let Ok(start) = start_str.trim().parse::<f64>()
-                {
-                    current_start = Some(start);
+                if let Some(start_str) = line.split("silence_start:").nth(1) {
+                    if let Ok(start) = start_str.trim().parse::<f64>() {
+                        current_start = Some(start);
+                    }
                 }
             } else if line.contains("silence_end:") {
                 #[allow(clippy::collapsible_if)]
-                if let Some(start) = current_start.take()
-                    && let Some(end_str) = line.split("silence_end:").nth(1)
-                    && let Some(end_part) = end_str.split('|').next()
-                    && let Ok(end) = end_part.trim().parse::<f64>()
-                {
-                    silence_periods.push(TimeRange::new(start, end));
+                if let Some(start) = current_start.take() {
+                    if let Some(end_str) = line.split("silence_end:").nth(1) {
+                        if let Some(end_part) = end_str.split('|').next() {
+                            if let Ok(end) = end_part.trim().parse::<f64>() {
+                                silence_periods.push(TimeRange::new(start, end));
+                            }
+                        }
+                    }
                 }
             }
         }
 
         // Capture trailing silence if there's a silence_start without a matching silence_end
-        if let Some(start) = current_start
-            && let Ok(duration) = self.get_duration(path)
-        {
-            let end = duration.as_secs_f64();
-            if end > start {
-                silence_periods.push(TimeRange::new(start, end));
-                info!("Captured trailing silence from {:.2}s to {:.2}s", start, end);
+        if let Some(start) = current_start {
+            if let Ok(duration) = self.get_duration(path) {
+                let end = duration.as_secs_f64();
+                if end > start {
+                    silence_periods.push(TimeRange::new(start, end));
+                    info!("Captured trailing silence from {:.2}s to {:.2}s", start, end);
+                }
             }
         }
 
