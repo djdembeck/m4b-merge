@@ -60,11 +60,7 @@ impl MergeMode {
     pub fn from_files(files: &[AudioFile]) -> Self {
         let all_m4 = files.iter().all(|f| matches!(f.format, AudioFormat::M4A | AudioFormat::M4B));
 
-        if all_m4 {
-            MergeMode::Copy
-        } else {
-            MergeMode::Transcode
-        }
+        if all_m4 { MergeMode::Copy } else { MergeMode::Transcode }
     }
 
     /// Get FFmpeg codec arguments for this mode
