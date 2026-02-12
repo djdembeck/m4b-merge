@@ -74,7 +74,7 @@ fn convert_chapters_for_embedding(
 ///
 /// Sorts chapters by start_time and checks for duplicate start times.
 /// Returns an error if duplicates are found.
-fn validate_and_sort_chapters(chapters: &mut Vec<crate::metadata::Chapter>) -> Result<()> {
+fn validate_and_sort_chapters(chapters: &mut [crate::metadata::Chapter]) -> Result<()> {
     if chapters.is_empty() {
         return Ok(());
     }

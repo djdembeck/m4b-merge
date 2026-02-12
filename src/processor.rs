@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 use crate::api::audible::{AudibleClient, AudibleError};
 use crate::audio::ffmpeg::FFmpeg;
 use crate::config::Config;
-use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
+use crate::discovery::{discover_and_group, AudioFile, AudioGroup, DiscoveryError};
 use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
 use crate::tagging::{Tagger, TaggingError};
