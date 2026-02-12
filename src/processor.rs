@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 use crate::api::audible::{AudibleClient, AudibleError};
 use crate::audio::ffmpeg::FFmpeg;
 use crate::config::Config;
-use crate::discovery::{discover_and_group, AudioFile, AudioGroup, DiscoveryError};
+use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
 use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
 use crate::tagging::{Tagger, TaggingError};
@@ -376,6 +376,18 @@ impl Processor {
                 if let Some(ref cover_url) = metadata.cover_url {
                     if let Err(e) = self.tagger.embed_cover(&merged_path, cover_url).await {
                         warn!("Failed to embed cover art: {}", e);
+                    }
+                }
+
+                // Embed chapters into M4B file
+                if !metadata.chapters.is_empty() {
+                    let total_duration = metadata.total_duration();
+                    if let Err(e) =
+                        self.tagger.embed_chapters(&merged_path, &metadata.chapters, total_duration)
+                    {
+                        warn!("Failed to embed chapters: {}", e);
+                    } else {
+                        info!("Successfully embedded {} chapters", metadata.chapters.len());
                     }
                 }
 
