@@ -429,7 +429,7 @@ pub fn group_files_by_directory(files: Vec<AudioFile>) -> Vec<AudioGroup> {
         groups.entry(key).or_default().push(file);
     }
 
-    groups
+    let mut result: Vec<AudioGroup> = groups
         .into_iter()
         .map(|(dir, files)| {
             let name = dir
@@ -438,7 +438,12 @@ pub fn group_files_by_directory(files: Vec<AudioFile>) -> Vec<AudioGroup> {
                 .unwrap_or_else(|| "Unknown".to_string());
             AudioGroup::new(name, files)
         })
-        .collect()
+        .collect();
+
+    // Sort by disc_number (None comes after Some), then by name for deterministic ordering
+    result.sort_by(|a, b| a.disc_number.cmp(&b.disc_number).then_with(|| a.name.cmp(&b.name)));
+
+    result
 }
 
 /// Main discovery function: discover audio files from multiple input paths
@@ -482,14 +487,6 @@ pub fn discover_and_group(paths: &[PathBuf]) -> Result<Vec<AudioGroup>> {
     for group in &mut groups {
         group.sort_naturally();
     }
-
-    // Sort groups by disc number if present
-    groups.sort_by(|a, b| match (a.disc_number, b.disc_number) {
-        (Some(n1), Some(n2)) => n1.cmp(&n2),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
 
     Ok(groups)
 }
