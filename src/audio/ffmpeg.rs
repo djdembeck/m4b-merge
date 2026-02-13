@@ -202,6 +202,16 @@ pub struct FFmpeg {
     version: Option<FFmpegVersion>,
 }
 
+pub trait MetadataProvider: std::fmt::Debug + Send + Sync {
+    fn get_metadata(&self, path: &Path) -> Result<AudioMetadata>;
+}
+
+impl MetadataProvider for FFmpeg {
+    fn get_metadata(&self, path: &Path) -> Result<AudioMetadata> {
+        self.get_metadata_impl(path)
+    }
+}
+
 impl FFmpeg {
     /// Common paths where FFmpeg might be installed
     #[cfg(windows)]
@@ -361,14 +371,12 @@ impl FFmpeg {
         Ok(json)
     }
 
-    /// Get audio metadata from a file
-    pub fn get_metadata(&self, path: &Path) -> Result<AudioMetadata> {
+    pub fn get_metadata_impl(&self, path: &Path) -> Result<AudioMetadata> {
         let probe = self.probe(path)?;
         let ffprobe: FFprobeOutput = serde_json::from_value(probe)?;
 
         let mut metadata = AudioMetadata::default();
 
-        // Extract format-level info
         if let Some(format) = ffprobe.format {
             metadata.format_name = format.format_name;
             metadata.format_long_name = format.format_long_name;
@@ -387,7 +395,6 @@ impl FFmpeg {
             }
         }
 
-        // Extract audio stream info
         if let Some(streams) = ffprobe.streams {
             for stream in streams {
                 if stream.codec_type == "audio" {
@@ -400,7 +407,6 @@ impl FFmpeg {
                         }
                     }
 
-                    // Use stream duration if format duration wasn't available
                     if metadata.duration.is_none() {
                         if let Some(duration_str) = stream.duration {
                             if let Ok(secs) = duration_str.parse::<f64>() {
@@ -409,7 +415,6 @@ impl FFmpeg {
                         }
                     }
 
-                    // Use stream bitrate if format bitrate wasn't available
                     if metadata.bitrate.is_none() {
                         if let Some(bitrate_str) = stream.bit_rate {
                             if let Ok(bitrate) = bitrate_str.parse::<u64>() {
@@ -418,12 +423,16 @@ impl FFmpeg {
                         }
                     }
 
-                    break; // Only use first audio stream
+                    break;
                 }
             }
         }
 
         Ok(metadata)
+    }
+
+    pub fn get_metadata(&self, path: &Path) -> Result<AudioMetadata> {
+        self.get_metadata_impl(path)
     }
 
     /// Get duration of an audio file

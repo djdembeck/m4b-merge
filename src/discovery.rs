@@ -1,4 +1,4 @@
-use crate::audio::{AudioMetadata, FFmpeg, FFmpegError};
+use crate::audio::{AudioMetadata, FFmpegError, MetadataProvider};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -171,9 +171,8 @@ impl AudioFile {
         Ok(Self { path, format, metadata: None })
     }
 
-    /// Probe and populate metadata using FFmpeg
-    pub fn probe_metadata(&mut self, ffmpeg: &FFmpeg) -> Result<()> {
-        let audio_metadata = ffmpeg.get_metadata(&self.path)?;
+    pub fn probe_metadata(&mut self, provider: &dyn MetadataProvider) -> Result<()> {
+        let audio_metadata = provider.get_metadata(&self.path)?;
         self.metadata = Some(FileMetadata::from(audio_metadata));
         Ok(())
     }
@@ -497,12 +496,14 @@ pub fn discover_and_group(paths: &[PathBuf]) -> Result<Vec<AudioGroup>> {
     Ok(groups)
 }
 
-/// Discover files and probe metadata for each
-pub fn discover_with_metadata(paths: &[PathBuf], ffmpeg: &FFmpeg) -> Result<Vec<AudioFile>> {
+pub fn discover_with_metadata(
+    paths: &[PathBuf],
+    provider: &dyn MetadataProvider,
+) -> Result<Vec<AudioFile>> {
     let mut files = discover_files(paths)?;
 
     for file in &mut files {
-        if let Err(e) = file.probe_metadata(ffmpeg) {
+        if let Err(e) = file.probe_metadata(provider) {
             warn!("Failed to probe metadata for {}: {}", file.path.display(), e);
         }
     }
@@ -847,5 +848,78 @@ mod tests {
         assert_eq!(file_metadata.sample_rate, 44100);
         assert_eq!(file_metadata.channels, 2);
         assert_eq!(file_metadata.codec, "aac");
+    }
+
+    use crate::audio::MetadataProvider;
+
+    #[derive(Debug)]
+    struct MockMetadataProvider {
+        failing_paths: Vec<PathBuf>,
+    }
+
+    impl MockMetadataProvider {
+        fn new_with_failures(failing_paths: Vec<PathBuf>) -> Self {
+            Self { failing_paths }
+        }
+    }
+
+    impl MetadataProvider for MockMetadataProvider {
+        fn get_metadata(&self, path: &Path) -> crate::audio::Result<AudioMetadata> {
+            if self.failing_paths.iter().any(|p| p == path) {
+                return Err(crate::audio::FFmpegError::ParseError(format!(
+                    "Mock probe failed for {}",
+                    path.display()
+                )));
+            }
+
+            Ok(AudioMetadata {
+                duration: Some(Duration::from_secs(300)),
+                bitrate: Some(128000),
+                sample_rate: Some(44100),
+                channels: Some(2),
+                codec: Some("aac".to_string()),
+                format_name: Some("m4a".to_string()),
+                format_long_name: Some("MP4/M4A".to_string()),
+                tags: None,
+            })
+        }
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn test_discover_with_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let _file1_path = create_test_file(&temp_dir, "01.mp3", b"content1");
+        let file2_path = create_test_file(&temp_dir, "02.mp3", b"content2");
+        let _file3_path = create_test_file(&temp_dir, "03.mp3", b"content3");
+
+        let mock = MockMetadataProvider::new_with_failures(vec![file2_path.clone()]);
+
+        let result = discover_with_metadata(&[temp_dir.path().to_path_buf()], &mock);
+        assert!(result.is_ok());
+
+        let files = result.unwrap();
+        assert_eq!(files.len(), 3, "Should return all 3 files even when one probe fails");
+
+        let file_names: Vec<_> = files.iter().map(|f| f.filename()).collect();
+        assert!(file_names.contains(&"01.mp3".to_string()));
+        assert!(file_names.contains(&"02.mp3".to_string()));
+        assert!(file_names.contains(&"03.mp3".to_string()));
+
+        let file_with_metadata = files.iter().find(|f| f.filename() == "01.mp3").unwrap();
+        assert!(
+            file_with_metadata.metadata.is_some(),
+            "File with successful probe should have metadata"
+        );
+
+        let file_without_metadata = files.iter().find(|f| f.filename() == "02.mp3").unwrap();
+        assert!(
+            file_without_metadata.metadata.is_none(),
+            "File with failed probe should not have metadata"
+        );
+
+        assert!(logs_contain("Failed to probe metadata"), "Should warn about failed probe");
+        assert!(logs_contain("02.mp3"), "Warning should mention the failing file");
     }
 }
