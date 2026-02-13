@@ -64,6 +64,7 @@ impl MergeMode {
     }
 
     /// Get FFmpeg codec arguments for this mode
+    #[allow(dead_code)]
     fn codec_args(&self, target_bitrate: Option<u32>) -> Vec<String> {
         match self {
             MergeMode::Copy => vec!["-c".to_string(), "copy".to_string()],
@@ -378,10 +379,25 @@ impl Merger {
         // Add concat demuxer input
         cmd.arg("-f").arg("concat").arg("-safe").arg("0").arg("-i").arg(concat_list_path);
 
-        // Add codec arguments based on mode
-        let codec_args = job.mode.codec_args(target_bitrate);
-        for arg in codec_args {
-            cmd.arg(arg);
+        // For multi-file concat operations, only map audio streams to avoid
+        // MJPEG cover art incompatibility with the concat demuxer.
+        // The tagging phase will handle cover art separately via embed_cover.
+        info!(
+            "Multi-file concat: mapping only audio streams, excluding video/cover art (will be added during tagging)"
+        );
+        cmd.arg("-map").arg("0:a");
+
+        // Build codec arguments based on mode for multi-file concat.
+        // We build these inline rather than using codec_args() to avoid conflicts
+        // with the -map 0:a above (codec_args for Transcode includes -map 0:v? -map 0:a).
+        match job.mode {
+            MergeMode::Copy => {
+                cmd.arg("-c").arg("copy");
+            }
+            MergeMode::Transcode => {
+                let bitrate = target_bitrate.unwrap_or(128);
+                cmd.arg("-c:a").arg("aac").arg("-b:a").arg(format!("{}k", bitrate)).arg("-vn");
+            }
         }
 
         // Add output path (overwrite if exists)
@@ -465,32 +481,53 @@ impl Merger {
     ) -> Result<PathBuf> {
         info!("Copying single file: {} -> {}", file.path.display(), output_path.display());
 
-        let mut cmd = Command::new(self.ffmpeg.ffmpeg_path());
-        cmd.arg("-i").arg(&file.path);
+        // Fast path: Use native file copy for single-file Copy mode (no transcoding needed)
+        if target_bitrate.is_none() {
+            info!("Using native file copy (fast path) for: {}", file.path.display());
 
-        // Add codec arguments based on mode and target bitrate
-        if let Some(bitrate) = target_bitrate {
+            // Ensure output directory exists
+            if let Some(parent) = output_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            // Perform native file copy
+            std::fs::copy(&file.path, output_path).map_err(|e| {
+                MergeError::OperationFailed(format!(
+                    "Native file copy failed for {}: {}",
+                    file.path.display(),
+                    e
+                ))
+            })?;
+
+            info!("Native file copy completed: {}", output_path.display());
+        } else {
+            // FFmpeg path: Required for transcoding mode
+            info!("Using FFmpeg copy (transcode mode) for: {}", file.path.display());
+
+            let mut cmd = Command::new(self.ffmpeg.ffmpeg_path());
+            cmd.arg("-i").arg(&file.path);
+
             // Transcode mode: transcode audio, copy video (cover art)
+            let bitrate = target_bitrate.unwrap_or(128);
             cmd.arg("-c:a")
                 .arg("aac")
                 .arg("-b:a")
                 .arg(format!("{}k", bitrate))
                 .arg("-c:v")
                 .arg("copy");
-        } else {
-            // Copy mode
-            cmd.arg("-c").arg("copy");
-        }
 
-        cmd.arg("-y").arg(output_path);
+            cmd.arg("-y").arg(output_path);
 
-        let output = cmd
-            .output()
-            .map_err(|e| MergeError::OperationFailed(format!("Failed to execute FFmpeg: {}", e)))?;
+            let output = cmd.output().map_err(|e| {
+                MergeError::OperationFailed(format!("Failed to execute FFmpeg: {}", e))
+            })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(MergeError::OperationFailed(format!("FFmpeg failed: {}", stderr)));
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(MergeError::OperationFailed(format!("FFmpeg failed: {}", stderr)));
+            }
+
+            info!("FFmpeg file copy completed: {}", output_path.display());
         }
 
         // Report completion
@@ -503,7 +540,6 @@ impl Merger {
             size: None,
         });
 
-        info!("Single file copy completed: {}", output_path.display());
         Ok(output_path.to_path_buf())
     }
 
