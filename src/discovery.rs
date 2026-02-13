@@ -119,7 +119,16 @@ impl From<AudioMetadata> for FileMetadata {
                 }
             },
             sample_rate: metadata.sample_rate.unwrap_or(0),
-            channels: metadata.channels.unwrap_or(0) as u8,
+            channels: match metadata.channels.unwrap_or(0).try_into() {
+                Ok(v) => v,
+                Err(_) => {
+                    warn!(
+                        "Channels {} exceeds u8::MAX, clamping to 255",
+                        metadata.channels.unwrap_or(0)
+                    );
+                    u8::MAX
+                }
+            },
             codec: metadata.codec.unwrap_or_default(),
         }
     }
@@ -256,10 +265,16 @@ fn has_multi_disc_subdirs(dir: &Path) -> bool {
                         if detect_disc_number(name).is_some() {
                             return true;
                         }
+                    } else {
+                        debug!("Failed to convert entry file_name to str: {:?}", entry.path());
                     }
                 }
+            } else {
+                debug!("Failed to read metadata for entry: {:?}", entry.path());
             }
         }
+    } else {
+        debug!("Failed to read directory: {:?}", dir);
     }
     false
 }

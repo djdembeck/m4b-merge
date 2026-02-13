@@ -103,7 +103,7 @@ docker run --rm \
 
 #### Docker Volume Layout
 
-```
+```text
 /input   # Your source audio files (mp3, m4a, m4b)
 /output  # Merged M4B files go here
 ```
