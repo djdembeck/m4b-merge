@@ -270,12 +270,11 @@ impl FFmpeg {
 
     /// Try to find a binary in PATH
     fn find_in_path(binary: &str) -> std::result::Result<PathBuf, std::io::Error> {
-        #[cfg(windows)]
-        let binary = format!("{}.exe", binary);
+        let binary_arg = if cfg!(windows) { format!("{}.exe", binary) } else { binary.to_string() };
 
         let locator = if cfg!(windows) { "where" } else { "which" };
 
-        let output = Command::new(locator).arg(binary).output()?;
+        let output = Command::new(locator).arg(&binary_arg).output()?;
 
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout);
@@ -726,8 +725,8 @@ mod tests {
         let ffmpeg = create_test_ffmpeg();
         // AAC should be available in any reasonable FFmpeg build
         let has_aac = ffmpeg.has_codec("aac");
-        assert!(has_aac.is_ok());
-        // We can't guarantee it exists, but the function should work
+        let has_aac = has_aac.expect("has_codec returned error");
+        assert!(has_aac, "AAC codec should be present");
     }
 
     #[test]

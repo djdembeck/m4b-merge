@@ -62,22 +62,6 @@ docker run --rm \
   -a B012345678
 ```
 
-#### Named Container (persistent volumes)
-
-```bash
-# Create container with named volumes
-docker create --name m4b-merge \
-  -v /my/audiobooks:/input \
-  -v /my/merged:/output \
-  ghcr.io/djdembeck/m4b-merge:latest
-
-# Start the container
-docker start m4b-merge
-
-# Run commands
-docker exec m4b-merge m4b-merge -i /input/book.mp3 -a B012345678
-```
-
 #### Running as Current User
 
 By default, Docker runs as root. To preserve file ownership:
@@ -144,7 +128,7 @@ m4b-merge -i input_folder/
 m4b-merge -i input/file.mp3 -a B012345678
 
 # Custom Audnexus API endpoint
-m4b-merge -i input/file.mp3 -a B012345678 --api_url https://api.audnex.us
+m4b-merge -i input/file.mp3 -a B012345678 --api-url https://api.audnex.us
 ```
 
 ### Output Options
@@ -157,7 +141,7 @@ m4b-merge -i input/file.mp3 -o /path/to/output
 m4b-merge -i input/file.mp3 -p "{author}/{title} - {series_name} {series_position}"
 
 # Move completed files to directory
-m4b-merge -i input/file.mp3 --completed_directory /path/to/done
+m4b-merge -i input/file.mp3 --completed-directory /path/to/done
 ```
 
 ### Other Options
@@ -167,10 +151,10 @@ m4b-merge -i input/file.mp3 --completed_directory /path/to/done
 m4b-merge -i input/file.mp3 --dry-run
 
 # Use multiple CPUs
-m4b-merge -i input/file.mp3 --num_cpus 4
+m4b-merge -i input/file.mp3 --num-cpus 4
 
 # Verbose logging
-m4b-merge -i input/file.mp3 --log_level debug
+m4b-merge -i input/file.mp3 --log-level debug
 ```
 
 ## Path Format Variables

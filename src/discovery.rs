@@ -394,8 +394,18 @@ fn discover_multi_disc_dir(dir: &Path) -> Result<Vec<AudioFile>> {
         // Collect files from this subdirectory
         let files = collect_files_from_dir(&path, false)?;
         for p in files {
-            if let Ok(file) = AudioFile::new(p) {
-                all_files.push((disc_num, file));
+            let path_clone = p.clone();
+            match AudioFile::new(p) {
+                Ok(file) => {
+                    all_files.push((disc_num, file));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to create AudioFile for {}: {}",
+                        path_clone.display(),
+                        e
+                    );
+                }
             }
         }
     }
