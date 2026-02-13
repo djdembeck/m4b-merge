@@ -604,8 +604,9 @@ impl FFmpeg {
 
         for line in stdout.lines() {
             // Lines look like: " DEA aac                  AAC (Advanced Audio Coding)"
-            // We want lines that start with space and have 'A' (audio) in the type field
-            if line.len() > 8 && line.starts_with(' ') && line.chars().nth(4) == Some('A') {
+            // Position: 0123456
+            // We want lines that start with space and have 'A' (audio) at position 3
+            if line.len() > 8 && line.starts_with(' ') && line.chars().nth(3) == Some('A') {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 {
                     codecs.push(parts[1].to_string());
