@@ -71,6 +71,9 @@ docker create --name m4b-merge \
   -v /my/merged:/output \
   ghcr.io/djdembeck/m4b-merge:latest
 
+# Start the container
+docker start m4b-merge
+
 # Run commands
 docker exec m4b-merge m4b-merge -i /input/book.mp3 -a B012345678
 docker run -v /my/input:/input -v /my/merged:/output ghcr.io/djdembeck/m4b-merge:latest -i /input/book.mp3 -a B012345678
