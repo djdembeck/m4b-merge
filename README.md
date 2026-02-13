@@ -72,8 +72,8 @@ docker create --name m4b-merge \
   ghcr.io/djdembeck/m4b-merge:latest
 
 # Run commands
-docker start m4b-merge -i /input/book.mp3 -a B012345678
-docker start m4b-merge -i /input/*.mp3
+docker exec m4b-merge -i /input/book.mp3 -a B012345678
+docker run --rm -v /input:/input m4b-merge -i /input/book.mp3 -a B012345678
 ```
 
 #### Running as Current User
@@ -168,7 +168,7 @@ m4b-merge -i input/file.mp3 --dry-run
 m4b-merge -i input/file.mp3 --num_cpus 4
 
 # Verbose logging
-m4b-merge -i input/file.mp3 --log-level debug
+m4b-merge -i input/file.mp3 --log_level debug
 ```
 
 ## Path Format Variables

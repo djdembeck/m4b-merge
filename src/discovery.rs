@@ -208,7 +208,7 @@ impl AudioGroup {
         self.files
             .iter()
             .filter_map(|f| f.metadata.as_ref().map(|m| m.duration))
-            .fold(Duration::ZERO, |acc, d| acc + d)
+            .fold(Duration::ZERO, |acc, d| acc.saturating_add(d))
     }
 
     /// Sort files naturally by filename
@@ -374,7 +374,14 @@ fn discover_multi_disc_dir(dir: &Path) -> Result<Vec<AudioFile>> {
     // Read directory entries
     let entries = std::fs::read_dir(dir).map_err(DiscoveryError::IoError)?;
 
-    for entry in entries.flatten() {
+    for entry_res in entries {
+        let entry = match entry_res {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Failed to read directory entry: {}", e);
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -775,7 +782,7 @@ mod tests {
             AudioFile::new(create_test_file(&temp_dir, "2.mp3", b"content")).unwrap(),
         ];
 
-        let mut group = AudioGroup::new("Test".to_string(), files.clone());
+        let mut group = AudioGroup::new("Test".to_string(), files);
         group.sort_naturally();
 
         let sorted: Vec<_> = group.files.iter().map(|f| f.filename()).collect();
