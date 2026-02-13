@@ -27,3 +27,6 @@ tempfile = "=3.13.0"
 walkdir = "2.5"
 natord = "1.0"
 regex = "1.10"
+
+[dev-dependencies]
+tracing-test = "0.2"
