@@ -441,7 +441,13 @@ pub fn group_files_by_directory(files: Vec<AudioFile>) -> Vec<AudioGroup> {
         .collect();
 
     // Sort by disc_number (None comes after Some), then by name for deterministic ordering
-    result.sort_by(|a, b| a.disc_number.cmp(&b.disc_number).then_with(|| a.name.cmp(&b.name)));
+    result.sort_by(|a, b| {
+        (a.disc_number.is_none(), a.disc_number, &a.name).cmp(&(
+            b.disc_number.is_none(),
+            b.disc_number,
+            &b.name,
+        ))
+    });
 
     result
 }
