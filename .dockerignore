@@ -1,0 +1,72 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+
+# Build artifacts
+target/
+
+# Testing
+tests/
+*.test
+*.json
+
+# Documentation
+README.md
+CONTRIBUTING.md
+CHANGELOG.md
+LICENSE
+
+# CI/CD
+.github/
+.github/workflows/
+
+# Docker
+docker/
+!docker/Dockerfile
+!docker/entrypoint.sh
+Dockerfile
+.dockerignore
+
+# Python
+__main__.py
+requirements.txt
+pyproject.toml
+setup.py
+MANIFEST.in
+renovate.json
+
+# Cache
+.pytest_cache/
+.ruff_cache/
+*.pyc
+__pycache__/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Security
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Development
+.sisyphus/
+.opencode/
+.chunkhound/
+
+# Editor
+*.sublime-*
+
+# Temp
+tmp/
+temp/
