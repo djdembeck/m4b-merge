@@ -41,26 +41,9 @@ Every change must improve the codebase. Never introduce regressions, technical d
 2. **Green** — Write the minimal code to make it pass.
 3. **Refactor** — Improve code without changing behavior.
 
-### Test Naming Convention
-
-```rust
-#[test]
-fn given_valid_input_when_processed_then_produces_expected_output() {
-    // GIVEN — Set up test state
-    // WHEN — Trigger the behavior
-    // THEN — Assert expected outcomes
-}
-```
-
 ### Test Requirements
 
-| Code Type | Coverage Required | Notes |
-|-----------|------------------|-------|
-| Pure functions | 100% | Easy to test, no mocks needed |
-| State machines | 100% | All transitions covered |
-| Error handling | 100% | All error variants tested |
-| I/O operations | 80%+ | Mock external dependencies |
-| Public API surfaces | 100% | Contract tests for all entry points |
+Target 100% coverage; 80%+ for I/O.
 
 ---
 
@@ -87,47 +70,7 @@ fn given_valid_input_when_processed_then_produces_expected_output() {
 
 #### Allowed Types
 
-| Type | Description | Version Bump |
-|------|-------------|--------------|
-| `feat` | New feature | Minor |
-| `fix` | Bug fix | Patch |
-| `perf` | Performance improvement | Patch |
-| `refactor` | Code restructuring | None |
-| `test` | Adding/modifying tests | None |
-| `docs` | Documentation changes | None |
-| `chore` | Maintenance tasks | None |
-| `ci` | CI/CD changes | None |
-| `revert` | Reverting a commit | Depends |
-
-#### Examples
-
-```
-feat(audio): add silence detection for chapter markers
-
-The silence detection algorithm now uses RMS with a 20ms window,
-improving detection accuracy by 15% compared to the previous
-amplitude-based approach.
-
-Closes #142
-```
-
-```
-fix(metadata): correct ASIN parsing for multi-disc books
-
-When multiple ASINs were present in a single directory, only the
-first was being used. Now each file is processed independently.
-
-Fixes #287
-```
-
-```
-perf(ffmpeg): reduce memory allocations during transcoding
-
-Pre-allocate buffer for FFmpeg frame processing, eliminating
-15MB/s of heap allocations during large file transcoding.
-
-Related: #198
-```
+Use `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`, `ci`, or `revert`. See [Conventional Commits](https://www.conventionalcommits.org/) for full spec.
 
 ### Pull Request Requirements
 
@@ -140,19 +83,7 @@ Related: #198
 
 #### PR Templates
 
-```markdown
-## Summary
-<!-- What's being changed and why -->
-
-## Testing
-<!-- How was this tested? New tests added? -->
-
-## Checklist
-- [ ] Tests pass
-- [ ] Linting clean
-- [ ] Documentation updated
-- [ ] Breaking changes documented
-```
+Pull request templates belong in `.github/PULL_REQUEST_TEMPLATE.md`.
 
 ---
 
@@ -169,14 +100,7 @@ Related: #198
 
 ### Failing CI Actions
 
-| Check | Action |
-|-------|--------|
-| Compilation error | Block merge |
-| Test failure | Block merge |
-| Coverage drop | Block merge |
-| Clippy warning | Block merge |
-| Format mismatch | Block merge |
-| Audit finding | Block merge + security review |
+All CI failures block merge; audit findings require security review.
 
 ---
 
@@ -213,23 +137,7 @@ Errors should be:
 
 ### Error Message Guidelines
 
-```rust
-// BAD: Unhelpful
-Err("Failed")
-
-// GOOD: Contextual + actionable
-Err(format!(
-    "Failed to parse ASIN from filename '{}': expected format [B0A-Z0-9]{{10}}",
-    filename
-))
-
-// BETTER: With context + remediation
-Err(format!(
-    "Failed to parse ASIN from '{}': expected format [B0-9A-Z]{{10}} (e.g., B0123456789). \
-     Rename file or provide ASIN via metadata.",
-    filename
-))
-```
+Include context and actionable remediation in error messages.
 
 ---
 
@@ -282,46 +190,7 @@ If vulnerabilities found:
 
 ### Code Documentation (Rustdoc)
 
-```rust
-/// Detects silence thresholds in audio streams.
-///
-/// Uses root-mean-square (RMS) analysis with configurable window size
-/// to identify potential chapter boundaries. Windows smaller than 20ms
-/// may produce unreliable results.
-///
-/// # Arguments
-///
-/// * `stream` - The audio stream to analyze
-/// * `threshold_db` - Silence threshold in decibels (default: -60dB)
-///
-/// # Returns
-///
-/// A sorted list of silence positions in milliseconds.
-///
-/// # Errors
-///
-/// Returns `SilenceDetectionError` if stream is corrupted or has
-/// unsupported sample rate.
-///
-/// # Examples
-///
-/// ```
-/// let silence = detect_silence(&stream, -60.0)?;
-/// assert!(silence.is_empty());
-/// ```
-pub fn detect_silence(stream: &AudioStream, threshold_db: f64) -> Result<Vec<u64>, Error>
-```
-
-### Required Documentation
-
-| Element | Required | Location |
-|---------|----------|----------|
-| Public functions | Yes | Above function |
-| Structs | Yes | Above struct |
-| Error types | Yes | Above enum + variants |
-| Modules | Yes | In `mod.rs` |
-| README | Yes | Project root |
-
+Document all public items per [rustdoc conventions](https://doc.rust-lang.org/rustdoc/).
 ---
 
 ## Code Review Principles
@@ -352,25 +221,4 @@ pub fn detect_silence(stream: &AudioStream, threshold_db: f64) -> Result<Vec<u64
 | Global mutable state | Hard to test/debug |
 | Magic numbers | Unclear intent |
 | Deep nesting (>3 levels) | Hard to read |
-| Copy-paste code | Duplication bugs |
-
 ---
-
-## References
-
-- [Conventional Commits](https://www.conventionalcommits.org/)
-- [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
-- [Google Engineering Practices](https://google.github.io/eng-practices/)
-- [Test-Driven Development in Rust](https://rafohner.medium.com/test-driven-development-in-rust-2o9o9s9e2c0a)
-
----
-
-## Change Log
-
-| Version | Date | Description |
-|---------|------|-------------|
-| 1.0.0 | 2025-02-09 | Initial documentation |
-
----
-
-*Last updated: 2025-02-09*
