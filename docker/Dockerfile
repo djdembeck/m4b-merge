@@ -26,9 +26,9 @@ RUN echo "---- INSTALL RUNTIME PACKAGES ----" && \
     && echo "date.timezone = UTC" >> /etc/php8/php.ini \
     && ln -s /usr/bin/php8 /bin/php
 
-# Add gosu for easy step-down from root
-RUN apk add --no-cache --update --upgrade --repository=http://dl-cdn.alpinelinux.org/alpine/edge/testing \
-    gosu
+# Add su-exec for easy step-down from root (gosu deprecated in Alpine 3.15+)
+RUN apk add --no-cache --update --upgrade \
+    su-exec
 
 # Add ffmpeg, tone, mp4v2 and fdkaac
 COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/
@@ -51,6 +51,12 @@ RUN echo "---- INSTALL M4B-TOOL ----" \
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
+# Copy Python package files (renamed to bypass .dockerignore)
+COPY requirements-docker.txt /src/requirements.txt
+COPY setup-docker.py /src/setup.py
+COPY pyproject-docker.toml /src/pyproject.toml
+COPY README-docker.md /src/README.md
+COPY docker-alt/entrypoint.sh /src/docker/entrypoint.sh
 COPY . /src
 
 # run this command to install all dependencies

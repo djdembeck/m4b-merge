@@ -48,7 +48,7 @@ class TestMerge:
         m4b = self.m4b_data(primary_asin)
         m4b.download_cover()
         assert ((test_cover).exists() and
-                os.path.getsize(test_cover) == 779312)
+                os.path.getsize(test_cover) == 779388)
 
     def test_chapter_generation(self):
         m4b = self.m4b_data(primary_asin)

@@ -75,7 +75,6 @@ docs/_build/
 
 # PyBuilder
 .pybuilder/
-target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -139,3 +138,11 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 .python-version
+
+.opencode
+.chunkhound/
+
+# Added by cargo
+
+/target
+.sisyphus/
