@@ -70,8 +70,8 @@ fn read_chapters_ffprobe(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::error
             // Convert from seconds to milliseconds
             chapters.push(Chapter {
                 title,
-                start_time: (start_time * 1000.0) as u64,
-                duration: (duration * 1000.0) as u64,
+                start_time: (start_time * 1000.0).round() as u64,
+                duration: (duration * 1000.0).round() as u64,
             });
         }
 
@@ -107,11 +107,11 @@ fn read_chapters_from_atom(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::err
         let atom_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
         let atom_ident = std::str::from_utf8(&buffer[4..8]).unwrap_or("");
 
-        if atom_ident == "moov" {
+        if atom_len < 8 {
+            break;
+        } else if atom_ident == "moov" {
             let moov_end = file.stream_position()? + (atom_len as u64 - 8);
             return search_chapters_in_moov(&mut file, moov_end);
-        } else if atom_len < 8 {
-            break;
         } else if atom_len == 8 {
             continue;
         } else {
@@ -136,11 +136,11 @@ fn search_chapters_in_moov(
         let atom_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
         let atom_ident = std::str::from_utf8(&buffer[4..8]).unwrap_or("");
 
-        if atom_ident == "udta" {
+        if atom_len < 8 {
+            break;
+        } else if atom_ident == "udta" {
             let udta_end = file.stream_position()? + (atom_len as u64 - 8);
             return search_chapters_in_udta(file, udta_end);
-        } else if atom_len < 8 {
-            break;
         } else if atom_len == 8 {
             continue;
         } else {
@@ -165,13 +165,13 @@ fn search_chapters_in_udta(
         let atom_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
         let atom_ident = std::str::from_utf8(&buffer[4..8]).unwrap_or("");
 
-        if atom_ident == "meta" {
+        if atom_len < 8 {
+            break;
+        } else if atom_ident == "meta" {
             let meta_end = file.stream_position()? + (atom_len as u64 - 8);
             return search_chapters_in_meta(file, meta_end);
         } else if atom_ident == "chpl" {
             return parse_chpl_atom(file, atom_len - 8);
-        } else if atom_len < 8 {
-            break;
         } else if atom_len == 8 {
             continue;
         } else {
@@ -188,8 +188,8 @@ fn search_chapters_in_meta(
 ) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
     // meta atom has a 4-byte header (version/flags)
     let mut header = [0u8; 4];
-    if file.read(&mut header)? == 4 {
-        // Header consumed
+    if file.read(&mut header)? != 4 {
+        return Ok(Vec::new());
     }
 
     while file.stream_position()? < meta_end {
@@ -202,10 +202,10 @@ fn search_chapters_in_meta(
         let atom_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
         let atom_ident = std::str::from_utf8(&buffer[4..8]).unwrap_or("");
 
-        if atom_ident == "chpl" {
-            return parse_chpl_atom(file, atom_len - 8);
-        } else if atom_len < 8 {
+        if atom_len < 8 {
             break;
+        } else if atom_ident == "chpl" {
+            return parse_chpl_atom(file, atom_len - 8);
         } else if atom_len == 8 {
             continue;
         } else {
@@ -226,23 +226,13 @@ fn parse_chpl_atom(
 
     let mut offset = 0;
 
-    // Skip version (1 byte) and flags (3 bytes)
-    if buffer.len() < 4 {
+    // Per ISO 14496-12, chpl atom has NO version/flags header.
+    // First byte IS the chapter count.
+    if buffer.is_empty() {
         return Ok(chapters);
     }
-    offset += 4;
-
-    // Read number of chapters
-    if buffer.len() < offset + 4 {
-        return Ok(chapters);
-    }
-    let num_chapters = u32::from_be_bytes([
-        buffer[offset],
-        buffer[offset + 1],
-        buffer[offset + 2],
-        buffer[offset + 3],
-    ]);
-    offset += 4;
+    let num_chapters = buffer[0] as u32;
+    offset += 1;
 
     for _ in 0..num_chapters {
         if buffer.len() < offset + 8 {
@@ -261,16 +251,11 @@ fn parse_chpl_atom(
         ]);
         offset += 8;
 
-        if buffer.len() < offset + 4 {
+        if buffer.len() < offset + 1 {
             break;
         }
-        let title_len = u32::from_be_bytes([
-            buffer[offset],
-            buffer[offset + 1],
-            buffer[offset + 2],
-            buffer[offset + 3],
-        ]);
-        offset += 4;
+        let title_len = buffer[offset] as u32;
+        offset += 1;
 
         if title_len == 0 || title_len > MAX_TITLE_LEN {
             break;

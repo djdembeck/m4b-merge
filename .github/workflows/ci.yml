@@ -65,6 +65,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@53851d14592bed31cf514f97155411e5d4b21334  # v3.6.0
+
       - name: Log into registry ${{ env.REGISTRY }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:

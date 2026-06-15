@@ -1,11 +1,8 @@
 FROM sandreas/ffmpeg:5.0.1-3 as ffmpeg
-# There is an issue with the tone tagger
-# https://github.com/sandreas/m4b-tool/issues/196
-# FROM sandreas/tone:v0.1.0 as tone
 FROM sandreas/mp4v2:2.1.1 as mp4v2
 FROM sandreas/fdkaac:2.0.1 as fdkaac
 
-FROM python:3.11-alpine3.15
+FROM python:3.11-alpine3.20
 ENV WORKDIR /mnt/
 ENV M4BTOOL_TMP_DIR /tmp/m4b-tool/
 
@@ -33,7 +30,6 @@ RUN apk add --no-cache --update --upgrade \
 # Add ffmpeg, tone, mp4v2 and fdkaac
 COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/
 COPY --from=ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
-# COPY --from=tone /usr/local/bin/tone /usr/local/bin/
 COPY --from=mp4v2 /usr/local/bin/mp4* /usr/local/bin/
 COPY --from=mp4v2 /usr/local/lib/libmp4v2* /usr/local/lib/
 COPY --from=fdkaac /usr/local/bin/fdkaac /usr/local/bin/
@@ -41,23 +37,25 @@ COPY --from=fdkaac /usr/local/bin/fdkaac /usr/local/bin/
 ARG M4B_TOOL_DOWNLOAD_LINK="https://github.com/sandreas/m4b-tool/releases/latest/download/m4b-tool.tar.gz"
 
 RUN echo "---- INSTALL M4B-TOOL ----" \
-    && M4B_TOOL_PRE_RELEASE_LINK=$(wget -q -O - https://github.com/sandreas/m4b-tool/releases/tag/latest | grep -o 'M4B_TOOL_DOWNLOAD_LINK=[^ ]*' | head -1 | cut -d '=' -f 2) \
-    && echo "!!! DOWNLOADING PRE_RELEASE ${M4B_TOOL_DOWNLOAD_LINK} !!!" && wget "${M4B_TOOL_PRE_RELEASE_LINK}" -O /tmp/m4b-tool.tar.gz \
+    && echo "Downloading from ${M4B_TOOL_DOWNLOAD_LINK}" \
+    && wget "${M4B_TOOL_DOWNLOAD_LINK}" -O /tmp/m4b-tool.tar.gz \
     && tar xzf /tmp/m4b-tool.tar.gz -C /tmp/ && rm /tmp/m4b-tool.tar.gz \
     && mv /tmp/m4b-tool.phar /usr/local/bin/m4b-tool \
-    && chmod +x /usr/local/bin/m4b-tool /usr/local/bin/m4b-tool
+    && chmod +x /usr/local/bin/m4b-tool
 
 # set environment variables
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
-# Copy Python package files (renamed to bypass .dockerignore)
+# Copy source code first
+COPY . /src
+
+# Copy renamed files (overwrite defaults with Docker-specific versions)
 COPY requirements-docker.txt /src/requirements.txt
 COPY setup-docker.py /src/setup.py
 COPY pyproject-docker.toml /src/pyproject.toml
 COPY README-docker.md /src/README.md
-COPY docker-alt/entrypoint.sh /src/docker/entrypoint.sh
-COPY . /src
+COPY docker/entrypoint.sh /src/docker/entrypoint.sh
 
 # run this command to install all dependencies
 RUN pip install --no-cache-dir --upgrade pip && \

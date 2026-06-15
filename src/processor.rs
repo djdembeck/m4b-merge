@@ -317,8 +317,8 @@ impl Processor {
         let metadata = if let Some(mut meta) = metadata {
             if meta.chapters.is_empty() && !group.files.is_empty() {
                 // Try to read chapters from the first input file
-                if let Ok(file_chapters) = crate::chapters::read_chapters(&group.files[0].path) {
-                    if !file_chapters.is_empty() {
+                match crate::chapters::read_chapters(&group.files[0].path) {
+                    Ok(file_chapters) if !file_chapters.is_empty() => {
                         info!("Extracted {} chapters from input file", file_chapters.len());
                         // Convert file chapters to metadata chapters
                         meta.chapters = file_chapters
@@ -331,6 +331,10 @@ impl Processor {
                                 )
                             })
                             .collect();
+                    }
+                    Ok(_) => {} // No chapters found
+                    Err(e) => {
+                        warn!("Failed to extract chapters from input file: {}", e);
                     }
                 }
             }
@@ -352,7 +356,8 @@ impl Processor {
             message: "Merging audio files...".to_string(),
         });
 
-        let merge_job = MergeJob::new(group.files.clone(), output_path.clone());
+        let merge_job = MergeJob::new(group.files.clone(), output_path.clone())
+            .with_threads(self.config.num_cpus);
         let merged_path = self.merger.merge(&merge_job).map_err(ProcessorError::Merge)?;
 
         info!("Successfully merged to: {}", merged_path.display());

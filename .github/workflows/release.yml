@@ -58,19 +58,19 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: m4b-merge-linux
-          path: target/release/m4b-merge-linux
+          path: target/release/
 
       - name: Download macOS binary
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: m4b-merge-macos
-          path: target/release/m4b-merge-macos
+          path: target/release/
 
       - name: Download Windows binary
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: m4b-merge-windows
-          path: target/release/m4b-merge-windows.exe
+          path: target/release/
 
       - name: Create Release
         uses: softprops/action-gh-release@26994186c0ac3ef5cae75ac16aa32e8153525f77
@@ -78,7 +78,7 @@ jobs:
           files: |
             target/release/m4b-merge-linux/m4b-merge
             target/release/m4b-merge-macos/m4b-merge
-            target/release/m4b-merge-windows.exe
+            target/release/m4b-merge-windows/m4b-merge.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -96,6 +96,9 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@53851d14592bed31cf514f97155411e5d4b21334  # v3.6.0
 
       - name: Log into registry ${{ env.REGISTRY }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9

@@ -31,7 +31,7 @@ generate_mp3() {
 
     ffmpeg -f lavfi -i "sine=frequency=${freq}:duration=${duration}" \
         -acodec libmp3lame -b:a 128k -ar 44100 -ac 2 \
-        -y "${output}" 2>/dev/null
+        -y "${output}"
     echo "Generated: ${output}"
 }
 
@@ -44,22 +44,10 @@ generate_m4a() {
 
     ffmpeg -f lavfi -i "sine=frequency=${freq}:duration=${duration}" \
         -acodec aac -b:a 128k -ar 44100 -ac 2 \
-        -y "${output}" 2>/dev/null
+        -y "${output}"
     echo "Generated: ${output}"
 }
 
-# Generate M4B file (same format as M4A, just different extension)
-# Usage: generate_m4b <output_path> <duration_seconds> <frequency>
-generate_m4b() {
-    local output="$1"
-    local duration="${2:-5}"
-    local freq="${3:-1000}"
-
-    ffmpeg -f lavfi -i "sine=frequency=${freq}:duration=${duration}" \
-        -acodec aac -b:a 128k -ar 44100 -ac 2 \
-        -y "${output}" 2>/dev/null
-    echo "Generated: ${output}"
-}
 
 echo ""
 echo "=== Generating single MP3 test file ==="
@@ -82,7 +70,7 @@ generate_m4a "${TEST_DATA_DIR}/multi_disc/CD2/track02.m4a" 5 1300
 
 echo ""
 echo "=== Generating M4B test file ==="
-generate_m4b "${TEST_DATA_DIR}/single_m4b/audiobook.m4b" 15 1000
+generate_m4a "${TEST_DATA_DIR}/single_m4b/audiobook.m4b" 15 1000
 
 echo ""
 echo "=== Test data generation complete ==="

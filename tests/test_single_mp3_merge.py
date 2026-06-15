@@ -17,18 +17,19 @@ test_cover = Path(f"{test_path}_cover.jpg")
 
 # Final metadata paths
 home = Path.home()
-config.output = Path(f"{home}/output")
-config.junk_dir = Path(f"{home}/input/done")
-config.path_format = "author/title/title - subtitle"
-output_dir = Path(f"{config.output}/Andy Weir/Project Hail Mary")
+output_dir = Path(f"{home}/output/Andy Weir/Project Hail Mary")
 output_path = Path(output_dir, "Project Hail Mary.m4b")
 output_chapters = Path(f"{output_dir}/Project Hail Mary.chapters.txt")
-
-config.num_cpus = os.cpu_count()
 
 
 @pytest.fixture(scope='class', autouse=True)
 def file_commands():
+    # Set up config
+    config.output = Path(f"{home}/output")
+    config.junk_dir = Path(f"{home}/input/done")
+    config.path_format = "author/title/title - subtitle"
+    config.num_cpus = os.cpu_count()
+
     # Before all tests have run:
     # Check if blank audio exists already to test
     make_mp3 = create_blank_audio()
@@ -73,8 +74,7 @@ class TestMerge:
         mp3.prepare_data()
         mp3.prepare_command_args()
         mp3.merge_single_mp3()
-        assert (output_path.exists() and
-                os.path.getsize(output_path) == 25301526 or 25330986)
+        assert output_path.exists() and os.path.getsize(output_path) in (25301526, 25330986)
 
     def mp3_data(self, asin):
         input_data = helpers.get_directory(test_path)
@@ -101,4 +101,4 @@ def create_blank_audio():
     ]
     if not test_path.exists():
         print("Generating empty audio file for testing...")
-        subprocess.run(ffmpegargs, stdout=subprocess.PIPE)
+        subprocess.run(ffmpegargs, stdout=subprocess.PIPE, check=True)

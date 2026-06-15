@@ -120,7 +120,7 @@ class TestMetadata:
         if not metadata['image']:
             errors.append("No cover image found")
         # Assert no errors come back
-        assert not errors, "Errors occured:\n{}".format("\n".join(errors))
+        assert not errors, "Errors occurred:\n{}".format("\n".join(errors))
 
     def test_multiple_author_multiple_narrator(self):
         errors = []
@@ -149,7 +149,7 @@ class TestMetadata:
         if metadata['genres'][0]['name'] != "Mystery, Thriller & Suspense":
             errors.append("Genre 1 is incorrect")
         if metadata['genres'][0]['type'] != "genre":
-            errors.append("Genre  type is incorrect")
+            errors.append("Genre 1 type is incorrect")
         if metadata['genres'][1]['name'] != "Thriller & Suspense":
             errors.append("Genre 2 is incorrect")
         if metadata['genres'][1]['type'] != "tag":
@@ -171,4 +171,4 @@ class TestMetadata:
         if metadata['seriesPrimary']['position'] != "0.5":
             errors.append("Series position incorrect")
         # Assert no errors come back
-        assert not errors, "Errors occured:\n{}".format("\n".join(errors))
+        assert not errors, "Errors occurred:\n{}".format("\n".join(errors))
