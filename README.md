@@ -64,23 +64,11 @@ docker run --rm \
 
 #### Running as Current User
 
-By default, Docker runs as root. To preserve file ownership:
+The Docker image runs as a non-root user (appuser, uid 1000) by default. You can override this with the `-u` flag, but note that this may cause permission issues with mounted volumes:
 
 ```bash
 docker run --rm \
   -u $(id -u):$(id -g) \
-  -v /path/to/input:/input \
-  -v /path/to/output:/output \
-  ghcr.io/djdembeck/m4b-merge:latest \
-  -i /input/file.mp3
-```
-
-Or set UID/GID explicitly:
-
-```bash
-docker run --rm \
-  -e UID=1000 \
-  -e GID=1000 \
   -v /path/to/input:/input \
   -v /path/to/output:/output \
   ghcr.io/djdembeck/m4b-merge:latest \
@@ -193,4 +181,4 @@ cargo test
 
 ## License
 
-MIT
+GPL-3.0

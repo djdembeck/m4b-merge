@@ -119,15 +119,12 @@ impl From<AudioMetadata> for FileMetadata {
                 }
             },
             sample_rate: metadata.sample_rate.unwrap_or(0),
-            channels: match metadata.channels.unwrap_or(0).try_into() {
-                Ok(v) => v,
-                Err(_) => {
-                    warn!(
-                        "Channels {} exceeds u8::MAX, clamping to 255",
-                        metadata.channels.unwrap_or(0)
-                    );
+            channels: match metadata.channels {
+                Some(ch) => ch.try_into().unwrap_or_else(|_| {
+                    warn!("Channels {} exceeds u8::MAX, clamping to 255", ch);
                     u8::MAX
-                }
+                }),
+                None => 0,
             },
             codec: metadata.codec.unwrap_or_default(),
         }
@@ -302,8 +299,8 @@ fn collect_files_from_dir(dir: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
 }
 
 /// Validate that a file is a supported audio file
+#[cfg(test)]
 fn validate_audio_file(path: &Path) -> Result<()> {
-    // Check file exists
     if !path.exists() {
         return Err(DiscoveryError::FileNotFound(path.to_path_buf()));
     }
@@ -339,7 +336,6 @@ fn validate_audio_file(path: &Path) -> Result<()> {
 fn discover_from_path(path: &Path) -> Result<Vec<AudioFile>> {
     if path.is_file() {
         // Single file
-        validate_audio_file(path)?;
         let file = AudioFile::new(path.to_path_buf())?;
         Ok(vec![file])
     } else if path.is_dir() {

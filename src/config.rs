@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 /// Configuration struct that holds all settings for m4b-merge
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Config {
     pub inputs: Vec<PathBuf>,
     pub output: Option<PathBuf>,
@@ -66,7 +65,7 @@ impl Config {
         // Check that completed_directory is valid if specified
         if let Some(ref completed_dir) = self.completed_directory {
             if !completed_dir.is_dir() {
-                return Err(ConfigError::InvalidOutput(completed_dir.clone()));
+                return Err(ConfigError::InvalidCompletedDirectory(completed_dir.clone()));
             }
         }
 
@@ -75,7 +74,6 @@ impl Config {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum ConfigError {
     #[error("No input files or directories provided")]
     NoInputs,
@@ -85,4 +83,7 @@ pub enum ConfigError {
 
     #[error("Output path is not a valid directory: {0}")]
     InvalidOutput(PathBuf),
+
+    #[error("Completed directory path is not a valid directory: {0}")]
+    InvalidCompletedDirectory(PathBuf),
 }

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -13,7 +13,7 @@ fn ffmpeg_available() -> bool {
 }
 
 /// Create a minimal valid M4B file for testing using FFmpeg
-fn create_test_m4b(path: &PathBuf, duration_secs: u32) {
+fn create_test_m4b(path: &Path, duration_secs: u32) {
     let status = Command::new("ffmpeg")
         .args(&[
             "-f",

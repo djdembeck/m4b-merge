@@ -55,6 +55,9 @@ jobs:
 
             # Build and push Docker image with Buildx (don't push on PR)
             # https://github.com/docker/build-push-action
+            - name: Set up QEMU
+              uses: docker/setup-qemu-action@53851d14592bed31cf514f97155411e5d4b21334  # v3.6.0
+
             - name: Build and push Docker image
               uses: docker/build-push-action@9e436ba9f2d7bcd1d038c8e55d039d37896ddc5d
               with:
@@ -64,6 +67,7 @@ jobs:
                   push: ${{ github.event_name != 'pull_request' }}
                   tags: ${{ steps.meta.outputs.tags }}
                   labels: ${{ steps.meta.outputs.labels }}
+                  platforms: linux/amd64,linux/arm64
             # Push updated image to bragibooks
             - name: Dispatch to bragibooks
               run: |

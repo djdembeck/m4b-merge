@@ -11,6 +11,9 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 use tracing::{debug, info, trace};
 
+/// Default AAC bitrate in kbps
+const DEFAULT_AAC_BITRATE_KBPS: u32 = 128;
+
 /// Errors that can occur during merge operations
 #[derive(Error, Debug)]
 pub enum MergeError {
@@ -61,29 +64,6 @@ impl MergeMode {
         let all_m4 = files.iter().all(|f| matches!(f.format, AudioFormat::M4A | AudioFormat::M4B));
 
         if all_m4 { MergeMode::Copy } else { MergeMode::Transcode }
-    }
-
-    /// Get FFmpeg codec arguments for this mode
-    #[allow(dead_code)]
-    fn codec_args(&self, target_bitrate: Option<u32>) -> Vec<String> {
-        match self {
-            MergeMode::Copy => vec!["-c".to_string(), "copy".to_string()],
-            MergeMode::Transcode => {
-                let bitrate = target_bitrate.unwrap_or(128);
-                vec![
-                    "-c:a".to_string(),
-                    "aac".to_string(),
-                    "-b:a".to_string(),
-                    format!("{}k", bitrate),
-                    "-c:v".to_string(),
-                    "copy".to_string(),
-                    "-map".to_string(),
-                    "0:v?".to_string(),
-                    "-map".to_string(),
-                    "0:a".to_string(),
-                ]
-            }
-        }
     }
 }
 
@@ -199,8 +179,9 @@ impl MergeProgress {
         // Progress based on files completed plus current file progress
         let file_progress = (self.current_file.saturating_sub(1)) as f64 / self.total_files as f64;
         let current_file_contribution = 1.0 / self.total_files as f64;
+        const CURRENT_FILE_ESTIMATED_PROGRESS: f64 = 0.5;
 
-        file_progress + (current_file_contribution * 0.5) // Assume 50% through current file
+        file_progress + (current_file_contribution * CURRENT_FILE_ESTIMATED_PROGRESS)
     }
 }
 
@@ -284,7 +265,7 @@ impl Merger {
             .iter()
             .min_by_key(|&&std| (std as i32 - bitrate as i32).abs())
             .copied()
-            .unwrap_or(128)
+            .unwrap_or(DEFAULT_AAC_BITRATE_KBPS)
     }
 
     /// Execute a merge job
@@ -304,10 +285,9 @@ impl Merger {
         // Determine target bitrate if not set and in transcode mode
         let target_bitrate = match job.mode {
             MergeMode::Copy => None,
-            MergeMode::Transcode => Some(
-                job.target_bitrate
-                    .unwrap_or_else(|| self.detect_bitrate(&job.input_files).unwrap_or(128)),
-            ),
+            MergeMode::Transcode => Some(job.target_bitrate.unwrap_or_else(|| {
+                self.detect_bitrate(&job.input_files).unwrap_or(DEFAULT_AAC_BITRATE_KBPS)
+            })),
         };
 
         info!(
@@ -395,7 +375,7 @@ impl Merger {
                 cmd.arg("-c").arg("copy");
             }
             MergeMode::Transcode => {
-                let bitrate = target_bitrate.unwrap_or(128);
+                let bitrate = target_bitrate.unwrap_or(DEFAULT_AAC_BITRATE_KBPS);
                 cmd.arg("-c:a").arg("aac").arg("-b:a").arg(format!("{}k", bitrate)).arg("-vn");
             }
         }
@@ -508,7 +488,7 @@ impl Merger {
             cmd.arg("-i").arg(&file.path);
 
             // Transcode mode: transcode audio, copy video (cover art)
-            let bitrate = target_bitrate.unwrap_or(128);
+            let bitrate = target_bitrate.unwrap_or(DEFAULT_AAC_BITRATE_KBPS);
             cmd.arg("-c:a")
                 .arg("aac")
                 .arg("-b:a")
@@ -556,7 +536,7 @@ impl Merger {
 
     /// Get recommended bitrate for a set of files
     pub fn recommended_bitrate(&self, files: &[AudioFile]) -> u32 {
-        self.detect_bitrate(files).unwrap_or(128)
+        self.detect_bitrate(files).unwrap_or(DEFAULT_AAC_BITRATE_KBPS)
     }
 }
 
@@ -708,27 +688,6 @@ mod tests {
             create_test_audio_file(&temp_dir, "file2.m4a", b"dummy"),
         ];
         assert_eq!(MergeMode::from_files(&mixed_mp3_m4a), MergeMode::Transcode);
-    }
-
-    #[test]
-    fn test_merge_mode_codec_args() {
-        // Copy mode
-        let copy_args = MergeMode::Copy.codec_args(None);
-        assert_eq!(copy_args, vec!["-c", "copy"]);
-
-        // Transcode mode with default bitrate (includes video copy and mapping)
-        let transcode_args = MergeMode::Transcode.codec_args(None);
-        assert_eq!(
-            transcode_args,
-            vec!["-c:a", "aac", "-b:a", "128k", "-c:v", "copy", "-map", "0:v?", "-map", "0:a"]
-        );
-
-        // Transcode mode with custom bitrate (includes video copy and mapping)
-        let transcode_args_192 = MergeMode::Transcode.codec_args(Some(192));
-        assert_eq!(
-            transcode_args_192,
-            vec!["-c:a", "aac", "-b:a", "192k", "-c:v", "copy", "-map", "0:v?", "-map", "0:a"]
-        );
     }
 
     #[test]

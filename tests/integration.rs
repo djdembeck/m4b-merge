@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
@@ -22,7 +23,7 @@ fn ffmpeg_available() -> bool {
 }
 
 /// Generate a test MP3 file using FFmpeg
-fn generate_test_mp3(path: &PathBuf, duration_secs: u32) {
+fn generate_test_mp3(path: &Path, duration_secs: u32) {
     let status = Command::new("ffmpeg")
         .args(&[
             "-f",
@@ -47,7 +48,7 @@ fn generate_test_mp3(path: &PathBuf, duration_secs: u32) {
 }
 
 /// Generate a test M4A file using FFmpeg
-fn generate_test_m4a(path: &PathBuf, duration_secs: u32) {
+fn generate_test_m4a(path: &Path, duration_secs: u32) {
     let status = Command::new("ffmpeg")
         .args(&[
             "-f",

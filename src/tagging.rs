@@ -5,6 +5,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::metadata::BookMetadata;
 
+/// Maximum number of characters for chapter titles in embedded chapters (chpl atom limit)
+const CHAPTER_TITLE_MAX_CHARS: usize = 255;
+
 /// Errors that can occur during tagging operations
 #[derive(Error, Debug)]
 pub enum TaggingError {
@@ -60,7 +63,7 @@ fn convert_chapters_for_embedding(chapters: &[crate::metadata::Chapter]) -> Vec<
     for chapter in metadata_chapters.iter() {
         // Truncate title to 255 characters (chpl atom limit)
         // Use character-aware truncation to safely handle multi-byte UTF-8 characters
-        let title: String = chapter.title.chars().take(255).collect();
+        let title: String = chapter.title.chars().take(CHAPTER_TITLE_MAX_CHARS).collect();
 
         result.push(mp4ameta::Chapter::new(chapter.start_time, &title));
     }
@@ -108,6 +111,11 @@ impl Tagger {
         }
     }
 
+    /// Ensure a file exists, returning an error if not
+    fn ensure_file_exists(path: &Path) -> Result<()> {
+        if !path.exists() { Err(TaggingError::FileNotFound(path.to_path_buf())) } else { Ok(()) }
+    }
+
     /// Create a new Tagger with custom overwrite behavior
     pub fn with_overwrite_behavior(mut self, behavior: OverwriteBehavior) -> Self {
         self.overwrite_behavior = behavior;
@@ -138,9 +146,7 @@ impl Tagger {
     ) -> Result<()> {
         let path = file_path.as_ref();
 
-        if !path.exists() {
-            return Err(TaggingError::FileNotFound(path.to_path_buf()));
-        }
+        Self::ensure_file_exists(path)?;
 
         debug!("Writing metadata to: {}", path.display());
 
@@ -210,9 +216,7 @@ impl Tagger {
     pub async fn embed_cover<P: AsRef<Path>>(&self, file_path: P, cover_url: &str) -> Result<()> {
         let path = file_path.as_ref();
 
-        if !path.exists() {
-            return Err(TaggingError::FileNotFound(path.to_path_buf()));
-        }
+        Self::ensure_file_exists(path)?;
 
         debug!("Downloading cover from: {}", cover_url);
 
@@ -229,9 +233,7 @@ impl Tagger {
     pub fn embed_cover_data<P: AsRef<Path>>(&self, file_path: P, image_data: &[u8]) -> Result<()> {
         let path = file_path.as_ref();
 
-        if !path.exists() {
-            return Err(TaggingError::FileNotFound(path.to_path_buf()));
-        }
+        Self::ensure_file_exists(path)?;
 
         debug!("Embedding cover art into: {}", path.display());
 
@@ -281,9 +283,7 @@ impl Tagger {
         let path = file_path.as_ref();
 
         // Validate file exists
-        if !path.exists() {
-            return Err(TaggingError::FileNotFound(path.to_path_buf()));
-        }
+        Self::ensure_file_exists(path)?;
 
         // Skip if empty (with debug log)
         if chapters.is_empty() {
@@ -523,14 +523,21 @@ impl Tagger {
             }
         }
 
-        // 3. Write chapters.txt alongside output file
+        // 3. Embed chapters if available
+        if !metadata.chapters.is_empty() {
+            if let Err(e) = self.embed_chapters(output, &metadata.chapters) {
+                warn!("Failed to embed chapters: {}", e);
+            }
+        }
+
+        // 4. Write chapters.txt alongside output file
         let chapters_txt_path = output.with_extension("").with_extension("chapters.txt");
         if let Err(e) = self.write_chapters_txt(&chapters_txt_path, metadata) {
             warn!("Failed to write chapters.txt: {}", e);
             // Don't fail the whole operation if chapters writing fails
         }
 
-        // 4. Move source files to completed directory if specified
+        // 5. Move source files to completed directory if specified
         if let Some(dest_dir) = completed_dir {
             let source_paths: Vec<_> = source_files.iter().map(|p| p.as_ref()).collect();
             if let Err(e) = self.move_completed_files(&source_paths, dest_dir) {

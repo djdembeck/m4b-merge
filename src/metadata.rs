@@ -1,4 +1,8 @@
 use std::time::Duration;
+/// Validate ASIN format (10 alphanumeric characters)
+pub fn is_valid_asin(asin: &str) -> bool {
+    asin.len() == 10 && asin.chars().all(|c| c.is_alphanumeric())
+}
 
 /// Chapter information for audiobooks
 #[derive(Debug, Clone, PartialEq)]
@@ -109,11 +113,6 @@ impl BookMetadata {
         self
     }
 
-    /// Validate the ASIN format (10 alphanumeric characters)
-    pub fn is_valid_asin(asin: &str) -> bool {
-        asin.len() == 10 && asin.chars().all(|c| c.is_alphanumeric())
-    }
-
     /// Get the full display title (title + subtitle if available)
     pub fn full_title(&self) -> String {
         match &self.subtitle {
@@ -198,13 +197,13 @@ mod tests {
 
     #[test]
     fn test_valid_asin() {
-        assert!(BookMetadata::is_valid_asin("B08XYZ1234"));
-        assert!(BookMetadata::is_valid_asin("B08XYZ123A"));
-        assert!(BookMetadata::is_valid_asin("1234567890"));
-        assert!(!BookMetadata::is_valid_asin("B08XYZ123")); // Too short
-        assert!(!BookMetadata::is_valid_asin("B08XYZ12345")); // Too long
-        assert!(!BookMetadata::is_valid_asin("B08-XYZ123")); // Special char
-        assert!(!BookMetadata::is_valid_asin(""));
+        assert!(is_valid_asin("B08XYZ1234"));
+        assert!(is_valid_asin("B08XYZ123A"));
+        assert!(is_valid_asin("1234567890"));
+        assert!(!is_valid_asin("B08XYZ123")); // Too short
+        assert!(!is_valid_asin("B08XYZ12345")); // Too long
+        assert!(!is_valid_asin("B08-XYZ123")); // Special char
+        assert!(!is_valid_asin(""));
     }
 
     #[test]

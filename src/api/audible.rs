@@ -50,7 +50,6 @@ pub enum AudibleError {
 pub struct AudibleClient {
     client: Client,
     base_url: String,
-    timeout: Duration,
 }
 
 impl AudibleClient {
@@ -67,24 +66,18 @@ impl AudibleClient {
             .pool_idle_timeout(Duration::from_secs(30)) // Connection pool timeout
             .build()?;
 
-        Ok(Self {
-            client,
-            base_url: base_url.into(),
-            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-        })
+        Ok(Self { client, base_url: base_url.into() })
     }
 
     /// Set a custom timeout for requests
-    pub fn with_timeout(mut self, timeout: Duration) -> Result<Self, AudibleError> {
-        self.timeout = timeout;
-
-        self.client = Client::builder()
+    pub fn with_timeout(self, timeout: Duration) -> Result<Self, AudibleError> {
+        let client = Client::builder()
             .timeout(timeout)
             .connect_timeout(Duration::from_secs(10)) // Connection timeout
             .pool_idle_timeout(Duration::from_secs(30)) // Connection pool timeout
             .build()?;
 
-        Ok(self)
+        Ok(Self { client, base_url: self.base_url })
     }
 
     /// Validate ASIN format (10 alphanumeric characters)
@@ -133,9 +126,7 @@ impl AudibleClient {
                 // Return Ok for success, Err for retry
                 match result {
                     Ok(metadata) => Ok(metadata),
-                    Err(e) if Self::is_transient_error(&e) => {
-                        Err(AudibleError::RetryExhausted(MAX_RETRIES))
-                    }
+                    Err(e) if Self::is_transient_error(&e) => Err(e),
                     Err(e) => Err(e),
                 }
             }
@@ -157,7 +148,8 @@ impl AudibleClient {
             e
         })?;
 
-        match response.status() {
+        let status = response.status();
+        match status {
             StatusCode::OK => {
                 let api_response: ApiBookResponse = response.json().await?;
                 Ok(api_response.into_book_metadata())
@@ -165,11 +157,7 @@ impl AudibleClient {
             StatusCode::NOT_FOUND => Err(AudibleError::NotFound(asin.to_string())),
             StatusCode::TOO_MANY_REQUESTS => Err(AudibleError::RateLimited),
             StatusCode::REQUEST_TIMEOUT => Err(AudibleError::Timeout),
-            status if status.is_server_error() => {
-                let message = response.text().await.unwrap_or_default();
-                Err(AudibleError::ApiError { status: status.as_u16(), message })
-            }
-            status => {
+            _ => {
                 let message = response.text().await.unwrap_or_default();
                 Err(AudibleError::ApiError { status: status.as_u16(), message })
             }
@@ -193,9 +181,7 @@ impl AudibleClient {
                 // Return Ok for success, Err for retry
                 match result {
                     Ok(bytes) => Ok(bytes),
-                    Err(e) if Self::is_transient_error(&e) => {
-                        Err(AudibleError::RetryExhausted(MAX_RETRIES))
-                    }
+                    Err(e) if Self::is_transient_error(&e) => Err(e),
                     Err(e) => Err(e),
                 }
             }

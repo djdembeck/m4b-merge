@@ -50,8 +50,6 @@ RUN mkdir -p /input /output /config && \
 COPY --from=builder /app/target/release/m4b-merge /usr/local/bin/m4b-merge
 
 # Set environment variables
-ENV UID=1000
-ENV GID=1000
 ENV HOME=/home/appuser
 
 # Switch to non-root user
