@@ -30,7 +30,7 @@ RUN cargo build --release --locked
 # =============================================================================
 # Runtime stage - Minimal image with FFmpeg
 # =============================================================================
-FROM jrottenberg/ffmpeg:6-debian AS runtime
+FROM jrottenberg/ffmpeg:6-ubuntu AS runtime
 
 # Install CA certificates and other runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -39,8 +39,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean
 
 # Create non-root user
-RUN groupadd --gid 1000 appgroup && \
-    useradd --uid 1000 --gid appgroup --shell /bin/bash --create-home appuser
+RUN groupadd appgroup && \
+    useradd --gid appgroup --shell /bin/bash --create-home appuser
 
 # Create necessary directories
 RUN mkdir -p /input /output /config && \
