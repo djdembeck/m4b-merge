@@ -226,6 +226,10 @@ impl Processor {
         info!("Discovered {} audio groups to process", groups.len());
 
         if groups.is_empty() {
+            if self.config.dry_run {
+                println!("Dry run: No audio files discovered in input paths. Inputs: {:?}", inputs);
+                return Ok(Vec::new());
+            }
             return Err(ProcessorError::NoInputs);
         }
 
@@ -468,7 +472,16 @@ impl Processor {
 
     /// Discover audio files from input paths
     fn discover_files(&self, inputs: &[PathBuf]) -> Result<Vec<AudioGroup>> {
-        let groups = discover_and_group(inputs)?;
+        let groups = match discover_and_group(inputs) {
+            Ok(g) => g,
+            Err(e) => {
+                if self.config.dry_run {
+                    warn!("Discovery error in dry-run mode: {}", e);
+                    return Ok(Vec::new());
+                }
+                return Err(e.into());
+            }
+        };
         Ok(groups)
     }
 
