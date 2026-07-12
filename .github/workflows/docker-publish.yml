@@ -22,7 +22,6 @@ env:
     REGISTRY: ghcr.io
     # github.repository as <account>/<repo>
     IMAGE_NAME: ${{ github.repository }}
-    M4B_TOOL_DOWNLOAD_LINK: 'https://github.com/sandreas/m4b-tool/files/9721007/m4b-tool.tar.gz'
 
 jobs:
     build:
@@ -61,8 +60,7 @@ jobs:
             - name: Build and push Docker image
               uses: docker/build-push-action@9e436ba9f2d7bcd1d038c8e55d039d37896ddc5d
               with:
-                  build-args: M4B_TOOL_DOWNLOAD_LINK=${{ env.M4B_TOOL_DOWNLOAD_LINK }}
-                  file: docker/Dockerfile
+                  file: Dockerfile
                   context: .
                   push: ${{ github.event_name != 'pull_request' }}
                   tags: ${{ steps.meta.outputs.tags }}

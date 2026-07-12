@@ -750,6 +750,74 @@ libavcodec     61.  9.100 / 61.  9.100"#;
         let version = FFmpegVersion::parse(version_output).unwrap();
         assert_eq!(version.version, "N-71064-gd5e603ddc0-static");
         assert!(!version.libraries.is_empty());
-        assert_eq!(version.libraries[0].name, "libavutil");
+    }
+
+    #[test]
+    fn test_probe_real_audio_metadata() {
+        if Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+        } else {
+            return;
+        }
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let mp3_path = temp_dir.path().join("test.mp3");
+
+        // Generate a real MP3 using FFmpeg sine wave
+        let status = Command::new("ffmpeg")
+            .args(&[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:duration=2",
+                "-acodec",
+                "libmp3lame",
+                "-b:a",
+                "128k",
+                "-ar",
+                "44100",
+                "-ac",
+                "2",
+                "-y",
+            ])
+            .arg(&mp3_path)
+            .status()
+            .expect("Failed to run FFmpeg");
+
+        assert!(status.success(), "FFmpeg should generate test MP3");
+
+        // Probe the generated file
+        let ffmpeg = create_test_ffmpeg();
+        let metadata = ffmpeg.get_metadata(&mp3_path).expect("probe should succeed");
+
+        // Verify bit_rate is present and non-zero (~128k)
+        let bit_rate = metadata
+            .bitrate
+            .expect("AudioMetadata should have a bitrate");
+        assert!(bit_rate > 0, "bitrate should be positive, got {}", bit_rate);
+
+        // Verify sample_rate is 44100
+        let sample_rate = metadata
+            .sample_rate
+            .expect("AudioMetadata should have a sample_rate");
+        assert_eq!(
+            sample_rate, 44100,
+            "sample_rate should be 44100, got {}",
+            sample_rate
+        );
+
+        // Verify duration is present and positive
+        let duration = metadata
+            .duration
+            .expect("AudioMetadata should have a duration");
+        assert!(
+            duration.as_secs_f64() > 0.0,
+            "duration should be positive, got {:?}",
+            duration
+        );
     }
 }

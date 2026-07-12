@@ -22,28 +22,10 @@ LICENSE
 
 # CI/CD
 .github/
-.github/workflows/
 
 # Docker
-docker/
-!docker/Dockerfile
-!docker/entrypoint.sh
 Dockerfile
 .dockerignore
-
-# Python
-__main__.py
-requirements.txt
-pyproject.toml
-setup.py
-MANIFEST.in
-renovate.json
-
-# Cache
-.pytest_cache/
-.ruff_cache/
-*.pyc
-__pycache__/
 
 # OS
 .DS_Store

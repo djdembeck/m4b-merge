@@ -117,7 +117,6 @@ fn test_cli_no_inputs() {
 }
 
 #[test]
-#[ignore = "requires FFmpeg"]
 fn test_single_mp3_merge() {
     if !ffmpeg_available() {
         return;
@@ -143,7 +142,7 @@ fn test_single_mp3_merge() {
             input_file.to_str().unwrap(),
             "-o",
             output_dir.to_str().unwrap(),
-            "--completed_directory",
+            "--completed-directory",
             completed_dir.to_str().unwrap(),
         ])
         .output()
@@ -170,7 +169,77 @@ fn test_single_mp3_merge() {
 }
 
 #[test]
-#[ignore = "requires FFmpeg"]
+fn test_single_m4b_merge() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+    let completed_dir = temp_dir.path().join("completed");
+
+    std::fs::create_dir(&input_dir).unwrap();
+    std::fs::create_dir(&output_dir).unwrap();
+    std::fs::create_dir(&completed_dir).unwrap();
+
+    // Generate a test M4B file (M4B is an M4A with .m4b extension)
+    let input_file = input_dir.join("chapter1.m4b");
+    let status = Command::new("ffmpeg")
+        .args(&[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=5",
+            "-acodec",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-y",
+        ])
+        .arg(&input_file)
+        .status()
+        .expect("Failed to run FFmpeg");
+    assert!(status.success(), "FFmpeg should generate test M4B");
+
+    // Run m4b-merge
+    let output = Command::new(bin_path())
+        .args(&[
+            "-i",
+            input_file.to_str().unwrap(),
+            "-o",
+            output_dir.to_str().unwrap(),
+            "--completed-directory",
+            completed_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run m4b-merge");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        eprintln!("stdout: {}", stdout);
+        eprintln!("stderr: {}", stderr);
+    }
+
+    assert!(output.status.success(), "m4b-merge should succeed");
+
+    // Check output file was created
+    let output_files: Vec<_> = std::fs::read_dir(&output_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map(|e| e == "m4b").unwrap_or(false))
+        .collect();
+
+    assert!(!output_files.is_empty(), "Output M4B file should be created");
+}
+
+#[test]
 fn test_multiple_mp3_merge() {
     if !ffmpeg_available() {
         return;
@@ -198,7 +267,7 @@ fn test_multiple_mp3_merge() {
             input_dir.to_str().unwrap(),
             "-o",
             output_dir.to_str().unwrap(),
-            "--completed_directory",
+            "--completed-directory",
             completed_dir.to_str().unwrap(),
         ])
         .output()
@@ -225,7 +294,6 @@ fn test_multiple_mp3_merge() {
 }
 
 #[test]
-#[ignore = "requires FFmpeg"]
 fn test_m4a_copy_merge() {
     if !ffmpeg_available() {
         return;

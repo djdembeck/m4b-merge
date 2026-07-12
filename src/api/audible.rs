@@ -385,6 +385,61 @@ mod tests {
         assert_eq!(metadata.description, "");
     }
 
+    #[test]
+    fn test_api_response_multi_author_multi_narrator() {
+        let json = r#"{
+            "asin": "B08C6YJ1LS",
+            "title": "The Coldest Case",
+            "subtitle": "A Black Book Audio Drama",
+            "authors": [
+                {"name": "Ryan Silbert"},
+                {"name": "Alex Finlay"}
+            ],
+            "narrators": [
+                {"name": "Luke Treadaway"},
+                {"name": "Krysten Ritter"}
+            ],
+            "series": [{"name": "Black Book", "position": "2"}],
+            "summary": "An audio drama",
+            "genres": [{"name": "Mystery, Thriller & Suspense"}, {"name": "Thriller & Suspense"}],
+            "releaseDate": "2020-06-23",
+            "chapterInfo": {
+                "chapters": [
+                    {"title": "Chapter 1", "startOffsetMs": 0, "lengthMs": 3600000},
+                    {"title": "Chapter 2", "startOffsetMs": 3600000, "lengthMs": 3700000}
+                ]
+            },
+            "image": "https://example.com/cover.jpg"
+        }"#;
+
+        let response: ApiBookResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.asin, "B08C6YJ1LS");
+        assert_eq!(response.title, "The Coldest Case");
+        assert_eq!(response.authors.len(), 2);
+        assert_eq!(response.authors[0].name, "Ryan Silbert");
+        assert_eq!(response.authors[1].name, "Alex Finlay");
+        assert_eq!(response.narrators.len(), 2);
+        assert_eq!(response.narrators[0].name, "Luke Treadaway");
+        assert_eq!(response.narrators[1].name, "Krysten Ritter");
+        assert_eq!(response.series.len(), 1);
+        assert_eq!(response.series[0].name, "Black Book");
+        assert_eq!(response.series[0].position, Some("2".to_string()));
+
+        let metadata = response.into_book_metadata();
+        assert_eq!(metadata.asin, "B08C6YJ1LS");
+        assert_eq!(metadata.title, "The Coldest Case");
+        assert_eq!(metadata.authors.len(), 2);
+        assert_eq!(metadata.authors[0], "Ryan Silbert");
+        assert_eq!(metadata.authors[1], "Alex Finlay");
+        assert_eq!(metadata.narrators.len(), 2);
+        assert_eq!(metadata.narrators[0], "Luke Treadaway");
+        assert_eq!(metadata.narrators[1], "Krysten Ritter");
+        assert_eq!(metadata.series_name, Some("Black Book".to_string()));
+        assert_eq!(metadata.series_position, Some("2".to_string()));
+        assert_eq!(metadata.year, Some(2020));
+        assert_eq!(metadata.chapters.len(), 2);
+    }
+
     #[tokio::test]
     async fn test_client_creation() {
         let client = AudibleClient::new();
