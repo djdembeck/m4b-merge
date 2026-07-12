@@ -1,7 +1,7 @@
 use std::time::Duration;
 /// Validate ASIN format (10 alphanumeric characters)
 pub fn is_valid_asin(asin: &str) -> bool {
-    asin.len() == 10 && asin.chars().all(|c| c.is_alphanumeric())
+    asin.len() == 10 && asin.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Chapter information for audiobooks

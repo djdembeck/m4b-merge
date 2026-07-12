@@ -224,15 +224,19 @@ fn parse_chpl_atom(
     let mut buffer = vec![0; content_len as usize];
     file.read_exact(&mut buffer)?;
 
-    let mut offset = 0;
-
-    // Per ISO 14496-12, chpl atom has NO version/flags header.
-    // First byte IS the chapter count.
-    if buffer.is_empty() {
+    // Per ISO 14496-12 / ffmpeg mov_read_chpl:
+    // chpl content = version(1) + flags(3) + reserved(4 when version!=0) + chapter_count(1)
+    if buffer.len() < 4 {
         return Ok(chapters);
     }
-    let num_chapters = buffer[0] as u32;
-    offset += 1;
+    let version = buffer[0];
+    // skip version(1) + flags(3) + reserved(4 if version!=0)
+    let header_size = if version != 0 { 8 } else { 4 };
+    if buffer.len() < header_size + 1 {
+        return Ok(chapters);
+    }
+    let num_chapters = buffer[header_size] as u32;
+    let mut offset = header_size + 1;
 
     for _ in 0..num_chapters {
         if buffer.len() < offset + 8 {
@@ -250,6 +254,7 @@ fn parse_chpl_atom(
             buffer[offset + 7],
         ]);
         offset += 8;
+        let start_time = start_time / 10_000; // 100-ns units -> ms
 
         if buffer.len() < offset + 1 {
             break;

@@ -3,7 +3,7 @@ use std::time::Duration;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use thiserror::Error;
-use tokio_retry::Retry;
+use tokio_retry::RetryIf;
 use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
 use crate::metadata::{BookMetadata, Chapter};
@@ -82,7 +82,7 @@ impl AudibleClient {
 
     /// Validate ASIN format (10 alphanumeric characters)
     fn validate_asin(asin: &str) -> Result<(), AudibleError> {
-        if asin.len() == 10 && asin.chars().all(|c| c.is_alphanumeric()) {
+        if asin.len() == 10 && asin.chars().all(|c| c.is_ascii_alphanumeric()) {
             Ok(())
         } else {
             Err(AudibleError::InvalidAsin(asin.to_string()))
@@ -115,22 +115,17 @@ impl AudibleClient {
         let client = self.client.clone();
         let asin = asin.to_string();
 
-        Retry::start(retry_strategy, move || {
-            let client = client.clone();
-            let base_url = base_url.clone();
-            let asin = asin.clone();
+        RetryIf::start(
+            retry_strategy,
+            move || {
+                let client = client.clone();
+                let base_url = base_url.clone();
+                let asin = asin.clone();
 
-            async move {
-                let result = Self::fetch_book_once(&client, &base_url, &asin).await;
-
-                // Return Ok for success, Err for retry
-                match result {
-                    Ok(metadata) => Ok(metadata),
-                    Err(e) if Self::is_transient_error(&e) => Err(e),
-                    Err(e) => Err(e),
-                }
-            }
-        })
+                async move { Self::fetch_book_once(&client, &base_url, &asin).await }
+            },
+            Self::is_transient_error,
+        )
         .await
     }
 
@@ -171,21 +166,16 @@ impl AudibleClient {
         let client = self.client.clone();
         let url = cover_url.to_string();
 
-        Retry::start(retry_strategy, move || {
-            let client = client.clone();
-            let url = url.clone();
+        RetryIf::start(
+            retry_strategy,
+            move || {
+                let client = client.clone();
+                let url = url.clone();
 
-            async move {
-                let result = Self::download_cover_once(&client, &url).await;
-
-                // Return Ok for success, Err for retry
-                match result {
-                    Ok(bytes) => Ok(bytes),
-                    Err(e) if Self::is_transient_error(&e) => Err(e),
-                    Err(e) => Err(e),
-                }
-            }
-        })
+                async move { Self::download_cover_once(&client, &url).await }
+            },
+            Self::is_transient_error,
+        )
         .await
     }
 

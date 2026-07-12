@@ -30,7 +30,7 @@ struct Args {
     pub completed_directory: Option<PathBuf>,
 
     /// Number of CPUs to use for parallel processing
-    #[arg(long = "num-cpus", value_name = "N", default_value = "1")]
+    #[arg(long = "num-cpus", value_name = "N", default_value_t = { std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) })]
     pub num_cpus: usize,
 
     /// Set logging level (error, warn, info, debug, trace)
@@ -111,15 +111,6 @@ async fn main() {
         eprintln!("Error: No input files or directories provided.");
         eprintln!("Use -i or --inputs to specify input paths.");
         std::process::exit(1);
-    }
-
-    // Handle dry-run mode before consuming args
-    if args.dry_run {
-        println!("Dry run mode - showing what would be done:");
-        println!("  Inputs: {:?}", args.inputs);
-        println!("  Output: {:?}", args.output);
-        println!("  Completed directory: {:?}", args.completed_directory);
-        std::process::exit(0);
     }
 
     // Create configuration

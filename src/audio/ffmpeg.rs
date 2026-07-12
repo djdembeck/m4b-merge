@@ -469,6 +469,14 @@ impl FFmpeg {
             .output()
             .map_err(|e| FFmpegError::ExecutionFailed(e.to_string()))?;
 
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(FFmpegError::NonZeroExit {
+                code: output.status.code().unwrap_or(-1),
+                stderr: stderr.to_string(),
+            });
+        }
+
         // FFmpeg outputs silence detection info to stderr even on success
         let stderr = String::from_utf8_lossy(&output.stderr);
         let mut silence_periods = Vec::new();

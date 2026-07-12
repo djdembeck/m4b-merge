@@ -73,7 +73,7 @@ jobs:
           path: target/release/
 
       - name: Create Release
-        uses: softprops/action-gh-release@26994186c0ac3ef5cae75ac16aa32e8153525f77
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             target/release/m4b-merge-linux/m4b-merge

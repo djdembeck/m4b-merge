@@ -9,7 +9,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
-    libssl-dev \
+    cmake \
+    perl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy only Cargo files first for better layer caching

@@ -205,10 +205,12 @@ impl Processor {
             return Err(ProcessorError::NoInputs);
         }
 
-        // Ensure output directory exists
-        if let Some(ref output) = self.config.output {
-            std::fs::create_dir_all(output)
-                .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))?;
+        // Skip creating output directory in dry-run mode
+        if !self.config.dry_run {
+            if let Some(output) = &self.config.output {
+                std::fs::create_dir_all(output)
+                    .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))?;
+            }
         }
 
         // Stage 1: Discovery
@@ -347,6 +349,33 @@ impl Processor {
         let output_path = self.determine_output_path(&group.files, metadata.as_ref())?;
         debug!("Output path: {}", output_path.display());
 
+        // Dry-run: print what would happen without doing it
+        if self.config.dry_run {
+            info!("DRY RUN: Would merge {} file(s) into: {}", group.files.len(), output_path.display());
+
+            // Show what input files would be merged
+            for file in &group.files {
+                info!("DRY RUN:   - {}", file.path.display());
+            }
+
+            // Show what metadata operations would happen
+            if metadata.is_some() {
+                info!("DRY RUN: Would apply metadata tags");
+            }
+
+            // Show what file move would happen
+            if let Some(completed_dir) = &self.config.completed_directory {
+                info!("DRY RUN: Would move source files to: {}", completed_dir.display());
+            }
+
+            return Ok(ProcessingResult {
+                input_files: input_paths,
+                output_file: output_path,
+                metadata_applied: false,
+                files_moved: false,
+            });
+        }
+
         // Stage 3: Merge
         progress_handler.on_progress(ProcessingProgress {
             stage: ProcessingStage::Merging,
@@ -371,31 +400,31 @@ impl Processor {
             message: "Writing metadata and cover art...".to_string(),
         });
 
-        let metadata_applied = if let Some(ref metadata) = metadata {
+        let metadata_applied = if let Some(meta) = &metadata {
             // Write metadata tags
-            if let Err(e) = self.tagger.write_metadata(&merged_path, metadata) {
+            if let Err(e) = self.tagger.write_metadata(&merged_path, meta) {
                 warn!("Failed to write metadata: {}", e);
                 false
             } else {
                 // Download and embed cover art
-                if let Some(ref cover_url) = metadata.cover_url {
+                if let Some(cover_url) = &meta.cover_url {
                     if let Err(e) = self.tagger.embed_cover(&merged_path, cover_url).await {
                         warn!("Failed to embed cover art: {}", e);
                     }
                 }
 
                 // Embed chapters into M4B file
-                if !metadata.chapters.is_empty() {
-                    if let Err(e) = self.tagger.embed_chapters(&merged_path, &metadata.chapters) {
+                if !meta.chapters.is_empty() {
+                    if let Err(e) = self.tagger.embed_chapters(&merged_path, &meta.chapters) {
                         warn!("Failed to embed chapters: {}", e);
                     } else {
-                        info!("Successfully embedded {} chapters", metadata.chapters.len());
+                        info!("Successfully embedded {} chapters", meta.chapters.len());
                     }
                 }
 
                 // Write chapters.txt next to the output file
                 let chapters_txt_path = merged_path.with_extension("chapters.txt");
-                if let Err(e) = self.tagger.write_chapters_txt(&chapters_txt_path, metadata) {
+                if let Err(e) = self.tagger.write_chapters_txt(&chapters_txt_path, meta) {
                     warn!("Failed to write chapters.txt: {}", e);
                 }
 
@@ -406,7 +435,7 @@ impl Processor {
         };
 
         // Stage 5: Move source files
-        let files_moved = if let Some(ref completed_dir) = self.config.completed_directory {
+        let files_moved = if let Some(completed_dir) = &self.config.completed_directory {
             progress_handler.on_progress(ProcessingProgress {
                 stage: ProcessingStage::MovingFiles,
                 current_file: Some(input_paths[0].clone()),

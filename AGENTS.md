@@ -148,10 +148,14 @@ Include context and actionable remediation in error messages.
 All hot paths must have benchmarks:
 
 ```rust
-#[bench]
-fn bench_merge_large_files(b: &mut Bencher) {
-    b.iter(|| merge_large_files());
+use criterion::{Criterion, criterion_group, criterion_main};
+
+fn bench_merge_large_files(c: &mut Criterion) {
+    c.benchmark_function("merge_large_files", |b| b.iter(|| merge_large_files()));
 }
+
+criterion_group!(benches, bench_merge_large_files);
+criterion_main!(benches);
 ```
 
 ### Performance Budgets

@@ -333,5 +333,5 @@ fn test_chapter_long_duration() {
     // Duration is derived from the next chapter's start_time by mp4ameta.
     // For the last chapter there is no "next chapter", so duration may be 0.
     // The important invariant is that the start_time survived without overflow.
-    assert!(late_chapter.duration >= 0, "Late chapter duration should not underflow");
+    assert_eq!(late_chapter.duration, 0, "Last chapter duration should be 0 (no next chapter)");
 }
