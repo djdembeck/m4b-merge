@@ -300,11 +300,7 @@ fn test_chapter_long_duration() {
     let long_start = Duration::from_secs(90_000); // 25 hours
     let chapters = vec![
         m4b_merge::metadata::Chapter::new("Early Chapter", Duration::ZERO, Duration::from_secs(5)),
-        m4b_merge::metadata::Chapter::new(
-            "Late Chapter",
-            long_start,
-            Duration::from_secs(3_600),
-        ),
+        m4b_merge::metadata::Chapter::new("Late Chapter", long_start, Duration::from_secs(3_600)),
     ];
 
     // Embed chapters using Tagger
@@ -318,11 +314,7 @@ fn test_chapter_long_duration() {
         m4b_merge::chapters::read_chapters(&m4b_path).expect("Failed to read chapters");
 
     // Verify we have both chapters
-    assert_eq!(
-        read_chapters.len(),
-        2,
-        "Should have 2 chapters after embedding long duration"
-    );
+    assert_eq!(read_chapters.len(), 2, "Should have 2 chapters after embedding long duration");
 
     // Verify the long-duration chapter start_time survived without overflow
     let late_chapter = read_chapters
@@ -341,8 +333,5 @@ fn test_chapter_long_duration() {
     // Duration is derived from the next chapter's start_time by mp4ameta.
     // For the last chapter there is no "next chapter", so duration may be 0.
     // The important invariant is that the start_time survived without overflow.
-    assert!(
-        late_chapter.duration >= 0,
-        "Late chapter duration should not underflow"
-    );
+    assert!(late_chapter.duration >= 0, "Late chapter duration should not underflow");
 }
