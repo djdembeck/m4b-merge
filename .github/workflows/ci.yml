@@ -124,8 +124,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
       - name: Run cargo audit
-        uses: rustsec/audit-check@v2.0.0
-        with:
-          manifest_path: ./Cargo.toml
-          deny_warnings: true
+        run: cargo audit --deny warnings

@@ -54,6 +54,9 @@ jobs:
 
             # Build and push Docker image with Buildx (don't push on PR)
             # https://github.com/docker/build-push-action
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@e669b9d3fb6f4e4bd448428a22e0839a31a773e4
+
             - name: Set up QEMU
               uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8  # v4.2.0
 

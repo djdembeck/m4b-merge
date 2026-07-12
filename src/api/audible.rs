@@ -115,7 +115,7 @@ impl AudibleClient {
         let client = self.client.clone();
         let asin = asin.to_string();
 
-        Retry::spawn(retry_strategy, move || {
+        Retry::start(retry_strategy, move || {
             let client = client.clone();
             let base_url = base_url.clone();
             let asin = asin.clone();
@@ -171,7 +171,7 @@ impl AudibleClient {
         let client = self.client.clone();
         let url = cover_url.to_string();
 
-        Retry::spawn(retry_strategy, move || {
+        Retry::start(retry_strategy, move || {
             let client = client.clone();
             let url = url.clone();
 
