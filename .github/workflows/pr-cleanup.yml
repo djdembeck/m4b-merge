@@ -1,0 +1,37 @@
+name: PR Cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  packages: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  cleanup:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Delete PR image tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # List package versions and delete those matching the PR number
+          OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          echo "Looking for package versions tagged pr-$PR_NUMBER"
+          VERSIONS=$(gh api "/users/$OWNER/packages/container/$REPO/versions?per_page=100" --jq ".[] | select(.metadata.container.tags | index(\"pr-$PR_NUMBER\")) | .id" 2>/dev/null || true)
+          for id in $VERSIONS; do
+            echo "Deleting package version $id"
+            gh api --method DELETE "/users/$OWNER/packages/container/$REPO/versions/$id" || true
+          done

@@ -1,17 +1,16 @@
 # =============================================================================
-# Build stage - Compile the Rust binary
+# Build stage - Compile the Rust binary (Alpine/musl, static binary)
 # =============================================================================
-FROM rust:1.96-slim AS builder
+FROM rust:1.96-alpine AS builder
 
 WORKDIR /app
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    pkg-config \
+RUN apk add --no-cache \
+    musl-dev \
+    pkgconfig \
     cmake \
-    perl \
-    && rm -rf /var/lib/apt/lists/*
+    perl
 
 # Copy only Cargo files first for better layer caching
 COPY Cargo.toml Cargo.lock ./
@@ -29,19 +28,15 @@ COPY . .
 RUN cargo build --release --locked
 
 # =============================================================================
-# Runtime stage - Minimal image with FFmpeg
+# Runtime stage - Minimal Alpine image with FFmpeg
 # =============================================================================
-FROM jrottenberg/ffmpeg:6-ubuntu AS runtime
+FROM alpine:3.22 AS runtime
 
-# Install CA certificates and other runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+# Install runtime dependencies
+RUN apk add --no-cache ffmpeg ca-certificates
 
 # Create non-root user
-RUN groupadd appgroup && \
-    useradd --gid appgroup --shell /bin/bash --create-home appuser
+RUN addgroup -S appgroup && adduser -S -G appgroup appuser
 
 # Create necessary directories
 RUN mkdir -p /input /output /config && \

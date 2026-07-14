@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
-use crate::api::audible::{AudibleClient, AudibleError};
+use crate::api::audiobookdb::{AudiobookdbClient, AudiobookdbError};
 use crate::audio::ffmpeg::FFmpeg;
 use crate::config::Config;
 use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
@@ -32,7 +32,7 @@ pub enum ProcessorError {
     Merge(#[from] MergeError),
 
     #[error("API error: {0}")]
-    Api(#[from] AudibleError),
+    Api(#[from] AudiobookdbError),
 
     #[error("Tagging error: {0}")]
     Tagging(#[from] TaggingError),
@@ -145,7 +145,7 @@ impl ProgressHandler for NoOpProgressHandler {
 pub struct Processor {
     config: Config,
     ffmpeg: Arc<FFmpeg>,
-    api_client: Option<AudibleClient>,
+    api_client: Option<AudiobookdbClient>,
     merger: Merger,
     tagger: Tagger,
 }
@@ -158,18 +158,8 @@ impl Processor {
             FFmpeg::discover().map_err(|e| ProcessorError::FFmpegNotFound(e.to_string()))?,
         );
 
-        // Create API client if URL is provided
-        let api_client = if config.api_url.is_empty() {
-            None
-        } else {
-            match AudibleClient::with_base_url(&config.api_url) {
-                Ok(client) => Some(client),
-                Err(e) => {
-                    warn!("Failed to create API client: {}", e);
-                    None
-                }
-            }
-        };
+        // Create API client
+        let api_client = Some(AudiobookdbClient::new());
 
         let merger = Merger::new(ffmpeg.clone());
         let tagger = Tagger::new();
@@ -182,7 +172,7 @@ impl Processor {
     pub fn with_components(
         config: Config,
         ffmpeg: Arc<FFmpeg>,
-        api_client: Option<AudibleClient>,
+        api_client: Option<AudiobookdbClient>,
     ) -> Self {
         let merger = Merger::new(ffmpeg.clone());
         let tagger = Tagger::new();
@@ -601,8 +591,7 @@ impl Processor {
         &self.ffmpeg
     }
 
-    /// Get the API client
-    pub fn api_client(&self) -> Option<&AudibleClient> {
+    pub fn api_client(&self) -> Option<&AudiobookdbClient> {
         self.api_client.as_ref()
     }
 
@@ -627,7 +616,6 @@ mod tests {
         Config::new(
             vec![],
             Some(temp_dir.path().join("output")),
-            "https://api.audnex.us".to_string(),
             Some(temp_dir.path().join("completed")),
             1,
             "info".to_string(),
