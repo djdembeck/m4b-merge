@@ -21,9 +21,6 @@ struct Args {
     #[arg(short = 'o', long = "output", value_name = "PATH")]
     pub output: Option<PathBuf>,
 
-    /// Audnexus API URL to use for metadata lookup
-    #[arg(long = "api-url", value_name = "URL", default_value = "https://api.audnex.us")]
-    pub api_url: String,
 
     /// Directory path to move original input files to after processing
     #[arg(long = "completed-directory", value_name = "PATH")]
@@ -117,7 +114,6 @@ async fn main() {
     let config = Config::new(
         args.inputs.clone(),
         args.output.clone(),
-        args.api_url,
         args.completed_directory,
         args.num_cpus,
         args.log_level,

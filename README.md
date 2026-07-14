@@ -6,7 +6,7 @@ A blazing fast CLI tool for merging audiobook files into sorted, tagged M4B file
 
 - **Multi-format support** — Input MP3, M4A, or M4B files; output is always M4B
 - **Smart merging** — Preserves original bitrate and sample rate
-- **Metadata fetching** — Automatic metadata lookup from [Audnexus](https://github.com/laxamentumtech/audnexus) via ASIN
+- **Metadata fetching** — Automatic metadata lookup from [audiobookdb.org](https://audiobookdb.org) via ASIN
 - **Chapter preservation** — Maintains chapter markers from source M4B files
 - **Chapter embedding** — Embeds chapters directly into output M4B files
 - **Cover art** — Embeds high-resolution (2000x2000+) cover art
@@ -114,9 +114,6 @@ m4b-merge -i input_folder/
 ```bash
 # Provide ASIN for automatic metadata fetch
 m4b-merge -i input/file.mp3 -a B012345678
-
-# Custom Audnexus API endpoint
-m4b-merge -i input/file.mp3 -a B012345678 --api-url https://api.audnex.us
 ```
 
 ### Output Options
