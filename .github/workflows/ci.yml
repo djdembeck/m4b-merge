@@ -44,7 +44,7 @@ jobs:
 
       - run: cargo clippy --all-features -- -D warnings
 
-      - run: cargo install cargo-audit --locked
+      - run: command -v cargo-audit || cargo install cargo-audit --locked
 
       - run: cargo audit --deny warnings
 
