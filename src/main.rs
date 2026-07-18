@@ -21,7 +21,6 @@ struct Args {
     #[arg(short = 'o', long = "output", value_name = "PATH")]
     pub output: Option<PathBuf>,
 
-
     /// Directory path to move original input files to after processing
     #[arg(long = "completed-directory", value_name = "PATH")]
     pub completed_directory: Option<PathBuf>,

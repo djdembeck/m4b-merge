@@ -345,7 +345,11 @@ impl Processor {
 
         // Dry-run: print what would happen without doing it
         if self.config.dry_run {
-            info!("DRY RUN: Would merge {} file(s) into: {}", group.files.len(), output_path.display());
+            info!(
+                "DRY RUN: Would merge {} file(s) into: {}",
+                group.files.len(),
+                output_path.display()
+            );
 
             // Show what input files would be merged
             for file in &group.files {
