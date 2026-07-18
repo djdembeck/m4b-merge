@@ -1,6 +1,6 @@
-use std::time::Duration;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
+use std::time::Duration;
 use thiserror::Error;
 use tokio_retry::RetryIf;
 use tokio_retry::strategy::{ExponentialBackoff, jitter};
@@ -33,6 +33,12 @@ pub enum AudiobookdbError {
 pub struct AudiobookdbClient {
     client: Client,
     base_url: String,
+}
+
+impl Default for AudiobookdbClient {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AudiobookdbClient {
@@ -81,7 +87,8 @@ impl AudiobookdbClient {
                 let url = url.clone();
                 let body = body.clone();
                 async move {
-                    let resp = client.post(&url)
+                    let resp = client
+                        .post(&url)
                         .header("Accept", "application/json")
                         .json(&body)
                         .send()
@@ -96,13 +103,17 @@ impl AudiobookdbClient {
                         StatusCode::TOO_MANY_REQUESTS => Err(AudiobookdbError::RateLimited),
                         _ => {
                             let msg = resp.text().await.unwrap_or_default();
-                            Err(AudiobookdbError::ApiError { status: status.as_u16(), message: msg })
+                            Err(AudiobookdbError::ApiError {
+                                status: status.as_u16(),
+                                message: msg,
+                            })
                         }
                     }
                 }
             },
             Self::is_transient_error,
-        ).await
+        )
+        .await
     }
 
     async fn get_book(&self, id: &str, include: &str) -> Result<AudiobookdbBook, AudiobookdbError> {
@@ -118,10 +129,7 @@ impl AudiobookdbClient {
                 let client = client.clone();
                 let url = url.clone();
                 async move {
-                    let resp = client.get(&url)
-                        .header("Accept", "application/json")
-                        .send()
-                        .await?;
+                    let resp = client.get(&url).header("Accept", "application/json").send().await?;
 
                     let status = resp.status();
                     match status {
@@ -130,16 +138,24 @@ impl AudiobookdbClient {
                         StatusCode::TOO_MANY_REQUESTS => Err(AudiobookdbError::RateLimited),
                         _ => {
                             let msg = resp.text().await.unwrap_or_default();
-                            Err(AudiobookdbError::ApiError { status: status.as_u16(), message: msg })
+                            Err(AudiobookdbError::ApiError {
+                                status: status.as_u16(),
+                                message: msg,
+                            })
                         }
                     }
                 }
             },
             Self::is_transient_error,
-        ).await
+        )
+        .await
     }
 
-    async fn get_release(&self, id: &str, include: &str) -> Result<AudiobookdbRelease, AudiobookdbError> {
+    async fn get_release(
+        &self,
+        id: &str,
+        include: &str,
+    ) -> Result<AudiobookdbRelease, AudiobookdbError> {
         let url = format!("{}/releases/{}?include={}", self.base_url, id, include);
 
         let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
@@ -152,10 +168,7 @@ impl AudiobookdbClient {
                 let client = client.clone();
                 let url = url.clone();
                 async move {
-                    let resp = client.get(&url)
-                        .header("Accept", "application/json")
-                        .send()
-                        .await?;
+                    let resp = client.get(&url).header("Accept", "application/json").send().await?;
 
                     let status = resp.status();
                     match status {
@@ -164,22 +177,28 @@ impl AudiobookdbClient {
                         StatusCode::TOO_MANY_REQUESTS => Err(AudiobookdbError::RateLimited),
                         _ => {
                             let msg = resp.text().await.unwrap_or_default();
-                            Err(AudiobookdbError::ApiError { status: status.as_u16(), message: msg })
+                            Err(AudiobookdbError::ApiError {
+                                status: status.as_u16(),
+                                message: msg,
+                            })
                         }
                     }
                 }
             },
             Self::is_transient_error,
-        ).await
+        )
+        .await
     }
 
     pub async fn fetch_book(&self, asin: &str) -> Result<BookMetadata, AudiobookdbError> {
         let results = self.search_books(asin).await?;
 
-        let book_id = results.iter()
+        let book_id = results
+            .iter()
             .filter(|h| h.r#type == "books" || h.r#type == "book")
             .find(|h| {
-                let book: AudiobookdbBook = serde_json::from_value(h.data.clone()).unwrap_or_default();
+                let book: AudiobookdbBook =
+                    serde_json::from_value(h.data.clone()).unwrap_or_default();
                 book.external.iter().any(|e| e.r#type == "Audible" && e.id == asin)
             })
             .map(|h| h.id.clone());
@@ -189,27 +208,32 @@ impl AudiobookdbClient {
             None => return Err(AudiobookdbError::AsinNotFound(asin.to_string())),
         };
 
-        let book = self.get_book(&book_id, "external,genres,people,releases,series,tags,images").await?;
+        let book =
+            self.get_book(&book_id, "external,genres,people,releases,series,tags,images").await?;
 
-        let release = book.releases.first().and_then(|r| {
+        let release = book.releases.first().map(|r| {
             let release_id = r.id.clone();
-            Some(async move {
-                self.get_release(&release_id, "chapterDetail,external,images,language,people,publisher").await
-            })
+            async move {
+                self.get_release(
+                    &release_id,
+                    "chapterDetail,external,images,language,people,publisher",
+                )
+                .await
+            }
         });
 
-        let release_data = if let Some(fut) = release {
-            fut.await.ok()
-        } else {
-            None
-        };
+        let release_data = if let Some(fut) = release { fut.await.ok() } else { None };
 
-        let authors: Vec<String> = book.people.iter()
+        let authors: Vec<String> = book
+            .people
+            .iter()
             .filter(|p| p.role.name == "Author" || p.role.name == "author")
             .map(|p| p.person.name.clone())
             .collect();
 
-        let narrators: Vec<String> = book.people.iter()
+        let narrators: Vec<String> = book
+            .people
+            .iter()
             .filter(|p| p.role.name == "Narrator" || p.role.name == "narrator")
             .map(|p| p.person.name.clone())
             .collect();
@@ -217,30 +241,39 @@ impl AudiobookdbClient {
         let series_name = book.series.first().map(|s| s.series_id.clone());
         let series_position = book.series.first().map(|s| s.position.to_string());
 
-        let year = book.originally_published_at.as_ref()
+        let year = book
+            .originally_published_at
+            .as_ref()
             .and_then(|d| d.split('-').next())
             .and_then(|y| y.parse().ok());
 
-        let genres: Vec<String> = book.genres.iter()
-            .map(|g| g.title.clone())
-            .collect();
+        let genres: Vec<String> = book.genres.iter().map(|g| g.title.clone()).collect();
 
-        let cover_url = book.images.iter()
+        let cover_url = book
+            .images
+            .iter()
             .filter(|i| i.width >= 500)
             .max_by_key(|i| i.width)
             .map(|i| i.url.clone());
 
-        let chapters = release_data.as_ref().map(|r| {
-            r.chapter_detail.as_ref().map(|cd| {
-                cd.chapters.iter().map(|ch| {
-                    Chapter {
-                        title: ch.title.clone(),
-                        start_time: Duration::from_millis(ch.start_offset_ms as u64),
-                        duration: Duration::from_millis(ch.length_ms as u64),
-                    }
-                }).collect()
-            }).unwrap_or_default()
-        }).unwrap_or_default();
+        let chapters = release_data
+            .as_ref()
+            .map(|r| {
+                r.chapter_detail
+                    .as_ref()
+                    .map(|cd| {
+                        cd.chapters
+                            .iter()
+                            .map(|ch| Chapter {
+                                title: ch.title.clone(),
+                                start_time: Duration::from_millis(ch.start_offset_ms as u64),
+                                duration: Duration::from_millis(ch.length_ms as u64),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
 
         Ok(BookMetadata {
             asin: asin.to_string(),
@@ -250,7 +283,12 @@ impl AudiobookdbClient {
             narrators,
             series_name,
             series_position,
-            description: book.description.as_ref().and_then(|s| s.as_str()).map(|s| s.to_string()).unwrap_or_default(),
+            description: book
+                .description
+                .as_ref()
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
             genres,
             year,
             cover_url,
@@ -273,7 +311,9 @@ impl AudiobookdbClient {
                     let status = resp.status();
                     match status {
                         StatusCode::OK => Ok(resp.bytes().await?.to_vec()),
-                        StatusCode::NOT_FOUND => Err(AudiobookdbError::NotFound("cover".to_string())),
+                        StatusCode::NOT_FOUND => {
+                            Err(AudiobookdbError::NotFound("cover".to_string()))
+                        }
                         StatusCode::TOO_MANY_REQUESTS => Err(AudiobookdbError::RateLimited),
                         status if status.is_server_error() => Err(AudiobookdbError::ApiError {
                             status: status.as_u16(),
@@ -287,7 +327,8 @@ impl AudiobookdbClient {
                 }
             },
             Self::is_transient_error,
-        ).await
+        )
+        .await
     }
 }
 
