@@ -5,6 +5,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub inputs: Vec<PathBuf>,
     pub output: Option<PathBuf>,
+    pub api_url: String,
     pub completed_directory: Option<PathBuf>,
     pub num_cpus: usize,
     pub log_level: String,
@@ -19,6 +20,7 @@ impl Config {
     pub fn new(
         inputs: Vec<PathBuf>,
         output: Option<PathBuf>,
+        api_url: String,
         completed_directory: Option<PathBuf>,
         num_cpus: usize,
         log_level: String,
@@ -29,6 +31,7 @@ impl Config {
         Self {
             inputs,
             output,
+            api_url,
             completed_directory,
             num_cpus,
             log_level,

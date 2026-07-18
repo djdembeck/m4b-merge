@@ -1,3 +1,3 @@
-pub mod audiobookdb;
+pub mod audible;
 
-pub use audiobookdb::{AudiobookdbClient, AudiobookdbError};
+pub use audible::{AudibleClient, AudibleError};
