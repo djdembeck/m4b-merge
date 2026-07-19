@@ -602,12 +602,11 @@ fn format_duration(duration: Duration) -> String {
     format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis)
 }
 
-/// Check if an IO error indicates a cross-device link (EXDEV on Unix)
-/// Note: On Windows, cross-device moves fail with ERROR_NOT_SAME_DEVICE (17).
-/// This function only checks for Unix errno 18 (EXDEV).
+/// Check if an IO error indicates a cross-device link (EXDEV on Unix, ERROR_NOT_SAME_DEVICE on Windows)
 fn is_cross_device_error(err: &std::io::Error) -> bool {
     // Unix: errno 18 is EXDEV (Invalid cross-device link)
-    err.raw_os_error() == Some(18)
+    // Windows: errno 17 is ERROR_NOT_SAME_DEVICE
+    err.raw_os_error() == Some(18) || (cfg!(windows) && err.raw_os_error() == Some(17))
 }
 
 #[cfg(test)]

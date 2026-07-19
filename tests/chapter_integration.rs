@@ -64,7 +64,7 @@ fn test_chapter_embed_and_read_roundtrip() {
 
     // Read back chapters using the chapters module
     let read_chapters =
-        m4b_merge::chapters::read_chapters(&m4b_path).expect("Failed to read chapters");
+        m4b_merge::chapters::read_chapters(&m4b_path, None).expect("Failed to read chapters");
 
     // Verify chapter count
     assert_eq!(read_chapters.len(), 3, "Should have 3 chapters embedded and read back");
@@ -132,7 +132,7 @@ fn test_chapter_embed_single_chapter() {
 
     // Read back and verify
     let read_chapters =
-        m4b_merge::chapters::read_chapters(&m4b_path).expect("Failed to read chapters");
+        m4b_merge::chapters::read_chapters(&m4b_path, None).expect("Failed to read chapters");
 
     assert_eq!(read_chapters.len(), 1, "Should have exactly 1 chapter");
     assert_eq!(read_chapters[0].title, "Single Chapter", "Chapter title should match");
@@ -176,7 +176,7 @@ fn test_chapter_embed_multiple_chapters() {
 
     // Read back and verify
     let read_chapters =
-        m4b_merge::chapters::read_chapters(&m4b_path).expect("Failed to read chapters");
+        m4b_merge::chapters::read_chapters(&m4b_path, None).expect("Failed to read chapters");
 
     assert_eq!(read_chapters.len(), 4, "Should have 4 chapters");
 
@@ -226,7 +226,7 @@ fn test_chapter_embed_replaces_existing() {
 
     // Verify initial chapters
     let read_chapters =
-        m4b_merge::chapters::read_chapters(&m4b_path).expect("Failed to read chapters");
+        m4b_merge::chapters::read_chapters(&m4b_path, None).expect("Failed to read chapters");
     assert_eq!(read_chapters.len(), 2, "Should have 2 initial chapters");
 
     // Second embed: 3 chapters (should replace)
@@ -247,7 +247,7 @@ fn test_chapter_embed_replaces_existing() {
 
     // Verify chapters were replaced
     let read_chapters =
-        m4b_merge::chapters::read_chapters(&m4b_path).expect("Failed to read chapters");
+        m4b_merge::chapters::read_chapters(&m4b_path, None).expect("Failed to read chapters");
 
     assert_eq!(read_chapters.len(), 3, "Should have 3 chapters after replacement");
     assert_eq!(
@@ -278,7 +278,7 @@ fn test_chapter_read_from_file_without_chapters() {
 
     // Read chapters from file that has none
     let read_chapters =
-        m4b_merge::chapters::read_chapters(&m4b_path).expect("Failed to read chapters");
+        m4b_merge::chapters::read_chapters(&m4b_path, None).expect("Failed to read chapters");
 
     assert!(read_chapters.is_empty(), "File without chapters should return empty list");
 }
@@ -311,7 +311,7 @@ fn test_chapter_long_duration() {
 
     // Read back chapters
     let read_chapters =
-        m4b_merge::chapters::read_chapters(&m4b_path).expect("Failed to read chapters");
+        m4b_merge::chapters::read_chapters(&m4b_path, None).expect("Failed to read chapters");
 
     // Verify we have both chapters
     assert_eq!(read_chapters.len(), 2, "Should have 2 chapters after embedding long duration");

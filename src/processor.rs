@@ -57,6 +57,9 @@ pub enum ProcessorError {
 
     #[error("Group processing failed: {group}")]
     GroupProcessingFailed { group: String, source: Box<dyn std::error::Error + Send + Sync> },
+
+    #[error("Partial processing complete: {detail}")]
+    PartialFailure { results: Vec<ProcessingResult>, detail: String },
 }
 
 /// Result type for processor operations
@@ -233,8 +236,9 @@ impl Processor {
             return Err(ProcessorError::NoInputs);
         }
 
-        // Process each group
+        // Best-effort: each group is processed independently
         let mut results = Vec::new();
+        let mut failed_groups: Vec<(String, String)> = Vec::new();
         let total_groups = groups.len();
 
         for (idx, group) in groups.iter().enumerate() {
@@ -251,6 +255,8 @@ impl Processor {
                     results.push(result);
                 }
                 Err(e) => {
+                    warn!("Group '{}' failed: {}", group.name, e);
+                    failed_groups.push((group.name.clone(), e.to_string()));
                     progress_handler.on_progress(ProcessingProgress {
                         stage: ProcessingStage::Error,
                         current_file: Some(group.files[0].path.clone()),
@@ -258,12 +264,30 @@ impl Processor {
                         completed_files: idx,
                         message: format!("Failed to process group '{}': {}", group.name, e),
                     });
-                    return Err(ProcessorError::GroupProcessingFailed {
-                        group: group.name.clone(),
-                        source: Box::new(e) as Box<dyn std::error::Error + Send + Sync>,
-                    });
+                    continue;
                 }
             }
+        }
+
+        if results.is_empty() {
+            return Err(ProcessorError::GroupProcessingFailed {
+                group: failed_groups.first().map(|(g, _)| g.clone()).unwrap_or_default(),
+                source: Box::new(std::io::Error::other("All groups failed to process")),
+            });
+        }
+
+        if !failed_groups.is_empty() {
+            let detail = format!(
+                "{} of {} groups succeeded; failed: {}",
+                results.len(),
+                total_groups,
+                failed_groups
+                    .iter()
+                    .map(|(g, e)| format!("{}: {}", g, e))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+            return Err(ProcessorError::PartialFailure { results, detail });
         }
 
         progress_handler.on_progress(ProcessingProgress {
@@ -326,7 +350,7 @@ impl Processor {
         let metadata = if let Some(mut meta) = metadata {
             if meta.chapters.is_empty() && !group.files.is_empty() {
                 // Try to read chapters from the first input file
-                match crate::chapters::read_chapters(&group.files[0].path) {
+                match crate::chapters::read_chapters(&group.files[0].path, self.ffmpeg.ffprobe_path().to_str()) {
                     Ok(file_chapters) if !file_chapters.is_empty() => {
                         info!("Extracted {} chapters from input file", file_chapters.len());
                         // Convert file chapters to metadata chapters
@@ -705,5 +729,103 @@ mod tests {
 
         let result = processor.process(vec![]).await;
         assert!(matches!(result, Err(ProcessorError::NoInputs)));
+    }
+
+    #[tokio::test]
+    async fn test_process_group_dry_run_no_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::new(
+            vec![],
+            Some(temp_dir.path().join("output")),
+            String::new(),
+            None,
+            1,
+            "info".to_string(),
+            "{author}/{title}".to_string(),
+            true,
+            None,
+        );
+        let processor = Processor::new(config).unwrap();
+
+        // Create a test group with a dummy file
+        let test_dir = temp_dir.path().join("Test Book");
+        std::fs::create_dir(&test_dir).unwrap();
+        let _file_path = create_test_audio_file(&temp_dir, "Test Book/chapter1.mp3", b"dummy");
+        let audio_file = AudioFile::new(test_dir.join("chapter1.mp3")).unwrap();
+        let group = AudioGroup {
+            name: "Test Book".to_string(),
+            files: vec![audio_file],
+            disc_number: None,
+        };
+
+        let result = processor.process_group(&group, &NoOpProgressHandler).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_process_group_dry_run_with_invalid_asin() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::new(
+            vec![],
+            Some(temp_dir.path().join("output")),
+            String::new(),
+            None,
+            1,
+            "info".to_string(),
+            "{author}/{title}".to_string(),
+            true,
+            Some("INVALID_ASIN".to_string()),
+        );
+        let processor = Processor::new(config).unwrap();
+
+        let test_dir = temp_dir.path().join("Test Book [INVALID_ASIN]");
+        std::fs::create_dir(&test_dir).unwrap();
+        let _file_path = create_test_audio_file(&temp_dir, "Test Book [INVALID_ASIN]/chapter1.mp3", b"dummy");
+        let audio_file = AudioFile::new(test_dir.join("chapter1.mp3")).unwrap();
+        let group = AudioGroup {
+            name: "Test Book [INVALID_ASIN]".to_string(),
+            files: vec![audio_file],
+            disc_number: None,
+        };
+
+        let result = processor.process_group(&group, &NoOpProgressHandler).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_process_group_dry_run_output_path_resolution() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().join("output");
+        let config = Config::new(
+            vec![],
+            Some(output_dir.clone()),
+            String::new(),
+            None,
+            1,
+            "info".to_string(),
+            "{author}/{title}".to_string(),
+            true,
+            None,
+        );
+        let processor = Processor::new(config).unwrap();
+
+        // Create two test groups
+        for name in &["Book One", "Book Two"] {
+            let test_dir = temp_dir.path().join(name);
+            std::fs::create_dir(&test_dir).unwrap();
+            let _file_path = create_test_audio_file(&temp_dir, &format!("{}/audio.mp3", name), b"dummy");
+            let audio_file = AudioFile::new(test_dir.join("audio.mp3")).unwrap();
+            let group = AudioGroup {
+                name: name.to_string(),
+                files: vec![audio_file],
+                disc_number: None,
+            };
+
+            let result = processor.process_group(&group, &NoOpProgressHandler).await;
+            assert!(result.is_ok());
+            let result = result.unwrap();
+            assert!(result.output_file.starts_with(&output_dir));
+            assert_eq!(result.output_file.extension().unwrap(), "m4b");
+        }
     }
 }

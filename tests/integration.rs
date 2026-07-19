@@ -365,6 +365,9 @@ fn test_dry_run() {
 }
 #[test]
 fn test_dry_run_with_audio() {
+    if !ffmpeg_available() {
+        return;
+    }
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");

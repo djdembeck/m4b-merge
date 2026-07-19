@@ -12,9 +12,13 @@ pub struct Chapter {
     pub duration: u64,
 }
 
-pub fn read_chapters(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+/// Read chapters from an M4B file.
+///
+/// Tries ffprobe first, then falls back to chpl atom parsing.
+/// Pass `ffprobe_path` to use a specific ffprobe binary; `None` uses PATH.
+pub fn read_chapters(path: &Path, ffprobe_path: Option<&str>) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
     // Try to read chapters using ffprobe first
-    if let Ok(chapters) = read_chapters_ffprobe(path) {
+    if let Ok(chapters) = read_chapters_ffprobe(path, ffprobe_path) {
         if !chapters.is_empty() {
             return Ok(chapters);
         }
@@ -24,9 +28,12 @@ pub fn read_chapters(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::error::Er
     read_chapters_from_atom(path)
 }
 
-/// Read chapters using ffprobe
-fn read_chapters_ffprobe(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
-    let output = Command::new("ffprobe")
+/// Read chapters using ffprobe.
+///
+/// Pass `ffprobe_path` to use a specific ffprobe binary; `None` uses PATH.
+fn read_chapters_ffprobe(path: &Path, ffprobe_path: Option<&str>) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+    let probe_cmd = ffprobe_path.unwrap_or("ffprobe");
+    let output = Command::new(probe_cmd)
         .args(["-v", "quiet", "-print_format", "json", "-show_chapters"])
         .arg(path)
         .stdout(Stdio::piped())
@@ -314,7 +321,7 @@ mod tests {
             .cloned()
             .expect("No test file found. Run: m4b-merge -i ~/input/'Trailer Park Bikini Vampires [B0FDDCDXQ2]' -o ~/output");
 
-        let chapters = read_chapters(&test_file).expect("Failed to read chapters");
+        let chapters = read_chapters(&test_file, None).expect("Failed to read chapters");
 
         assert!(chapters.len() >= 5, "Expected at least 5 chapters, found {}", chapters.len());
 
