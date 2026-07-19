@@ -350,7 +350,10 @@ impl Processor {
         let metadata = if let Some(mut meta) = metadata {
             if meta.chapters.is_empty() && !group.files.is_empty() {
                 // Try to read chapters from the first input file
-                match crate::chapters::read_chapters(&group.files[0].path, self.ffmpeg.ffprobe_path().to_str()) {
+                match crate::chapters::read_chapters(
+                    &group.files[0].path,
+                    self.ffmpeg.ffprobe_path().to_str(),
+                ) {
                     Ok(file_chapters) if !file_chapters.is_empty() => {
                         info!("Extracted {} chapters from input file", file_chapters.len());
                         // Convert file chapters to metadata chapters
@@ -780,7 +783,8 @@ mod tests {
 
         let test_dir = temp_dir.path().join("Test Book [INVALID_ASIN]");
         std::fs::create_dir(&test_dir).unwrap();
-        let _file_path = create_test_audio_file(&temp_dir, "Test Book [INVALID_ASIN]/chapter1.mp3", b"dummy");
+        let _file_path =
+            create_test_audio_file(&temp_dir, "Test Book [INVALID_ASIN]/chapter1.mp3", b"dummy");
         let audio_file = AudioFile::new(test_dir.join("chapter1.mp3")).unwrap();
         let group = AudioGroup {
             name: "Test Book [INVALID_ASIN]".to_string(),
@@ -813,13 +817,11 @@ mod tests {
         for name in &["Book One", "Book Two"] {
             let test_dir = temp_dir.path().join(name);
             std::fs::create_dir(&test_dir).unwrap();
-            let _file_path = create_test_audio_file(&temp_dir, &format!("{}/audio.mp3", name), b"dummy");
+            let _file_path =
+                create_test_audio_file(&temp_dir, &format!("{}/audio.mp3", name), b"dummy");
             let audio_file = AudioFile::new(test_dir.join("audio.mp3")).unwrap();
-            let group = AudioGroup {
-                name: name.to_string(),
-                files: vec![audio_file],
-                disc_number: None,
-            };
+            let group =
+                AudioGroup { name: name.to_string(), files: vec![audio_file], disc_number: None };
 
             let result = processor.process_group(&group, &NoOpProgressHandler).await;
             assert!(result.is_ok());

@@ -16,7 +16,10 @@ pub struct Chapter {
 ///
 /// Tries ffprobe first, then falls back to chpl atom parsing.
 /// Pass `ffprobe_path` to use a specific ffprobe binary; `None` uses PATH.
-pub fn read_chapters(path: &Path, ffprobe_path: Option<&str>) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+pub fn read_chapters(
+    path: &Path,
+    ffprobe_path: Option<&str>,
+) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
     // Try to read chapters using ffprobe first
     if let Ok(chapters) = read_chapters_ffprobe(path, ffprobe_path) {
         if !chapters.is_empty() {
@@ -31,7 +34,10 @@ pub fn read_chapters(path: &Path, ffprobe_path: Option<&str>) -> Result<Vec<Chap
 /// Read chapters using ffprobe.
 ///
 /// Pass `ffprobe_path` to use a specific ffprobe binary; `None` uses PATH.
-fn read_chapters_ffprobe(path: &Path, ffprobe_path: Option<&str>) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+fn read_chapters_ffprobe(
+    path: &Path,
+    ffprobe_path: Option<&str>,
+) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
     let probe_cmd = ffprobe_path.unwrap_or("ffprobe");
     let output = Command::new(probe_cmd)
         .args(["-v", "quiet", "-print_format", "json", "-show_chapters"])
