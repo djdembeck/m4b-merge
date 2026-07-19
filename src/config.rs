@@ -41,3 +41,26 @@ impl Config {
         }
     }
 }
+
+impl Config {
+    /// Validate configuration and return an error message if invalid
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.inputs.is_empty() {
+            return Err("No input files or directories provided".to_string());
+        }
+
+        if let Some(output) = &self.output {
+            if let Err(e) = std::fs::create_dir_all(output) {
+                return Err(format!("Output directory is not writable: {}", e));
+            }
+        }
+
+        if let Some(completed_dir) = &self.completed_directory {
+            if let Err(e) = std::fs::create_dir_all(completed_dir) {
+                return Err(format!("Completed directory is not writable: {}", e));
+            }
+        }
+
+        Ok(())
+    }
+}

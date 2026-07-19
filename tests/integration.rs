@@ -363,3 +363,42 @@ fn test_dry_run() {
     assert!(stdout.contains("Dry run"));
     assert!(stdout.contains("Inputs:"));
 }
+#[test]
+fn test_dry_run_with_audio() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+
+    std::fs::create_dir(&input_dir).unwrap();
+    std::fs::create_dir(&output_dir).unwrap();
+
+    // Generate a real MP3 file
+    let mp3_path = input_dir.join("test.mp3");
+    generate_test_mp3(&mp3_path, 5);
+
+    // Run m4b-merge in dry-run mode with actual audio
+    let output = Command::new(bin_path())
+        .args(&["--dry-run", "-i", input_dir.to_str().unwrap(), "-o", output_dir.to_str().unwrap()])
+        .output()
+        .expect("Failed to run m4b-merge");
+
+    assert!(output.status.success(), "Dry run with audio should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("DRY RUN")
+            || stdout.contains("Dry run")
+            || stderr.contains("DRY RUN")
+            || stderr.contains("Dry run"),
+        "Output should mention dry run mode"
+    );
+
+    // Verify no output M4B file was created
+    let m4b_files = std::fs::read_dir(&output_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".m4b"))
+        .count();
+    assert_eq!(m4b_files, 0, "Dry run should not create any output files");
+}

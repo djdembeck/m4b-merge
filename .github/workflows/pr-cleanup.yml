@@ -33,5 +33,5 @@ jobs:
           VERSIONS=$(gh api "/users/$OWNER/packages/container/$REPO/versions?per_page=100" --jq ".[] | select(.metadata.container.tags | index(\"pr-$PR_NUMBER\")) | .id" 2>/dev/null || true)
           for id in $VERSIONS; do
             echo "Deleting package version $id"
-            gh api --method DELETE "/users/$OWNER/packages/container/$REPO/versions/$id" || true
+            gh api --method DELETE "/users/$OWNER/packages/container/$REPO/versions/$id"
           done

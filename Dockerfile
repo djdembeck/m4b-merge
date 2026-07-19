@@ -18,8 +18,7 @@ COPY Cargo.toml Cargo.lock ./
 # Create stub sources (lib + bin) so cargo can compile *only* the dependencies.
 # The real source is layered on top afterward; cargo then rebuilds just our crates.
 RUN mkdir -p src && \
-    echo "fn main() {}" > src/main.rs && \
-    echo "" > src/lib.rs
+    echo "fn main() {}" > src/main.rs
 
 # Pre-build dependencies. BuildKit cache mounts persist the cargo registry and
 # the build target across builds, so unchanged dependencies are never recached

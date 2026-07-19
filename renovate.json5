@@ -22,7 +22,7 @@
     },
     {
       description: "Automatically merge minor and patch-level updates",
-      matchUpdateTypes: ["minor", "digest", "patch", "pin"],
+      matchUpdateTypes: ["minor", "digest", "patch"],
       automerge: true,
       automergeType: "branch",
     },

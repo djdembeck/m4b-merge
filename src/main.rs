@@ -113,6 +113,28 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Early dry-run: print summary and exit without needing FFmpeg or output dir
+    if args.dry_run {
+        println!("=== Dry Run Mode ===");
+        println!("Inputs:");
+        for input in &args.inputs {
+            println!("  - {}", input.display());
+        }
+        if let Some(ref output) = args.output {
+            println!("Output: {}", output.display());
+        } else {
+            println!("Output: (default)");
+        }
+        if let Some(ref completed_dir) = args.completed_directory {
+            println!("Completed Directory: {}", completed_dir.display());
+        }
+        if let Some(ref asin) = args.asin {
+            println!("ASIN: {}", asin);
+        }
+        println!("\nDry run complete. No files were modified.");
+        std::process::exit(0);
+    }
+
     // Create configuration
     let config = Config::new(
         args.inputs.clone(),
@@ -125,6 +147,12 @@ async fn main() {
         args.dry_run,
         args.asin,
     );
+
+    // Validate configuration
+    if let Err(e) = config.validate() {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
 
     info!("m4b-merge starting with {} input(s)", args.inputs.len());
 

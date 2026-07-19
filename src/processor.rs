@@ -288,7 +288,10 @@ impl Processor {
         debug!("Processing group '{}' with {} files", group.name, input_paths.len());
 
         // Stage 2: API Lookup (optional - only if ASIN is provided or can be inferred)
-        let metadata = if let Some(ref client) = self.api_client {
+        // Skipped in dry-run mode to avoid unnecessary network calls
+        let metadata = if self.config.dry_run {
+            None
+        } else if let Some(client) = &self.api_client {
             let extracted_asin = self.extract_asin(group);
 
             let asin = self.config.asin.as_deref().or(extracted_asin.as_deref());
