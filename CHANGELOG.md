@@ -2,6 +2,77 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## 1.0.0 (2026-07-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* correct chpl parsing, CI pipelines, license, and code quality
+* CLI arguments converted from snake_case to kebab-case:
+    - --api_url → --api-url
+    - --completed_directory → --completed-directory
+    - --num_cpus → --num-cpus
+    - --log_level → --log-level
+    - --path_format → --path-format
+
+### Features
+
+* complete Rust rewrite of m4b-merge ([#376](https://github.com/djdembeck/m4b-merge/issues/376)) ([6071f92](https://github.com/djdembeck/m4b-merge/commit/6071f92f36eab42a931e2e802c6d91cf73c7a224))
+* improve batch processing resilience and add ffprobe_path to chapters ([01be42e](https://github.com/djdembeck/m4b-merge/commit/01be42ecbd72b7ba3b6dc38376b95c96d6e61178))
+* **merge:** :construction: better config 1: move user configurable options to arguments ([ebe9349](https://github.com/djdembeck/m4b-merge/commit/ebe9349f074588b3d0681263360fe9ff8893df10))
+* **merge:** :sparkles: add support for `asin` as output path term ([9d67a5a](https://github.com/djdembeck/m4b-merge/commit/9d67a5acdd8294380222a523cc25f51d792155fd))
+* **merge:** :sparkles: Allow specifying output naming convention ([5837c8f](https://github.com/djdembeck/m4b-merge/commit/5837c8f844e38a5a68f8249014dc1a06a83fd46d))
+* **merge:** :sparkles: use LOG_LEVEL from environment variable if available ([7df51c3](https://github.com/djdembeck/m4b-merge/commit/7df51c3ed994929ed7025861efd6194d4b8bdf0c))
+* migrate Python m4b-merge to Rust ([1f94d30](https://github.com/djdembeck/m4b-merge/commit/1f94d3052b8b5acbe4b8346b13cdcfae4506f2ab))
+
+
+### Bug Fixes
+
+* **audible:** :bug: fix double import config issue with api_url ([1b1a6ae](https://github.com/djdembeck/m4b-merge/commit/1b1a6ae4405726bea8736099e44689367a395a6a))
+* **audible:** :bug: fix validate url ([9a55bc4](https://github.com/djdembeck/m4b-merge/commit/9a55bc4d1ae497388d82d02f96f161904603918f))
+* **audible:** :bug: pass url directly instead of importing config ([648c6e2](https://github.com/djdembeck/m4b-merge/commit/648c6e2f5c22fa50956e004650e08ff6400a2ef6))
+* CI pipeline, Dockerfile, retry logic, chapter parsing, and dry-run mode ([513fba2](https://github.com/djdembeck/m4b-merge/commit/513fba208cffc1dd029be215eab8acd07ac1ca62))
+* **ci:** correct setup-buildx-action commit SHA ([7e6d427](https://github.com/djdembeck/m4b-merge/commit/7e6d4270a516898bbecbff63fc6fbbae1df3f8e3))
+* **ci:** downgrade actions/checkout from v7.0.0 to v6.0.3 ([0dca9e8](https://github.com/djdembeck/m4b-merge/commit/0dca9e8e1b1cb517c9c280d7d19ab991a1b9899e))
+* **ci:** restore missing uses directive for QEMU step ([eb17d81](https://github.com/djdembeck/m4b-merge/commit/eb17d81c9bf2d70554ce5e4cdbba5c30c1c10076))
+* **ci:** restrict multi-platform Docker builds to version tags only ([4d1cff9](https://github.com/djdembeck/m4b-merge/commit/4d1cff9cea0c9c7a5d77c8237bf6843353da46a7))
+* **ci:** update quinn-proto and Dockerfile for CI compliance ([1dbf00d](https://github.com/djdembeck/m4b-merge/commit/1dbf00d78210e8fe0f1b1019cb4581ed5382a175))
+* **ci:** use single-platform build for PRs in docker-publish ([8af5240](https://github.com/djdembeck/m4b-merge/commit/8af52402f9e79fff483883fd6376f08486adfa7e))
+* correct chpl parsing, CI pipelines, license, and code quality ([eb3b8ca](https://github.com/djdembeck/m4b-merge/commit/eb3b8caf80f3f04ff76e0b94595409ff99e199d7))
+* **docker:** :ambulance: also chown /config ([56bbc4f](https://github.com/djdembeck/m4b-merge/commit/56bbc4f427cff6dd905508db6ac378031e4b8a0e))
+* **docker:** :bug: better startup permissions management ([bd6c8a0](https://github.com/djdembeck/m4b-merge/commit/bd6c8a052fb0a25087595fa57482630c118bf2e9))
+* **dry-run:** handle missing audio files gracefully in discovery ([4b2ca57](https://github.com/djdembeck/m4b-merge/commit/4b2ca572e50441bf5bfce6d46422930a74f47f02))
+* file_title not found, replaced with title ([4924f61](https://github.com/djdembeck/m4b-merge/commit/4924f61aee96006cd5d96d301a8e6b55af7252fd))
+* file_title not found, replaced with title ([325cb78](https://github.com/djdembeck/m4b-merge/commit/325cb782cd6b170262d707cfcfa5950104be1daa))
+* **merge:** :ambulance: fix  inconsistent variable name ([296cee4](https://github.com/djdembeck/m4b-merge/commit/296cee458f4c36920f9f90410fd2330fed754cf5))
+* **merge:** :ambulance: fix crash on single file in a folder ([a8fdc07](https://github.com/djdembeck/m4b-merge/commit/a8fdc07b8fdb364f851f019c5be8d1e728d72e96))
+* **merge:** :bug: cleanup find_extension process ([5b6c0ff](https://github.com/djdembeck/m4b-merge/commit/5b6c0ffd2144360483bee79f935e68014c40a901))
+* **merge:** :bug: don't create empty directory of file name ([5b9fb1f](https://github.com/djdembeck/m4b-merge/commit/5b9fb1fdb4144354c466224246c7c305578ea169))
+* **merge:** :bug: fix asin validation before merge ([2baca86](https://github.com/djdembeck/m4b-merge/commit/2baca868a565118b97f045598269bff9b1871051))
+* **merge:** :bug: fix error when no cover exists ([f5d3b23](https://github.com/djdembeck/m4b-merge/commit/f5d3b2340f43c6ef02ff7bc365a0955fb32ee904))
+* **merge:** :bug: fix path comparison for junk dir ([eb41d8c](https://github.com/djdembeck/m4b-merge/commit/eb41d8cffa08b5cc07627f69770f744cf0f37f4f))
+* **merge:** :bug: fix replace_tag replacing partial terms instead of full term ([88bafa8](https://github.com/djdembeck/m4b-merge/commit/88bafa8e1b94cde7d6f131aa4ff04f3935209a1f))
+* **merge:** :bug: handle api having no author or narrators ([495c372](https://github.com/djdembeck/m4b-merge/commit/495c372b445c08ddf422888ac9a9ca3ef5c0d47b))
+* **merge:** :bug: handle case where input has no `bit_rate` and/or `sample_rate` ([01988f0](https://github.com/djdembeck/m4b-merge/commit/01988f0697e1451e8c52efccee227f16669da825))
+* **merge:** :bug: incorrect dict key ([e51bf14](https://github.com/djdembeck/m4b-merge/commit/e51bf146273a564470643a23f235b60b2672da42))
+* **merge:** :bug: properly fix moving completed input files ([75c524b](https://github.com/djdembeck/m4b-merge/commit/75c524b05b35e1ab56d7269ad84bae89d0724067))
+* **merge:** :bug: separate these into own functions so multi disc and single file both can pick up unknown extensions ([a61b2b5](https://github.com/djdembeck/m4b-merge/commit/a61b2b5d1e5a328e2c0bdc480aa276fb2d1e3c6d))
+* **merge:** bug handle api having no author or narrators ([d97085d](https://github.com/djdembeck/m4b-merge/commit/d97085d6bc0a635f0f9bd7f3d86b4b98de56089b))
+* replace deprecated Retry::spawn and update CI workflows ([9b800e6](https://github.com/djdembeck/m4b-merge/commit/9b800e636050eae8964d3f8b3523039c51395bb2))
+* resolve CI failures (fmt, reqwest deps) ([fc30062](https://github.com/djdembeck/m4b-merge/commit/fc30062e412a43fa29a27e1efc940e7604da6d7d))
+* restore dry-run guards, fix bitrate division, and re-add config validation ([87a6cf8](https://github.com/djdembeck/m4b-merge/commit/87a6cf867cbb133caa9f468e259b1374f06ea408))
+* write temporary covers to `input_path` ([#104](https://github.com/djdembeck/m4b-merge/issues/104)) ([f6fa05e](https://github.com/djdembeck/m4b-merge/commit/f6fa05e22c75ca543401af4fdab81b0ac5b3bb26))
+
+
+### Performance Improvements
+
+* **docker:** cache rust deps via stub-source ([877f710](https://github.com/djdembeck/m4b-merge/commit/877f710c4c553081bdabc4c51b3e0cf2af33344c))
+
+
+### Reverts
+
+* move audiobookdb API migration to feature branch ([70c0514](https://github.com/djdembeck/m4b-merge/commit/70c0514b30868e7241664cd3e296f5df263b14d0))
+
 ## [Unreleased]
 
 ### Added
