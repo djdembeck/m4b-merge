@@ -138,7 +138,7 @@ jobs:
         id: meta
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          flavor: suffix=-${{ matrix.suffix }}
+          flavor: suffix=-${{ matrix.suffix }};latest=false
           tags: |
             type=raw,value=${{ env.TAG_NAME }}
             type=semver,pattern={{version}},value=${{ env.TAG_NAME }}
@@ -190,6 +190,7 @@ jobs:
           # per-arch sources by appending the -amd64/-arm64 suffixes.
           echo "$TAGS" | while IFS= read -r ref; do
             [ -z "$ref" ] && continue
+            [[ "$ref" != *:* ]] && continue
             docker buildx imagetools create -t "$ref" \
               "$ref-amd64" \
               "$ref-arm64"
