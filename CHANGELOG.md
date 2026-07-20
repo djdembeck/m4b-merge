@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [1.0.0](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.0) (2026-07-20)
+
+
+### Features
+
+* **ci:** add workflow_dispatch to release workflow ([83ade7b](https://github.com/djdembeck/m4b-merge/commit/83ade7ba76d80f0d4bbe923f355f7ae25a5d28b1))
+
+
+### Bug Fixes
+
+* **ci:** pass full image refs to docker manifest assembly ([4b833b7](https://github.com/djdembeck/m4b-merge/commit/4b833b71d8d11b362734ccd67470a1cfadafff1c))
+* **docker:** disable auto-generated latest tag and skip tagless refs ([d68f93d](https://github.com/djdembeck/m4b-merge/commit/d68f93d97a280fe29702a4f7bb3bac3abbfabeb4))
+
 ## [Unreleased]
 
 ### Added
