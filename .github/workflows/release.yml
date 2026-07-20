@@ -175,12 +175,12 @@ jobs:
         id: meta
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          flavor: latest=false
           tags: |
             type=raw,value=${{ env.TAG_NAME }}
             type=semver,pattern={{version}},value=${{ env.TAG_NAME }}
             type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG_NAME }}
             type=semver,pattern={{major}},value=${{ env.TAG_NAME }}
+            type=raw,value=latest
 
       - name: Assemble multi-arch manifest
         env:
