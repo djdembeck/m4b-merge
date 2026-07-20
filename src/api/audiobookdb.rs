@@ -191,25 +191,37 @@ impl AudiobookdbClient {
     }
 
     pub async fn fetch_book(&self, id: &str) -> Result<BookMetadata, AudiobookdbError> {
-        let results = self.search_books(id).await?;
+        // Try direct ID lookup first (handles AudiobookDB internal IDs like jq3wT8UKmC7R)
+        let book_result = self
+            .get_book(id, "external,genres,people,releases,series,tags,images")
+            .await;
 
-        let book_id = results
-            .iter()
-            .filter(|h| h.r#type == "books" || h.r#type == "book")
-            .find(|h| {
-                let book: AudiobookdbBook =
-                    serde_json::from_value(h.data.clone()).unwrap_or_default();
-                book.external.iter().any(|e| e.r#type == "Audible" && e.id == id)
-            })
-            .map(|h| h.id.clone());
+        let book = match book_result {
+            Ok(b) => b,
+            Err(AudiobookdbError::NotFound(_)) => {
+                // Fall back to ASIN search via external reference
+                let results = self.search_books(id).await?;
 
-        let book_id = match book_id {
-            Some(id) => id,
-            None => return Err(AudiobookdbError::IdNotFound(id.to_string())),
+                let book_id = results
+                    .iter()
+                    .filter(|h| h.r#type == "books" || h.r#type == "book")
+                    .find(|h| {
+                        let b: AudiobookdbBook =
+                            serde_json::from_value(h.data.clone()).unwrap_or_default();
+                        b.external.iter().any(|e| e.r#type == "Audible" && e.id == id)
+                    })
+                    .map(|h| h.id.clone());
+
+                let book_id = match book_id {
+                    Some(id) => id,
+                    None => return Err(AudiobookdbError::IdNotFound(id.to_string())),
+                };
+
+                self.get_book(&book_id, "external,genres,people,releases,series,tags,images")
+                    .await?
+            }
+            Err(e) => return Err(e),
         };
-
-        let book =
-            self.get_book(&book_id, "external,genres,people,releases,series,tags,images").await?;
 
         let release = book.releases.first().map(|r| {
             let release_id = r.id.clone();
@@ -238,8 +250,8 @@ impl AudiobookdbClient {
             .map(|p| p.person.name.clone())
             .collect();
 
-        let series_name = book.series.first().map(|s| s.series_id.clone());
-        let series_position = book.series.first().map(|s| s.position.to_string());
+        let series_name = book.series.first().map(|s| s.series.title.clone());
+        let series_position = book.series.first().map(|s| s.position.clone());
 
         let year = book
             .originally_published_at
@@ -249,12 +261,7 @@ impl AudiobookdbClient {
 
         let genres: Vec<String> = book.genres.iter().map(|g| g.title.clone()).collect();
 
-        let cover_url = book
-            .images
-            .iter()
-            .filter(|i| i.width >= 500)
-            .max_by_key(|i| i.width)
-            .map(|i| i.url.clone());
+        let cover_url = book.images.first().map(|i| i.url.clone());
 
         let chapters = release_data
             .as_ref()
@@ -400,8 +407,10 @@ struct AudiobookdbChapter {
 struct AudiobookdbImage {
     id: String,
     url: String,
-    width: i32,
-    height: i32,
+    #[serde(default)]
+    width: Option<i32>,
+    #[serde(default)]
+    height: Option<i32>,
 }
 
 #[allow(dead_code)]
@@ -434,8 +443,16 @@ struct AudiobookdbIdTitle {
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 struct AudiobookdbBookInSeries {
-    series_id: String,
-    position: i32,
+    #[serde(rename = "ordinal")]
+    position: String,
+    series: AudiobookdbSeriesRef,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+struct AudiobookdbSeriesRef {
+    id: String,
+    title: String,
 }
 
 #[allow(dead_code)]
