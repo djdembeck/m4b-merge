@@ -1,6 +1,6 @@
 [package]
 name = "m4b-merge"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "A CLI tool which outputs consistently sorted, tagged, single m4b files"
 authors = ["djdembeck"]
