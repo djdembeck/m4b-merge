@@ -19,6 +19,7 @@ The tool automates metadata retrieval via ASIN lookup through the Audnexus API, 
 ## Install
 
 ### Docker (Fastest Path)
+
 Run without installation using the GHCR image.
 
 ```bash
@@ -30,9 +31,11 @@ docker run --rm \
 ```
 
 ### Pre-built Binaries
+
 Download the latest release for your platform from the [releases page](https://github.com/djdembeck/m4b-merge/releases).
 
 ### From Source
+
 Requires [FFmpeg](https://ffmpeg.org/) installed and available in your PATH.
 
 ```bash
@@ -44,6 +47,7 @@ cargo install --path .
 Basic CLI interaction. Use `m4b-merge --help` for all available flags.
 
 ### Basic Merging
+
 Merge all audio files in a directory into a single M4B.
 
 ```bash
@@ -51,6 +55,7 @@ m4b-merge -i input/book_folder/
 ```
 
 ### Metadata & High-Resolution Covers
+
 Provide an ASIN to automatically fetch metadata from Audnexus.
 
 ```bash
@@ -58,6 +63,7 @@ m4b-merge -i input/book_folder/ -a B012345678
 ```
 
 ### Custom Output & Organization
+
 Specify a custom output directory and organization template.
 
 ```bash
@@ -67,6 +73,7 @@ m4b-merge -i input/book_folder/ \
 ```
 
 ### Advanced Processing
+
 Use `--dry-run` to preview operations, `--num-cpus` to control parallelism, and `--completed-directory` to move processed files.
 
 ```bash
@@ -77,6 +84,7 @@ m4b-merge -i input/book_folder/ \
 ```
 
 ### Verify Environment
+
 Check FFmpeg installation and version.
 
 ```bash
@@ -87,24 +95,24 @@ m4b-merge --check-ffmpeg
 
 The output path is generated using the `-p` / `--path-format` template.
 
-| Variable | Description |
-| :--- | :--- |
-| `{author}` | Author name |
-| `{narrator}` | Narrator name |
-| `{title}` | Book title |
-| `{subtitle}` | Book subtitle |
-| `{series_name}` | Series name |
-| `{series_position}` | Series position number |
-| `{year}` | Release year |
+| Variable      | Description                      |
+|---------------|----------------------------------|
+| `{author}`   | Author name                     |
+| `{narrator}`  | Narrator name                   |
+| `{title}`    | Book title                      |
+| `{subtitle}`  | Book subtitle                   |
+| `{series_name}` | Series name                    |
+| `{series_position}` | Series position number    |
+| `{year}`     | Release year                    |
 
 **Default:** `{author}/{title}`
 
 ## Exit Codes
 
-| Code | Description |
-| :--- | :--- |
-| `0` | Success |
-| `1` | Error (missing input, FFmpeg not found, or processing failure) |
+| Code | Description                                                 |
+|------|------------------------------------------------------------|
+| `0`  | Success                                                     |
+| `1`  | Error (missing input, FFmpeg not found, processing failed) |
 
 ## Contributing
 
