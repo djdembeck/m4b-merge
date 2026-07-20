@@ -12,13 +12,13 @@ use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
 use crate::tagging::{Tagger, TaggingError};
 
-/// Static ASIN regex compiled once at startup
-static ASIN_REGEX: OnceLock<regex::Regex> = OnceLock::new();
+/// Static metadata ID regex compiled once at startup
+static METADATA_ID_REGEX: OnceLock<regex::Regex> = OnceLock::new();
 
-/// Get the static ASIN regex or initialize it
-fn get_asin_regex() -> &'static regex::Regex {
-    ASIN_REGEX.get_or_init(|| {
-        regex::Regex::new(r"\[([A-Z0-9]{10})\]").expect("Invalid ASIN regex pattern")
+/// Get the static metadata ID regex or initialize it
+fn get_metadata_id_regex() -> &'static regex::Regex {
+    METADATA_ID_REGEX.get_or_init(|| {
+        regex::Regex::new(r"\[([A-Z0-9]{10})\]").expect("Invalid metadata ID regex pattern")
     })
 }
 
@@ -308,31 +308,31 @@ impl Processor {
 
         debug!("Processing group '{}' with {} files", group.name, input_paths.len());
 
-        // Stage 2: API Lookup (optional - only if ASIN is provided or can be inferred)
+        // Stage 2: API Lookup (optional - only if metadata ID is provided or can be inferred)
         // Skipped in dry-run mode to avoid unnecessary network calls
         let metadata = if self.config.dry_run {
             None
         } else if let Some(client) = &self.api_client {
-            let extracted_asin = self.extract_asin(group);
+            let extracted_id = self.extract_metadata_id(group);
 
-            let asin = self.config.asin.as_deref().or(extracted_asin.as_deref());
+            let id = self.config.metadata_id.as_deref().or(extracted_id.as_deref());
 
-            if let Some(asin) = asin {
+            if let Some(id) = id {
                 progress_handler.on_progress(ProcessingProgress {
                     stage: ProcessingStage::ApiLookup,
                     current_file: Some(input_paths[0].clone()),
                     total_files: 1,
                     completed_files: 0,
-                    message: format!("Fetching metadata for ASIN: {}...", asin),
+                    message: format!("Fetching metadata for ID: {}...", id),
                 });
 
-                match client.fetch_book(asin).await {
+                match client.fetch_book(id).await {
                     Ok(book_metadata) => {
                         info!("Successfully fetched metadata for: {}", book_metadata.title);
                         Some(book_metadata)
                     }
                     Err(e) => {
-                        warn!("Failed to fetch metadata for ASIN {}: {}", asin, e);
+                        warn!("Failed to fetch metadata for ID {}: {}", id, e);
                         None
                     }
                 }
@@ -616,12 +616,12 @@ impl Processor {
         result
     }
 
-    /// Extract ASIN from audio group (folder name, existing metadata, etc.)
-    fn extract_asin(&self, group: &AudioGroup) -> Option<String> {
-        let re = get_asin_regex();
+    /// Extract metadata ID from audio group (folder name, existing metadata, etc.)
+    fn extract_metadata_id(&self, group: &AudioGroup) -> Option<String> {
+        let re = get_metadata_id_regex();
         if let Some(captures) = re.captures(&group.name) {
-            if let Some(asin) = captures.get(1) {
-                return Some(asin.as_str().to_string());
+            if let Some(capture) = captures.get(1) {
+                return Some(capture.as_str().to_string());
             }
         }
         None
@@ -765,8 +765,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
-    async fn test_process_group_dry_run_with_invalid_asin() {
+    async fn test_process_group_dry_run_with_invalid_id() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::new(
             vec![],
@@ -778,7 +777,7 @@ mod tests {
             "info".to_string(),
             "{author}/{title}".to_string(),
             true,
-            Some("INVALID_ASIN".to_string()),
+            Some("INVALID_ID".to_string()),
         );
         let processor = Processor::new(config).unwrap();
 

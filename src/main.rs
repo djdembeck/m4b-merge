@@ -50,9 +50,9 @@ struct Args {
     )]
     pub path_format: String,
 
-    /// ASIN for metadata lookup (optional)
-    #[arg(short = 'a', long = "asin", value_name = "ASIN")]
-    pub asin: Option<String>,
+    /// Metadata ID (ASIN, AudiobookDB book ID, etc.) (optional)
+    #[arg(short = 'a', long = "metadata-id", value_name = "ID")]
+    pub metadata_id: Option<String>,
 
     /// Show what would be done without actually doing it
     #[arg(long = "dry-run")]
@@ -132,8 +132,8 @@ async fn main() {
         if let Some(ref completed_dir) = args.completed_directory {
             println!("Completed Directory: {}", completed_dir.display());
         }
-        if let Some(ref asin) = args.asin {
-            println!("ASIN: {}", asin);
+        if let Some(metadata_id) = &args.metadata_id {
+            println!("Metadata ID: {}", metadata_id);
         }
         println!("Metadata Source: {}", args.metadata_source);
         println!("\nDry run complete. No files were modified.");
@@ -151,7 +151,7 @@ async fn main() {
         args.log_level,
         args.path_format,
         args.dry_run,
-        args.asin,
+        args.metadata_id,
     );
 
     // Validate configuration

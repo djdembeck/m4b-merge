@@ -71,10 +71,10 @@ impl MetadataSource {
         }
     }
 
-    pub async fn fetch_book(&self, asin: &str) -> Result<BookMetadata, MetadataError> {
+    pub async fn fetch_book(&self, id: &str) -> Result<BookMetadata, MetadataError> {
         match self {
-            Self::Audible(c) => Ok(c.fetch_book(asin).await?),
-            Self::Audiobookdb(c) => Ok(c.fetch_book(asin).await?),
+            Self::Audible(c) => Ok(c.fetch_book(id).await?),
+            Self::Audiobookdb(c) => Ok(c.fetch_book(id).await?),
         }
     }
 

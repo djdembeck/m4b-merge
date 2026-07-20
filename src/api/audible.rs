@@ -1,7 +1,6 @@
-use std::time::Duration;
-
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
+use std::time::Duration;
 use thiserror::Error;
 use tokio_retry::RetryIf;
 use tokio_retry::strategy::{ExponentialBackoff, jitter};
@@ -69,26 +68,6 @@ impl AudibleClient {
         Ok(Self { client, base_url: base_url.into() })
     }
 
-    /// Set a custom timeout for requests
-    pub fn with_timeout(self, timeout: Duration) -> Result<Self, AudibleError> {
-        let client = Client::builder()
-            .timeout(timeout)
-            .connect_timeout(Duration::from_secs(10)) // Connection timeout
-            .pool_idle_timeout(Duration::from_secs(30)) // Connection pool timeout
-            .build()?;
-
-        Ok(Self { client, base_url: self.base_url })
-    }
-
-    /// Validate ASIN format (10 alphanumeric characters)
-    fn validate_asin(asin: &str) -> Result<(), AudibleError> {
-        if asin.len() == 10 && asin.chars().all(|c| c.is_ascii_alphanumeric()) {
-            Ok(())
-        } else {
-            Err(AudibleError::InvalidAsin(asin.to_string()))
-        }
-    }
-
     /// Determine if an error is transient and should trigger retry
     fn is_transient_error(error: &AudibleError) -> bool {
         match error {
@@ -105,24 +84,33 @@ impl AudibleClient {
         }
     }
 
-    /// Fetch book metadata by ASIN with retry logic
-    pub async fn fetch_book(&self, asin: &str) -> Result<BookMetadata, AudibleError> {
-        Self::validate_asin(asin)?;
+    /// Validate that an ID is in the correct format
+    pub fn validate_id(id: &str) -> Result<(), AudibleError> {
+        if id.len() == 10 && id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            Ok(())
+        } else {
+            Err(AudibleError::InvalidAsin(id.to_string()))
+        }
+    }
+
+    /// Fetch book metadata by ID with retry logic
+    pub async fn fetch_book(&self, id: &str) -> Result<BookMetadata, AudibleError> {
+        Self::validate_id(id)?;
 
         let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
 
         let base_url = self.base_url.clone();
         let client = self.client.clone();
-        let asin = asin.to_string();
+        let id = id.to_string();
 
         RetryIf::start(
             retry_strategy,
             move || {
                 let client = client.clone();
                 let base_url = base_url.clone();
-                let asin = asin.clone();
+                let id = id.clone();
 
-                async move { Self::fetch_book_once(&client, &base_url, &asin).await }
+                async move { Self::fetch_book_once(&client, &base_url, &id).await }
             },
             Self::is_transient_error,
         )
@@ -133,9 +121,9 @@ impl AudibleClient {
     async fn fetch_book_once(
         client: &Client,
         base_url: &str,
-        asin: &str,
+        id: &str,
     ) -> Result<BookMetadata, AudibleError> {
-        let url = format!("{}/books/{}", base_url, asin);
+        let url = format!("{}/books/{}", base_url, id);
         tracing::debug!("Fetching metadata from: {}", url);
 
         let response = client.get(&url).send().await.map_err(|e| {
@@ -149,7 +137,7 @@ impl AudibleClient {
                 let api_response: ApiBookResponse = response.json().await?;
                 Ok(api_response.into_book_metadata())
             }
-            StatusCode::NOT_FOUND => Err(AudibleError::NotFound(asin.to_string())),
+            StatusCode::NOT_FOUND => Err(AudibleError::NotFound(id.to_string())),
             StatusCode::TOO_MANY_REQUESTS => Err(AudibleError::RateLimited),
             StatusCode::REQUEST_TIMEOUT => Err(AudibleError::Timeout),
             _ => {
@@ -250,7 +238,7 @@ impl ApiBookResponse {
         let series_position = self.series.first().and_then(|s| s.position.clone());
 
         BookMetadata {
-            asin: self.asin,
+            metadata_id: self.asin,
             title: self.title,
             subtitle: self.subtitle,
             authors: self.authors.into_iter().map(|a| a.name).collect(),
@@ -302,27 +290,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_validate_asin_valid() {
-        assert!(AudibleClient::validate_asin("B08XYZ1234").is_ok());
-        assert!(AudibleClient::validate_asin("1234567890").is_ok());
-        assert!(AudibleClient::validate_asin("ABCDEFGHIJ").is_ok());
+    fn test_validate_id_valid() {
+        assert!(AudibleClient::validate_id("B08XYZ1234").is_ok());
+        assert!(AudibleClient::validate_id("1234567890").is_ok());
+        assert!(AudibleClient::validate_id("ABCDEFGHIJ").is_ok());
     }
 
     #[test]
-    fn test_validate_asin_invalid() {
+    fn test_validate_id_invalid() {
         assert!(matches!(
-            AudibleClient::validate_asin("B08XYZ123"),
+            AudibleClient::validate_id("B08XYZ123"),
             Err(AudibleError::InvalidAsin(_))
         ));
         assert!(matches!(
-            AudibleClient::validate_asin("B08XYZ12345"),
+            AudibleClient::validate_id("B08XYZ12345"),
             Err(AudibleError::InvalidAsin(_))
         ));
         assert!(matches!(
-            AudibleClient::validate_asin("B08-XYZ123"),
+            AudibleClient::validate_id("B08-XYZ123"),
             Err(AudibleError::InvalidAsin(_))
         ));
-        assert!(matches!(AudibleClient::validate_asin(""), Err(AudibleError::InvalidAsin(_))));
+        assert!(matches!(AudibleClient::validate_id(""), Err(AudibleError::InvalidAsin(_))));
     }
 
     #[test]
@@ -353,7 +341,7 @@ mod tests {
         assert_eq!(response.authors[0].name, "Test Author");
 
         let metadata = response.into_book_metadata();
-        assert_eq!(metadata.asin, "B08XYZ1234");
+        assert_eq!(metadata.metadata_id, "B08XYZ1234");
         assert_eq!(metadata.year, Some(2023));
         assert_eq!(metadata.chapters.len(), 1);
         assert_eq!(metadata.chapters[0].start_time, Duration::from_millis(0));
@@ -368,7 +356,7 @@ mod tests {
 
         let response: ApiBookResponse = serde_json::from_str(json).unwrap();
         let metadata = response.into_book_metadata();
-        assert_eq!(metadata.asin, "B08XYZ1234");
+        assert_eq!(metadata.metadata_id, "B08XYZ1234");
         assert_eq!(metadata.title, "Test Book");
         assert!(metadata.authors.is_empty());
         assert!(metadata.chapters.is_empty());
@@ -416,7 +404,7 @@ mod tests {
         assert_eq!(response.series[0].position, Some("2".to_string()));
 
         let metadata = response.into_book_metadata();
-        assert_eq!(metadata.asin, "B08C6YJ1LS");
+        assert_eq!(metadata.metadata_id, "B08C6YJ1LS");
         assert_eq!(metadata.title, "The Coldest Case");
         assert_eq!(metadata.authors.len(), 2);
         assert_eq!(metadata.authors[0], "Ryan Silbert");

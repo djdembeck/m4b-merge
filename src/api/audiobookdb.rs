@@ -23,8 +23,8 @@ pub enum AudiobookdbError {
     RateLimited,
     #[error("timeout")]
     Timeout,
-    #[error("no book found for ASIN: {0}")]
-    AsinNotFound(String),
+    #[error("no book found for ID: {0}")]
+    IdNotFound(String),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -190,8 +190,8 @@ impl AudiobookdbClient {
         .await
     }
 
-    pub async fn fetch_book(&self, asin: &str) -> Result<BookMetadata, AudiobookdbError> {
-        let results = self.search_books(asin).await?;
+    pub async fn fetch_book(&self, id: &str) -> Result<BookMetadata, AudiobookdbError> {
+        let results = self.search_books(id).await?;
 
         let book_id = results
             .iter()
@@ -199,13 +199,13 @@ impl AudiobookdbClient {
             .find(|h| {
                 let book: AudiobookdbBook =
                     serde_json::from_value(h.data.clone()).unwrap_or_default();
-                book.external.iter().any(|e| e.r#type == "Audible" && e.id == asin)
+                book.external.iter().any(|e| e.r#type == "Audible" && e.id == id)
             })
             .map(|h| h.id.clone());
 
         let book_id = match book_id {
             Some(id) => id,
-            None => return Err(AudiobookdbError::AsinNotFound(asin.to_string())),
+            None => return Err(AudiobookdbError::IdNotFound(id.to_string())),
         };
 
         let book =
@@ -276,7 +276,7 @@ impl AudiobookdbClient {
             .unwrap_or_default();
 
         Ok(BookMetadata {
-            asin: asin.to_string(),
+            metadata_id: id.to_string(),
             title: book.title.clone(),
             subtitle: book.disambiguation.clone(),
             authors,
