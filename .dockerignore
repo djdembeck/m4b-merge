@@ -1,0 +1,54 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+
+# Build artifacts
+target/
+
+# Testing
+tests/
+*.test
+*.json
+
+# Documentation
+README.md
+CONTRIBUTING.md
+CHANGELOG.md
+LICENSE
+
+# CI/CD
+.github/
+
+# Docker
+Dockerfile
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Security
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Development
+.sisyphus/
+.opencode/
+.chunkhound/
+
+# Editor
+*.sublime-*
+
+# Temp
+tmp/
+temp/

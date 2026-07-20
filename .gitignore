@@ -1,0 +1,21 @@
+# Rust
+/target
+
+# Test data (large binary media files)
+tests/media_files/
+
+# Environments
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Development
+.sisyphus/
+.opencode/
+.chunkhound/

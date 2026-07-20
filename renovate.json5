@@ -1,0 +1,33 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended"],
+  baseBranches: ["develop"],
+  branchConcurrentLimit: 10,
+  commitMessagePrefix: "ci",
+  labels: ["dependencies", "ci", "renovate"],
+  schedule: ["before 6am on Monday"],
+  timezone: "Etc/UTC",
+  rebaseWhen: "auto",
+  stabilityDays: 5,
+  lockFileMaintenance: {
+    enabled: true,
+    automerge: true,
+    automergeType: "pr",
+    platformAutomerge: true,
+  },
+  packageRules: [
+    {
+      groupName: "github-actions",
+      matchManagers: ["github-actions"],
+    },
+    {
+      description: "Automatically merge minor and patch-level updates",
+      matchUpdateTypes: ["minor", "digest", "patch"],
+      automerge: true,
+      automergeType: "branch",
+    },
+  ],
+  vulnerabilityAlerts: {
+    labels: ["security"],
+  },
+}

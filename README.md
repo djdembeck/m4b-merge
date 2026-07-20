@@ -1,66 +1,123 @@
+# m4b-merge
+
+![License](https://img.shields.io/github/license/djdembeck/m4b-merge)
+![CI](https://img.shields.io/github/actions/workflow/status/djdembeck/m4b-merge/ci.yml)
+
+A blazing fast CLI tool for merging audiobook files into sorted, tagged M4B files.
+
+m4b-merge takes split audio files (MP3, M4A, or M4B) and merges them into a single, consistently tagged M4B file. Originally written in Python and rewritten in Rust, it provides high-performance processing with zero-copy merging for files of the same format, ensuring the original bitrate and sample rate are preserved.
+
+The tool automates metadata retrieval via ASIN lookup through the Audnexus API, embeds high-resolution cover art, and maintains chapter markers from source files.
+
+- [Install](#install)
+- [Usage](#usage)
+- [Path Format Variables](#path-format-variables)
+- [Exit Codes](#exit-codes)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Install
+
+### Docker (Fastest Path)
+
+Run without installation using the GHCR image.
+
+```bash
+docker run --rm \
+  -v /path/to/input:/input \
+  -v /path/to/output:/output \
+  ghcr.io/djdembeck/m4b-merge:latest \
+  -i /input/book_folder/ -o /output
+```
+
+### Pre-built Binaries
+
+Download the latest release for your platform from the [releases page](https://github.com/djdembeck/m4b-merge/releases).
+
+### From Source
+
+Requires [FFmpeg](https://ffmpeg.org/) installed and available in your PATH.
+
+```bash
+cargo install --path .
+```
 
 ## Usage
-`m4b-merge.sh [-b] [-f] [-h] [-m] [-v] [-y]`
 
-- `-b` Batch mode. File input is used for 1 folder only.
-- `-f` File or folder to run from. Enter multiple files if you need, as: `-f file1 -f file2 -f file3`
-- `-h` This help text.
-- `-m` Use manual metadata mode instead of Audible metadata fetching.
-- `-v` Verbose mode.
-- `-y` Answer 'yes' to all prompts.
+Basic CLI interaction. Use `m4b-merge --help` for all available flags.
 
-## Requirements
-- [m4b-tool](https://github.com/sandreas/m4b-tool) by sandreas
-    - [m4b-tool's list of dependencies](https://github.com/sandreas/m4b-tool#ubuntu)
-- `bash`
-- `curl`
-- `mutagen`
-- `pv`
+### Basic Merging
 
-## Configuration
-This script requires little pre-configuration. Here's what you need to know/can change from the top of the file:
+Merge all audio files in a directory into a single M4B.
 
-- `OUTPUT="/path/to/output"`
-  
-  By default this is empty. Personally I assign `OUTPUT` folder from my Docker image. If this is left blank, the script will assume `/output`
-
-- `GLOBALBITRATE=""`
-
-    Desired bitrate, e.g. `64k`, `128k`, ...
-    
-    Leaving this blank will default to `--no-conversion`, and will keep the source files' bitrate (lossless and thus recommended for higher quality, larger files).
-
-    Read the m4b-tool [reference](https://github.com/sandreas/m4b-tool#reference) for more information.
-
-- `M4BPATH="/path/to/m4b-tool"`
-
-    For non-default executable locations.
-
-- `AUDCOOKIES="/tmp/aud-cookies.txt"`
-
-    Path to file containing Netscape cookie file for curl to use. This is used for special, member Audible pages.
-
-- `JOBCOUNT="8"`
-
-    By default, the script will determine available number of threads to use. This shouldn't be changed unless you want the script to use less than maximum available threads.
-
-## Examples
-I personally recommend you leverage the Audible data mode, as it is much less tenous than manually entering data. However, you may want data structured a certain way, Audible has it listed wrong, or there is a bug in this script. In that event, add the `-m` flag from the below examples for manual import mode.
-
-### Batch importing
+```bash
+m4b-merge -i input/book_folder/
 ```
-m4b-merge.sh -b -f /input
-```
-This will import everything under the folder `/input` in batch mode, using Audible metadata.
 
-### Single importing
-```
-m4b-merge.sh -f /input/An\ Interesting\ Book
-```
-This will import only a single input (folder or single file, auto detected), using Audible metadata.
+### Metadata & High-Resolution Covers
 
-### Re-running batch import
+Provide an ASIN to automatically fetch metadata from Audnexus.
+
+```bash
+m4b-merge -i input/book_folder/ -a B012345678
 ```
-m4b-merge.sh -b -y -f /input
+
+### Custom Output & Organization
+
+Specify a custom output directory and organization template.
+
+```bash
+m4b-merge -i input/book_folder/ \
+  -o /my/library \
+  -p "{author}/{series_name} {series_position} - {title}"
 ```
-This will import everything under the folder `/input` in batch mode, using already cached Audible metadata from previous imports.
+
+### Advanced Processing
+
+Use `--dry-run` to preview operations, `--num-cpus` to control parallelism, and `--completed-directory` to move processed files.
+
+```bash
+m4b-merge -i input/book_folder/ \
+  --dry-run \
+  --num-cpus 8 \
+  --completed-directory /path/to/done
+```
+
+### Verify Environment
+
+Check FFmpeg installation and version.
+
+```bash
+m4b-merge --check-ffmpeg
+```
+
+## Path Format Variables
+
+The output path is generated using the `-p` / `--path-format` template.
+
+| Variable      | Description                      |
+|---------------|----------------------------------|
+| `{author}`   | Author name                     |
+| `{narrator}`  | Narrator name                   |
+| `{title}`    | Book title                      |
+| `{subtitle}`  | Book subtitle                   |
+| `{series_name}` | Series name                    |
+| `{series_position}` | Series position number    |
+| `{year}`     | Release year                    |
+
+**Default:** `{author}/{title}`
+
+## Exit Codes
+
+| Code | Description                                                 |
+|------|------------------------------------------------------------|
+| `0`  | Success                                                     |
+| `1`  | Error (missing input, FFmpeg not found, processing failed) |
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on contributing to this project.
+
+## License
+
+GPL-3.0
