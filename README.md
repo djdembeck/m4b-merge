@@ -1,180 +1,122 @@
 # m4b-merge
 
+![License](https://img.shields.io/github/license/djdembeck/m4b-merge)
+![CI](https://img.shields.io/github/actions/workflow/status/djdembeck/m4b-merge/ci.yml)
+
 A blazing fast CLI tool for merging audiobook files into sorted, tagged M4B files.
 
-## Features
+m4b-merge takes split audio files (MP3, M4A, or M4B) and merges them into a single, consistently tagged M4B file. Originally written in Python and rewritten in Rust, it provides high-performance processing with zero-copy merging for files of the same format, ensuring the original bitrate and sample rate are preserved.
 
-- **Multi-format support** — Input MP3, M4A, or M4B files; output is always M4B
-- **Smart merging** — Preserves original bitrate and sample rate
-- **Metadata fetching** — Automatic metadata lookup from [audiobookdb.org](https://audiobookdb.org) via ASIN
-- **Chapter preservation** — Maintains chapter markers from source M4B files
-- **Chapter embedding** — Embeds chapters directly into output M4B files
-- **Cover art** — Embeds high-resolution (2000x2000+) cover art
-- **Customizable output** — Configurable path templates
-- **Dry-run mode** — Preview operations without making changes
-- **Parallel processing** — Process multiple files concurrently
+The tool automates metadata retrieval via ASIN lookup through the Audnexus API, embeds high-resolution cover art, and maintains chapter markers from source files.
 
-## Requirements
+- [Install](#install)
+- [Usage](#usage)
+- [Path Format Variables](#path-format-variables)
+- [Exit Codes](#exit-codes)
+- [Contributing](#contributing)
+- [License](#license)
 
-- [FFmpeg](https://ffmpeg.org/) (must be in PATH)
+## Install
 
-## Installation
+### Docker (Fastest Path)
 
-### From Source
+Run without installation using the GHCR image.
 
 ```bash
-cargo install --path .
+docker run --rm \
+  -v /path/to/input:/input \
+  -v /path/to/output:/output \
+  ghcr.io/djdembeck/m4b-merge:latest \
+  -i /input/book_folder/ -o /output
 ```
 
 ### Pre-built Binaries
 
 Download the latest release for your platform from the [releases page](https://github.com/djdembeck/m4b-merge/releases).
 
-### Docker
+### From Source
 
-#### Quick Start
-
-```bash
-docker run --rm \
-  -v /path/to/input:/input \
-  -v /path/to/output:/output \
-  ghcr.io/djdembeck/m4b-merge:latest \
-  -i /input/file.mp3
-```
-
-#### Basic Docker Usage
+Requires [FFmpeg](https://ffmpeg.org/) installed and available in your PATH.
 
 ```bash
-# Run with input/output directories
-docker run --rm \
-  -v /my/audiobooks:/input \
-  -v /my/merged:/output \
-  ghcr.io/djdembeck/m4b-merge:latest \
-  -i /input/book.mp3 \
-  -o /output
-
-# With ASIN for metadata
-docker run --rm \
-  -v /my/audiobooks:/input \
-  -v /my/merged:/output \
-  ghcr.io/djdembeck/m4b-merge:latest \
-  -i /input/book.mp3 \
-  -a B012345678
+cargo install --path .
 ```
 
-#### Running as Current User
+## Usage
 
-The Docker image runs as a non-root user (appuser, uid 1000) by default. You can override this with the `-u` flag, but note that this may cause permission issues with mounted volumes:
+Basic CLI interaction. Use `m4b-merge --help` for all available flags.
+
+### Basic Merging
+
+Merge all audio files in a directory into a single M4B.
 
 ```bash
-docker run --rm \
-  -u $(id -u):$(id -g) \
-  -v /path/to/input:/input \
-  -v /path/to/output:/output \
-  ghcr.io/djdembeck/m4b-merge:latest \
-  -i /input/file.mp3
+m4b-merge -i input/book_folder/
 ```
 
-#### Docker Volume Layout
+### Metadata & High-Resolution Covers
 
-```text
-/input   # Your source audio files (mp3, m4a, m4b)
-/output  # Merged M4B files go here
-```
-
-#### Building Docker Image Locally
+Provide an ASIN to automatically fetch metadata from Audnexus.
 
 ```bash
-docker build -t m4b-merge:latest .
+m4b-merge -i input/book_folder/ -a B012345678
 ```
 
-### Verify FFmpeg
+### Custom Output & Organization
+
+Specify a custom output directory and organization template.
+
+```bash
+m4b-merge -i input/book_folder/ \
+  -o /my/library \
+  -p "{author}/{series_name} {series_position} - {title}"
+```
+
+### Advanced Processing
+
+Use `--dry-run` to preview operations, `--num-cpus` to control parallelism, and `--completed-directory` to move processed files.
+
+```bash
+m4b-merge -i input/book_folder/ \
+  --dry-run \
+  --num-cpus 8 \
+  --completed-directory /path/to/done
+```
+
+### Verify Environment
+
+Check FFmpeg installation and version.
 
 ```bash
 m4b-merge --check-ffmpeg
 ```
 
-## Usage
-
-### Basic Usage
-
-```bash
-# Single file
-m4b-merge -i input/file.mp3
-
-# Multiple files
-m4b-merge -i input/file1.mp3 input/file2.mp3
-
-# Directory (processes all audio files)
-m4b-merge -i input_folder/
-```
-
-### With Metadata Lookup
-
-```bash
-# Provide ASIN for automatic metadata fetch
-m4b-merge -i input/file.mp3 -a B012345678
-```
-
-### Output Options
-
-```bash
-# Custom output directory
-m4b-merge -i input/file.mp3 -o /path/to/output
-
-# Custom path format template
-m4b-merge -i input/file.mp3 -p "{author}/{title} - {series_name} {series_position}"
-
-# Move completed files to directory
-m4b-merge -i input/file.mp3 --completed-directory /path/to/done
-```
-
-### Other Options
-
-```bash
-# Dry run (preview what would happen)
-m4b-merge -i input/file.mp3 --dry-run
-
-# Use multiple CPUs
-m4b-merge -i input/file.mp3 --num-cpus 4
-
-# Verbose logging
-m4b-merge -i input/file.mp3 --log-level debug
-```
-
 ## Path Format Variables
 
-| Variable | Description |
-|----------|-------------|
-| `{author}` | Author name |
-| `{narrator}` | Narrator name |
-| `{title}` | Book title |
-| `{subtitle}` | Book subtitle |
-| `{series_name}` | Series name |
-| `{series_position}` | Series position number |
-| `{year}` | Release year |
+The output path is generated using the `-p` / `--path-format` template.
 
-Default: `{author}/{title}`
+| Variable      | Description                      |
+|---------------|----------------------------------|
+| `{author}`   | Author name                     |
+| `{narrator}`  | Narrator name                   |
+| `{title}`    | Book title                      |
+| `{subtitle}`  | Book subtitle                   |
+| `{series_name}` | Series name                    |
+| `{series_position}` | Series position number    |
+| `{year}`     | Release year                    |
+
+**Default:** `{author}/{title}`
 
 ## Exit Codes
 
-| Code | Description |
-|------|-------------|
-| 0 | Success |
-| 1 | Error (missing input, FFmpeg not found, processing failed) |
+| Code | Description                                                 |
+|------|------------------------------------------------------------|
+| `0`  | Success                                                     |
+| `1`  | Error (missing input, FFmpeg not found, processing failed) |
 
-## Building
+## Contributing
 
-```bash
-# Development build
-cargo build
-
-# Release build
-cargo build --release
-
-# Run tests
-cargo test
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on contributing to this project.
 
 ## License
 

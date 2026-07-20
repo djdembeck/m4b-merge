@@ -251,7 +251,7 @@ impl Merger {
             Ok(Self::round_to_standard_bitrate((bitrate / 1000) as u32))
         } else {
             // Use the average bitrate
-            let avg_bitrate = bitrates.iter().sum::<u32>() / 1000 / bitrates.len() as u32;
+            let avg_bitrate = bitrates.iter().sum::<u32>() / bitrates.len() as u32 / 1000;
             Ok(Self::round_to_standard_bitrate(avg_bitrate))
         }
     }
