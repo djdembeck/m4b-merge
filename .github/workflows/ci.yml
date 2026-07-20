@@ -217,11 +217,13 @@ jobs:
       - name: Assemble multi-arch manifest
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
-          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
-          echo "$TAGS" | while IFS= read -r tag; do
-            [ -z "$tag" ] && continue
-            docker buildx imagetools create -t "$IMAGE:$tag" \
-              "$IMAGE:$tag-amd64" \
-              "$IMAGE:$tag-arm64"
+          # TAGS holds full image refs (ghcr.io/.../m4b-merge:<tag>), one per
+          # line. Pass each directly as the manifest target and derive the
+          # per-arch sources by appending the -amd64/-arm64 suffixes.
+          echo "$TAGS" | while IFS= read -r ref; do
+            [ -z "$ref" ] && continue
+            docker buildx imagetools create -t "$ref" \
+              "$ref-amd64" \
+              "$ref-arm64"
           done
