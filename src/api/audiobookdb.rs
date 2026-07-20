@@ -7,7 +7,7 @@ use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
 use crate::metadata::{BookMetadata, Chapter};
 
-pub const DEFAULT_API_URL: &str = "https://audiobookdb.org/api";
+pub const DEFAULT_API_URL: &str = "https://audiobookdb.theiahd.nl/api";
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_RETRIES: usize = 3;
 
@@ -261,7 +261,7 @@ impl AudiobookdbClient {
 
         let genres: Vec<String> = book.genres.iter().map(|g| g.title.clone()).collect();
 
-        let cover_url = book.images.first().map(|i| i.url.clone());
+        let cover_url = book.images.first().map(|i| format!("{}/original", i.url));
 
         let chapters = release_data
             .as_ref()
@@ -304,9 +304,9 @@ impl AudiobookdbClient {
     }
 
     pub async fn download_cover(&self, cover_url: &str) -> Result<Vec<u8>, AudiobookdbError> {
+        let url = cover_url.to_string();
         let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
         let client = self.client.clone();
-        let url = cover_url.to_string();
 
         RetryIf::start(
             retry_strategy,
