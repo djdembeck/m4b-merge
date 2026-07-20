@@ -176,7 +176,8 @@ jobs:
           TAGS: ${{ steps.meta.outputs.tags }}
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
-          for tag in $TAGS; do
+          echo "$TAGS" | while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
             docker buildx imagetools create -t "$IMAGE:$tag" \
               "$IMAGE:$tag-amd64" \
               "$IMAGE:$tag-arm64"
