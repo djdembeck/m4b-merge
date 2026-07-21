@@ -9,7 +9,10 @@ use crate::metadata::{BookMetadata, Chapter};
 
 pub const DEFAULT_API_URL: &str = "https://audiobookdb.theiahd.nl/api";
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+const POOL_IDLE_TIMEOUT_SECS: u64 = 30;
 const MAX_RETRIES: usize = 3;
+const BACKOFF_BASE_MS: u64 = 1000;
 
 #[derive(Debug, Error)]
 pub enum AudiobookdbError {
@@ -25,6 +28,8 @@ pub enum AudiobookdbError {
     Timeout,
     #[error("no book found for ID: {0}")]
     IdNotFound(String),
+    #[error("connection error: {0}")]
+    Connection(String),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -37,33 +42,67 @@ pub struct AudiobookdbClient {
 
 impl Default for AudiobookdbClient {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("failed to build default client")
     }
 }
 
 impl AudiobookdbClient {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, AudiobookdbError> {
         Self::with_base_url(DEFAULT_API_URL)
     }
 
-    pub fn with_base_url(base_url: impl Into<String>) -> Self {
+    pub fn with_base_url(base_url: impl Into<String>) -> Result<Self, AudiobookdbError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .connect_timeout(Duration::from_secs(10))
-            .pool_idle_timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+            .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT_SECS))
             .build()
-            .unwrap_or_default();
-        Self { client, base_url: base_url.into() }
+            .map_err(|e| AudiobookdbError::Connection(e.to_string()))?;
+        Ok(Self { client, base_url: base_url.into() })
     }
 
     fn is_transient_error(error: &AudiobookdbError) -> bool {
         match error {
             AudiobookdbError::Network(_) => true,
+            AudiobookdbError::Connection(_) => true,
             AudiobookdbError::RateLimited => true,
             AudiobookdbError::Timeout => true,
             AudiobookdbError::ApiError { status, .. } => *status >= 500,
             _ => false,
         }
+    }
+
+    /// Returns true if the identifier looks like an Audible ASIN
+    /// (exactly 10 alphanumeric characters starting with B).
+    fn looks_like_asin(id: &str) -> bool {
+        id.len() == 10 && id.starts_with('B') && id.chars().all(|c| c.is_ascii_alphanumeric())
+    }
+
+    /// Resolve an AudiobookDB book by searching for the external Audible ID.
+    /// Search hit deserialization failures are silently ignored — a malformed hit
+    /// cannot block the search from finding the correct match among other results.
+    async fn resolve_via_search(
+        &self,
+        results: &[SearchHit],
+        target_id: &str,
+    ) -> Result<AudiobookdbBook, AudiobookdbError> {
+        let book_id = results
+            .iter()
+            .filter(|h| h.r#type == "books" || h.r#type == "book")
+            .find(|h| {
+                let b: AudiobookdbBook = serde_json::from_value(h.data.clone()).unwrap_or_default();
+                b.external.iter().any(|e| e.r#type == "Audible" && e.id == target_id)
+            })
+            .map(|h| h.id.clone());
+
+        let book_id = match book_id {
+            Some(found_id) => found_id,
+            None => return Err(AudiobookdbError::IdNotFound(target_id.to_string())),
+        };
+
+        // Search miss is acceptable: the book may genuinely not exist.
+        let include = "external,genres,people,releases,series,tags,images";
+        self.get_book(&book_id, include).await
     }
 
     async fn search_books(&self, query: &str) -> Result<Vec<SearchHit>, AudiobookdbError> {
@@ -75,7 +114,8 @@ impl AudiobookdbClient {
             "take": 20
         });
 
-        let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
+        let retry_strategy =
+            ExponentialBackoff::from_millis(BACKOFF_BASE_MS).map(jitter).take(MAX_RETRIES);
         let client = self.client.clone();
         let url = url.clone();
         let body = body.clone();
@@ -119,7 +159,8 @@ impl AudiobookdbClient {
     async fn get_book(&self, id: &str, include: &str) -> Result<AudiobookdbBook, AudiobookdbError> {
         let url = format!("{}/books/{}?include={}", self.base_url, id, include);
 
-        let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
+        let retry_strategy =
+            ExponentialBackoff::from_millis(BACKOFF_BASE_MS).map(jitter).take(MAX_RETRIES);
         let client = self.client.clone();
         let url = url.clone();
 
@@ -158,7 +199,8 @@ impl AudiobookdbClient {
     ) -> Result<AudiobookdbRelease, AudiobookdbError> {
         let url = format!("{}/releases/{}?include={}", self.base_url, id, include);
 
-        let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
+        let retry_strategy =
+            ExponentialBackoff::from_millis(BACKOFF_BASE_MS).map(jitter).take(MAX_RETRIES);
         let client = self.client.clone();
         let url = url.clone();
 
@@ -190,40 +232,40 @@ impl AudiobookdbClient {
         .await
     }
 
-    pub async fn fetch_book(&self, id: &str) -> Result<BookMetadata, AudiobookdbError> {
-        // Try direct ID lookup first (handles AudiobookDB internal IDs like jq3wT8UKmC7R)
-        let book_result = self
-            .get_book(id, "external,genres,people,releases,series,tags,images")
-            .await;
-
-        let book = match book_result {
-            Ok(b) => b,
-            Err(AudiobookdbError::NotFound(_)) => {
-                // Fall back to ASIN search via external reference
-                let results = self.search_books(id).await?;
-
-                let book_id = results
-                    .iter()
-                    .filter(|h| h.r#type == "books" || h.r#type == "book")
-                    .find(|h| {
-                        let b: AudiobookdbBook =
-                            serde_json::from_value(h.data.clone()).unwrap_or_default();
-                        b.external.iter().any(|e| e.r#type == "Audible" && e.id == id)
-                    })
-                    .map(|h| h.id.clone());
-
-                let book_id = match book_id {
-                    Some(id) => id,
-                    None => return Err(AudiobookdbError::IdNotFound(id.to_string())),
-                };
-
-                self.get_book(&book_id, "external,genres,people,releases,series,tags,images")
-                    .await?
+    /// Look up book metadata by identifier.
+    ///
+    /// Audible ASINs (10 alphanumeric characters) are resolved via search against the
+    /// external Audible reference.  Other identifiers (AudiobookDB internal IDs) use a
+    /// direct `/books/:id` lookup first.
+    pub async fn fetch_book(&self, book_id: &str) -> Result<BookMetadata, AudiobookdbError> {
+        let book = if Self::looks_like_asin(book_id) {
+            // ASIN-like: search first, fall back to direct lookup
+            let results = self.search_books(book_id).await?;
+            match self.resolve_via_search(&results, book_id).await {
+                Ok(b) => b,
+                Err(AudiobookdbError::IdNotFound(_)) => {
+                    // Search didn't find it; try as direct AudiobookDB ID
+                    self.get_book(book_id, "external,genres,people,releases,series,tags,images")
+                        .await?
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
+        } else {
+            // Non-ASIN: direct lookup first, fall back to ASIN search
+            match self.get_book(book_id, "external,genres,people,releases,series,tags,images").await
+            {
+                Ok(b) => b,
+                Err(AudiobookdbError::NotFound(_)) => {
+                    let results = self.search_books(book_id).await?;
+                    self.resolve_via_search(&results, book_id).await?
+                }
+                Err(e) => return Err(e),
+            }
         };
 
-        let release = book.releases.first().map(|r| {
+        // Fetch release data for chapter information. Missing release data is not fatal
+        // because many books simply lack chapter metadata in the database.
+        let release_data = book.releases.first().map(|r| {
             let release_id = r.id.clone();
             async move {
                 self.get_release(
@@ -233,8 +275,7 @@ impl AudiobookdbClient {
                 .await
             }
         });
-
-        let release_data = if let Some(fut) = release { fut.await.ok() } else { None };
+        let release_data = if let Some(fut) = release_data { fut.await.ok() } else { None };
 
         let authors: Vec<String> = book
             .people
@@ -263,27 +304,26 @@ impl AudiobookdbClient {
 
         let cover_url = book.images.first().map(|i| format!("{}/original", i.url));
 
-        let chapters = release_data
+        // Clamp negative offsets to zero rather than wrapping. Negative values from
+        // AudiobookDB are treated as data errors; skipping is the safer fallback.
+        let chapters: Vec<Chapter> = release_data
             .as_ref()
-            .map(|r| {
-                r.chapter_detail
-                    .as_ref()
-                    .map(|cd| {
-                        cd.chapters
-                            .iter()
-                            .map(|ch| Chapter {
-                                title: ch.title.clone(),
-                                start_time: Duration::from_millis(ch.start_offset_ms as u64),
-                                duration: Duration::from_millis(ch.length_ms as u64),
-                            })
-                            .collect()
+            .and_then(|r| r.chapter_detail.as_ref())
+            .map(|cd| {
+                cd.chapters
+                    .iter()
+                    .filter(|ch| ch.start_offset_ms >= 0 && ch.length_ms >= 0)
+                    .map(|ch| Chapter {
+                        title: ch.title.clone(),
+                        start_time: Duration::from_millis(ch.start_offset_ms as u64),
+                        duration: Duration::from_millis(ch.length_ms as u64),
                     })
-                    .unwrap_or_default()
+                    .collect()
             })
             .unwrap_or_default();
 
         Ok(BookMetadata {
-            metadata_id: id.to_string(),
+            metadata_id: book_id.to_string(),
             title: book.title.clone(),
             subtitle: book.disambiguation.clone(),
             authors,
@@ -305,7 +345,8 @@ impl AudiobookdbClient {
 
     pub async fn download_cover(&self, cover_url: &str) -> Result<Vec<u8>, AudiobookdbError> {
         let url = cover_url.to_string();
-        let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
+        let retry_strategy =
+            ExponentialBackoff::from_millis(BACKOFF_BASE_MS).map(jitter).take(MAX_RETRIES);
         let client = self.client.clone();
 
         RetryIf::start(
@@ -338,8 +379,6 @@ impl AudiobookdbClient {
         .await
     }
 }
-
-// --- audiobookdb.org response types ---
 
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]

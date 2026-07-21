@@ -1,7 +1,8 @@
 use std::time::Duration;
-/// Validate metadata ID format (10 alphanumeric characters)
+/// Validate metadata ID format (alphanumeric, 10+ characters)
+/// Accepts Audible ASINs (10 chars) and AudiobookDB IDs (longer)
 pub fn is_valid_metadata_id(id: &str) -> bool {
-    id.len() == 10 && id.chars().all(|c| c.is_ascii_alphanumeric())
+    id.len() >= 10 && id.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Chapter information for audiobooks
@@ -201,7 +202,7 @@ mod tests {
         assert!(is_valid_metadata_id("B08XYZ123A"));
         assert!(is_valid_metadata_id("1234567890"));
         assert!(!is_valid_metadata_id("B08XYZ123")); // Too short
-        assert!(!is_valid_metadata_id("B08XYZ12345")); // Too long
+        assert!(is_valid_metadata_id("B08XYZ12345")); // Longer IDs OK
         assert!(!is_valid_metadata_id("B08-XYZ123")); // Special char
         assert!(!is_valid_metadata_id(""));
     }

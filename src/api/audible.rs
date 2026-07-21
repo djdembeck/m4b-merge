@@ -15,14 +15,16 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// Maximum number of retry attempts
 pub const MAX_RETRIES: usize = 3;
+/// Base delay for exponential backoff in milliseconds
+pub const BACKOFF_BASE_MS: u64 = 1000;
 
 /// Errors that can occur when calling the Audible API
 #[derive(Debug, Error)]
 pub enum AudibleError {
-    #[error("Invalid ASIN format: {0}")]
-    InvalidAsin(String),
+    #[error("Invalid metadata_id format: {0}")]
+    InvalidMetadataId(String),
 
-    #[error("Book not found for ASIN: {0}")]
+    #[error("Book not found for metadata_id: {0}")]
     NotFound(String),
 
     #[error("Rate limited by API")]
@@ -89,7 +91,7 @@ impl AudibleClient {
         if id.len() == 10 && id.chars().all(|c| c.is_ascii_alphanumeric()) {
             Ok(())
         } else {
-            Err(AudibleError::InvalidAsin(id.to_string()))
+            Err(AudibleError::InvalidMetadataId(id.to_string()))
         }
     }
 
@@ -97,7 +99,8 @@ impl AudibleClient {
     pub async fn fetch_book(&self, id: &str) -> Result<BookMetadata, AudibleError> {
         Self::validate_id(id)?;
 
-        let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
+        let retry_strategy =
+            ExponentialBackoff::from_millis(BACKOFF_BASE_MS).map(jitter).take(MAX_RETRIES);
 
         let base_url = self.base_url.clone();
         let client = self.client.clone();
@@ -300,17 +303,17 @@ mod tests {
     fn test_validate_id_invalid() {
         assert!(matches!(
             AudibleClient::validate_id("B08XYZ123"),
-            Err(AudibleError::InvalidAsin(_))
+            Err(AudibleError::InvalidMetadataId(_))
         ));
         assert!(matches!(
             AudibleClient::validate_id("B08XYZ12345"),
-            Err(AudibleError::InvalidAsin(_))
+            Err(AudibleError::InvalidMetadataId(_))
         ));
         assert!(matches!(
             AudibleClient::validate_id("B08-XYZ123"),
-            Err(AudibleError::InvalidAsin(_))
+            Err(AudibleError::InvalidMetadataId(_))
         ));
-        assert!(matches!(AudibleClient::validate_id(""), Err(AudibleError::InvalidAsin(_))));
+        assert!(matches!(AudibleClient::validate_id(""), Err(AudibleError::InvalidMetadataId(_))));
     }
 
     #[test]

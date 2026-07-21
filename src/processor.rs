@@ -15,10 +15,11 @@ use crate::tagging::{Tagger, TaggingError};
 /// Static metadata ID regex compiled once at startup
 static METADATA_ID_REGEX: OnceLock<regex::Regex> = OnceLock::new();
 
-/// Get the static metadata ID regex or initialize it
+/// Returns the metadata ID regex. Matches mixed-case alphanumeric IDs of 10+ characters
+/// to support both Audible ASINs (10 chars) and longer AudiobookDB internal IDs.
 fn get_metadata_id_regex() -> &'static regex::Regex {
     METADATA_ID_REGEX.get_or_init(|| {
-        regex::Regex::new(r"\[([A-Z0-9]{10})\]").expect("Invalid metadata ID regex pattern")
+        regex::Regex::new(r"\[([A-Za-z0-9]{10,})\]").expect("Invalid metadata ID regex pattern")
     })
 }
 
@@ -765,6 +766,8 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // INVALID_ID fails validation: contains underscores, which are not alphanumeric
+    #[tokio::test]
     async fn test_process_group_dry_run_with_invalid_id() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::new(
@@ -781,13 +784,13 @@ mod tests {
         );
         let processor = Processor::new(config).unwrap();
 
-        let test_dir = temp_dir.path().join("Test Book [INVALID_ASIN]");
+        let test_dir = temp_dir.path().join("Test Book [INVALID_ID]");
         std::fs::create_dir(&test_dir).unwrap();
         let _file_path =
-            create_test_audio_file(&temp_dir, "Test Book [INVALID_ASIN]/chapter1.mp3", b"dummy");
+            create_test_audio_file(&temp_dir, "Test Book [INVALID_ID]/chapter1.mp3", b"dummy");
         let audio_file = AudioFile::new(test_dir.join("chapter1.mp3")).unwrap();
         let group = AudioGroup {
-            name: "Test Book [INVALID_ASIN]".to_string(),
+            name: "Test Book [INVALID_ID]".to_string(),
             files: vec![audio_file],
             disc_number: None,
         };

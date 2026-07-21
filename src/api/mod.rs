@@ -63,8 +63,8 @@ impl MetadataSource {
             }
             MetadataSourceKind::Audiobookdb => {
                 let client = match api_url {
-                    Some(u) => AudiobookdbClient::with_base_url(u),
-                    None => AudiobookdbClient::new(),
+                    Some(u) => AudiobookdbClient::with_base_url(u)?,
+                    None => AudiobookdbClient::new()?,
                 };
                 Ok(Self::Audiobookdb(client))
             }
