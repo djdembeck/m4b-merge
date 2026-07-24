@@ -1,7 +1,8 @@
 use std::time::Duration;
-/// Validate ASIN format (10 alphanumeric characters)
-pub fn is_valid_asin(asin: &str) -> bool {
-    asin.len() == 10 && asin.chars().all(|c| c.is_ascii_alphanumeric())
+/// Validate metadata ID format (alphanumeric, 10+ characters)
+/// Accepts Audible ASINs (10 chars) and AudiobookDB IDs (longer)
+pub fn is_valid_metadata_id(id: &str) -> bool {
+    id.len() >= 10 && id.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Chapter information for audiobooks
@@ -27,7 +28,7 @@ impl Chapter {
 /// Complete metadata for an audiobook
 #[derive(Debug, Clone, PartialEq)]
 pub struct BookMetadata {
-    pub asin: String,
+    pub metadata_id: String,
     pub title: String,
     pub subtitle: Option<String>,
     pub authors: Vec<String>,
@@ -44,12 +45,12 @@ pub struct BookMetadata {
 impl BookMetadata {
     /// Create a new BookMetadata with just the required fields
     pub fn new(
-        asin: impl Into<String>,
+        metadata_id: impl Into<String>,
         title: impl Into<String>,
         description: impl Into<String>,
     ) -> Self {
         Self {
-            asin: asin.into(),
+            metadata_id: metadata_id.into(),
             title: title.into(),
             subtitle: None,
             authors: Vec::new(),
@@ -165,7 +166,7 @@ mod tests {
     #[test]
     fn test_book_metadata_creation() {
         let metadata = BookMetadata::new("B08XYZ123", "Book Title", "Description");
-        assert_eq!(metadata.asin, "B08XYZ123");
+        assert_eq!(metadata.metadata_id, "B08XYZ123");
         assert_eq!(metadata.title, "Book Title");
         assert_eq!(metadata.description, "Description");
         assert!(metadata.authors.is_empty());
@@ -196,14 +197,14 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_asin() {
-        assert!(is_valid_asin("B08XYZ1234"));
-        assert!(is_valid_asin("B08XYZ123A"));
-        assert!(is_valid_asin("1234567890"));
-        assert!(!is_valid_asin("B08XYZ123")); // Too short
-        assert!(!is_valid_asin("B08XYZ12345")); // Too long
-        assert!(!is_valid_asin("B08-XYZ123")); // Special char
-        assert!(!is_valid_asin(""));
+    fn test_valid_metadata_id() {
+        assert!(is_valid_metadata_id("B08XYZ1234"));
+        assert!(is_valid_metadata_id("B08XYZ123A"));
+        assert!(is_valid_metadata_id("1234567890"));
+        assert!(!is_valid_metadata_id("B08XYZ123")); // Too short
+        assert!(is_valid_metadata_id("B08XYZ12345")); // Longer IDs OK
+        assert!(!is_valid_metadata_id("B08-XYZ123")); // Special char
+        assert!(!is_valid_metadata_id(""));
     }
 
     #[test]

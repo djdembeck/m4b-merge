@@ -1,17 +1,20 @@
 use std::path::PathBuf;
 
+use crate::api::MetadataSourceKind;
+
 /// Configuration struct that holds all settings for m4b-merge
 #[derive(Debug, Clone)]
 pub struct Config {
     pub inputs: Vec<PathBuf>,
     pub output: Option<PathBuf>,
-    pub api_url: String,
+    pub api_url: Option<String>,
+    pub metadata_source: MetadataSourceKind,
     pub completed_directory: Option<PathBuf>,
     pub num_cpus: usize,
     pub log_level: String,
     pub path_format: String,
     pub dry_run: bool,
-    pub asin: Option<String>,
+    pub metadata_id: Option<String>,
 }
 
 impl Config {
@@ -20,24 +23,26 @@ impl Config {
     pub fn new(
         inputs: Vec<PathBuf>,
         output: Option<PathBuf>,
-        api_url: String,
+        api_url: Option<String>,
+        metadata_source: MetadataSourceKind,
         completed_directory: Option<PathBuf>,
         num_cpus: usize,
         log_level: String,
         path_format: String,
         dry_run: bool,
-        asin: Option<String>,
+        metadata_id: Option<String>,
     ) -> Self {
         Self {
             inputs,
             output,
             api_url,
+            metadata_source,
             completed_directory,
             num_cpus,
             log_level,
             path_format,
             dry_run,
-            asin,
+            metadata_id,
         }
     }
 }

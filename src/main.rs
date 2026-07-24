@@ -2,10 +2,10 @@ use clap::Parser;
 use std::path::PathBuf;
 use tracing::{error, info};
 
+use m4b_merge::api::MetadataSourceKind;
 use m4b_merge::audio::FFmpeg;
 use m4b_merge::config::Config;
 use m4b_merge::processor::{ProcessingProgress, ProcessingStage, Processor, ProgressHandler};
-
 /// A CLI tool which outputs consistently sorted, tagged, single m4b files
 #[derive(Parser, Debug)]
 #[command(name = "m4b-merge")]
@@ -21,9 +21,13 @@ struct Args {
     #[arg(short = 'o', long = "output", value_name = "PATH")]
     pub output: Option<PathBuf>,
 
-    /// Audnexus API URL to use for metadata lookup
-    #[arg(long = "api-url", value_name = "URL", default_value = "https://api.audnex.us")]
-    pub api_url: String,
+    /// Override the metadata source's default API URL (optional)
+    #[arg(long = "api-url", value_name = "URL")]
+    pub api_url: Option<String>,
+
+    /// Metadata source to use for lookups
+    #[arg(long = "metadata-source", value_enum, default_value_t = MetadataSourceKind::Audiobookdb)]
+    pub metadata_source: MetadataSourceKind,
 
     /// Directory path to move original input files to after processing
     #[arg(long = "completed-directory", value_name = "PATH")]
@@ -46,9 +50,9 @@ struct Args {
     )]
     pub path_format: String,
 
-    /// ASIN for metadata lookup (optional)
-    #[arg(short = 'a', long = "asin", value_name = "ASIN")]
-    pub asin: Option<String>,
+    /// Metadata ID (ASIN, AudiobookDB book ID, etc.) (optional)
+    #[arg(short = 'a', long = "metadata-id", value_name = "ID")]
+    pub metadata_id: Option<String>,
 
     /// Show what would be done without actually doing it
     #[arg(long = "dry-run")]
@@ -128,9 +132,10 @@ async fn main() {
         if let Some(ref completed_dir) = args.completed_directory {
             println!("Completed Directory: {}", completed_dir.display());
         }
-        if let Some(ref asin) = args.asin {
-            println!("ASIN: {}", asin);
+        if let Some(metadata_id) = &args.metadata_id {
+            println!("Metadata ID: {}", metadata_id);
         }
+        println!("Metadata Source: {}", args.metadata_source);
         println!("\nDry run complete. No files were modified.");
         std::process::exit(0);
     }
@@ -139,13 +144,14 @@ async fn main() {
     let config = Config::new(
         args.inputs.clone(),
         args.output.clone(),
-        args.api_url,
+        args.api_url.clone(),
+        args.metadata_source,
         args.completed_directory,
         args.num_cpus,
         args.log_level,
         args.path_format,
         args.dry_run,
-        args.asin,
+        args.metadata_id,
     );
 
     // Validate configuration
