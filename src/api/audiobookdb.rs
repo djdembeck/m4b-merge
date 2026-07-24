@@ -13,6 +13,8 @@ const CONNECT_TIMEOUT_SECS: u64 = 10;
 const POOL_IDLE_TIMEOUT_SECS: u64 = 30;
 const MAX_RETRIES: usize = 3;
 const BACKOFF_BASE_MS: u64 = 1000;
+const BOOK_INCLUDE: &str = "external,genres,people,releases,series,tags,images";
+const RELEASE_INCLUDE: &str = "chapterDetail,external,images,language,people,publisher";
 
 #[derive(Debug, Error)]
 pub enum AudiobookdbError {
@@ -38,12 +40,6 @@ pub enum AudiobookdbError {
 pub struct AudiobookdbClient {
     client: Client,
     base_url: String,
-}
-
-impl Default for AudiobookdbClient {
-    fn default() -> Self {
-        Self::new().expect("failed to build default client")
-    }
 }
 
 impl AudiobookdbClient {
@@ -101,7 +97,7 @@ impl AudiobookdbClient {
         };
 
         // Search miss is acceptable: the book may genuinely not exist.
-        let include = "external,genres,people,releases,series,tags,images";
+        let include = BOOK_INCLUDE;
         self.get_book(&book_id, include).await
     }
 
@@ -245,15 +241,13 @@ impl AudiobookdbClient {
                 Ok(b) => b,
                 Err(AudiobookdbError::IdNotFound(_)) => {
                     // Search didn't find it; try as direct AudiobookDB ID
-                    self.get_book(book_id, "external,genres,people,releases,series,tags,images")
-                        .await?
+                    self.get_book(book_id, BOOK_INCLUDE).await?
                 }
                 Err(e) => return Err(e),
             }
         } else {
             // Non-ASIN: direct lookup first, fall back to ASIN search
-            match self.get_book(book_id, "external,genres,people,releases,series,tags,images").await
-            {
+            match self.get_book(book_id, BOOK_INCLUDE).await {
                 Ok(b) => b,
                 Err(AudiobookdbError::NotFound(_)) => {
                     let results = self.search_books(book_id).await?;
@@ -267,13 +261,7 @@ impl AudiobookdbClient {
         // because many books simply lack chapter metadata in the database.
         let release_data = book.releases.first().map(|r| {
             let release_id = r.id.clone();
-            async move {
-                self.get_release(
-                    &release_id,
-                    "chapterDetail,external,images,language,people,publisher",
-                )
-                .await
-            }
+            async move { self.get_release(&release_id, RELEASE_INCLUDE).await }
         });
         let release_data = if let Some(fut) = release_data { fut.await.ok() } else { None };
 
