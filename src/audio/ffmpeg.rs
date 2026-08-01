@@ -584,8 +584,19 @@ impl FFmpeg {
                 return Err(FFmpegError::FileNotFound(path.to_path_buf()));
             }
 
+            // The concat demuxer resolves relative paths against the directory of the
+            // concat list file (which lives in a temp dir). Canonicalize to absolute
+            // paths so the input files are found regardless of where the list is written.
+            let absolute_path = path.canonicalize().map_err(|e| {
+                FFmpegError::ExecutionFailed(format!(
+                    "Failed to canonicalize {}: {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+
             // Escape single quotes in path by replacing ' with '\''
-            let escaped_path = path.to_string_lossy().replace("'", "'\\''");
+            let escaped_path = absolute_path.to_string_lossy().replace("'", "'\\''");
             content.push_str(&format!("file '{}'\n", escaped_path));
         }
 
