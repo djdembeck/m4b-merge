@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use thiserror::Error;
-use tracing::{debug, info, trace};
+use tracing::{info, trace};
 
 /// Errors that can occur when working with FFmpeg
 #[derive(Error, Debug)]
@@ -527,48 +527,6 @@ impl FFmpeg {
         Ok(silence_periods)
     }
 
-    /// Prepare a concat file list for FFmpeg's concat demuxer
-    ///
-    /// The concat demuxer expects a file with lines like:
-    /// file 'path/to/file1.mp3'
-    /// file 'path/to/file2.mp3'
-    ///
-    /// # Arguments
-    /// * `files` - List of file paths to concatenate
-    /// * `output_path` - Where to write the concat file list
-    pub fn prepare_concat_file_list<P: AsRef<Path>>(
-        &self,
-        files: &[P],
-        output_path: &Path,
-    ) -> Result<()> {
-        if files.is_empty() {
-            return Err(FFmpegError::ParseError("Empty file list for concat".to_string()));
-        }
-
-        let mut content = String::new();
-
-        for file in files {
-            let path = file.as_ref();
-            if !path.exists() {
-                return Err(FFmpegError::FileNotFound(path.to_path_buf()));
-            }
-
-            // Escape single quotes in path by replacing ' with '\''
-            let escaped_path = path.to_string_lossy().replace("'", "'\\''");
-            content.push_str(&format!("file '{}'\n", escaped_path));
-        }
-
-        std::fs::write(output_path, content)?;
-
-        debug!(
-            "Created concat file list at {} with {} entries",
-            output_path.display(),
-            files.len()
-        );
-
-        Ok(())
-    }
-
     /// Create a concat file list and return the content as a string
     /// This is useful for temporary concat lists that don't need to be saved
     pub fn create_concat_file_list<P: AsRef<Path>>(&self, files: &[P]) -> Result<String> {
@@ -580,12 +538,26 @@ impl FFmpeg {
 
         for file in files {
             let path = file.as_ref();
-            if !path.exists() {
-                return Err(FFmpegError::FileNotFound(path.to_path_buf()));
-            }
+
+            // The concat demuxer resolves relative paths against the directory of the
+            // concat list file (which lives in a temp dir). Canonicalize to absolute
+            // paths so the input files are found regardless of where the list is written.
+            // `canonicalize` doubles as the existence check, avoiding a TOCTOU gap
+            // between a separate `exists()` check and the path resolution.
+            let absolute_path = path.canonicalize().map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    FFmpegError::FileNotFound(path.to_path_buf())
+                } else {
+                    FFmpegError::ExecutionFailed(format!(
+                        "Failed to canonicalize {}: {}",
+                        path.display(),
+                        e
+                    ))
+                }
+            })?;
 
             // Escape single quotes in path by replacing ' with '\''
-            let escaped_path = path.to_string_lossy().replace("'", "'\\''");
+            let escaped_path = absolute_path.to_string_lossy().replace("'", "'\\''");
             content.push_str(&format!("file '{}'\n", escaped_path));
         }
 
@@ -642,6 +614,23 @@ mod tests {
         FFmpeg::discover().expect("FFmpeg should be available for tests")
     }
 
+    /// Build a path relative to `from` that points at `to` (both absolute).
+    /// Used to exercise relative-path input the way a user would pass it on
+    /// the command line.
+    fn relative_path(from: &Path, to: &Path) -> PathBuf {
+        let from_components: Vec<_> = from.components().collect();
+        let to_components: Vec<_> = to.components().collect();
+        let common = from_components.iter().zip(&to_components).take_while(|(a, b)| a == b).count();
+        let mut rel = PathBuf::new();
+        for _ in common..from_components.len() {
+            rel.push("..");
+        }
+        for c in &to_components[common..] {
+            rel.push(c.as_os_str());
+        }
+        rel
+    }
+
     #[test]
     fn test_discovery() {
         let result = FFmpeg::discover();
@@ -684,24 +673,6 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_concat_file_list_empty() {
-        let ffmpeg = create_test_ffmpeg();
-        let temp_file = NamedTempFile::new().unwrap();
-        let files: &[&Path] = &[];
-        let result = ffmpeg.prepare_concat_file_list(files, temp_file.path());
-        assert!(matches!(result, Err(FFmpegError::ParseError(_))));
-    }
-
-    #[test]
-    fn test_prepare_concat_file_list_nonexistent() {
-        let ffmpeg = create_test_ffmpeg();
-        let temp_file = NamedTempFile::new().unwrap();
-        let files = vec![Path::new("/nonexistent/file.mp3")];
-        let result = ffmpeg.prepare_concat_file_list(&files, temp_file.path());
-        assert!(matches!(result, Err(FFmpegError::FileNotFound(_))));
-    }
-
-    #[test]
     fn test_time_range() {
         let range = TimeRange::new(10.0, 20.0);
         assert_eq!(range.start, 10.0);
@@ -725,8 +696,56 @@ mod tests {
         assert!(result.is_ok());
         let content = result.unwrap();
         assert!(content.contains("file '"));
-        assert!(content.contains(&temp_file1.path().to_string_lossy().to_string()));
-        assert!(content.contains(&temp_file2.path().to_string_lossy().to_string()));
+        // Canonicalize expectations: create_concat_file_list emits canonical paths,
+        // which differ from the raw tempdir path when TMPDIR traverses a symlink.
+        let canon1 = temp_file1.path().canonicalize().unwrap();
+        let canon2 = temp_file2.path().canonicalize().unwrap();
+        assert!(content.contains(&canon1.to_string_lossy().to_string()));
+        assert!(content.contains(&canon2.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn test_create_concat_file_list_nonexistent() {
+        let ffmpeg = create_test_ffmpeg();
+        let files = vec![Path::new("/nonexistent/file.mp3")];
+        let result = ffmpeg.create_concat_file_list(&files);
+        assert!(matches!(result, Err(FFmpegError::FileNotFound(_))));
+    }
+
+    #[test]
+    fn test_create_concat_file_list_relative_paths() {
+        let ffmpeg = create_test_ffmpeg();
+
+        // Create temp files in a staging temp dir, then pass CWD-relative
+        // paths to them. The concat demuxer resolves `file '...'` entries
+        // against the concat list file's directory (a temp dir), so relative
+        // entries would break; the function must canonicalize to absolute.
+        let staging = tempfile::tempdir().unwrap();
+        let audiobooks_dir = staging.path().join("Audiobooks");
+        std::fs::create_dir_all(&audiobooks_dir).unwrap();
+        let file1 = audiobooks_dir.join("01.mp3");
+        let file2 = audiobooks_dir.join("02.mp3");
+        std::fs::write(&file1, b"test1").unwrap();
+        std::fs::write(&file2, b"test2").unwrap();
+
+        let cwd = std::env::current_dir().unwrap();
+        let rel1 = relative_path(&cwd, &file1);
+        let rel2 = relative_path(&cwd, &file2);
+        assert!(rel1.is_relative() && rel2.is_relative());
+
+        let result = ffmpeg.create_concat_file_list(&[rel1.clone(), rel2.clone()]);
+
+        assert!(result.is_ok());
+        let content = result.unwrap();
+        assert!(content.contains("file '"));
+        // The emitted paths must be canonicalized absolute paths, never the
+        // relative inputs as written.
+        let canon1 = file1.canonicalize().unwrap();
+        let canon2 = file2.canonicalize().unwrap();
+        assert!(content.contains(&format!("file '{}'", canon1.to_string_lossy())));
+        assert!(content.contains(&format!("file '{}'", canon2.to_string_lossy())));
+        assert!(!content.contains(&format!("file '{}'", rel1.to_string_lossy())));
+        assert!(!content.contains(&format!("file '{}'", rel2.to_string_lossy())));
     }
 
     #[test]
