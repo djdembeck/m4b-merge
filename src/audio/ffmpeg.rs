@@ -538,19 +538,22 @@ impl FFmpeg {
 
         for file in files {
             let path = file.as_ref();
-            if !path.exists() {
-                return Err(FFmpegError::FileNotFound(path.to_path_buf()));
-            }
 
             // The concat demuxer resolves relative paths against the directory of the
             // concat list file (which lives in a temp dir). Canonicalize to absolute
             // paths so the input files are found regardless of where the list is written.
+            // `canonicalize` doubles as the existence check, avoiding a TOCTOU gap
+            // between a separate `exists()` check and the path resolution.
             let absolute_path = path.canonicalize().map_err(|e| {
-                FFmpegError::ExecutionFailed(format!(
-                    "Failed to canonicalize {}: {}",
-                    path.display(),
-                    e
-                ))
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    FFmpegError::FileNotFound(path.to_path_buf())
+                } else {
+                    FFmpegError::ExecutionFailed(format!(
+                        "Failed to canonicalize {}: {}",
+                        path.display(),
+                        e
+                    ))
+                }
             })?;
 
             // Escape single quotes in path by replacing ' with '\''
@@ -693,8 +696,20 @@ mod tests {
         assert!(result.is_ok());
         let content = result.unwrap();
         assert!(content.contains("file '"));
-        assert!(content.contains(&temp_file1.path().to_string_lossy().to_string()));
-        assert!(content.contains(&temp_file2.path().to_string_lossy().to_string()));
+        // Canonicalize expectations: create_concat_file_list emits canonical paths,
+        // which differ from the raw tempdir path when TMPDIR traverses a symlink.
+        let canon1 = temp_file1.path().canonicalize().unwrap();
+        let canon2 = temp_file2.path().canonicalize().unwrap();
+        assert!(content.contains(&canon1.to_string_lossy().to_string()));
+        assert!(content.contains(&canon2.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn test_create_concat_file_list_nonexistent() {
+        let ffmpeg = create_test_ffmpeg();
+        let files = vec![Path::new("/nonexistent/file.mp3")];
+        let result = ffmpeg.create_concat_file_list(&files);
+        assert!(matches!(result, Err(FFmpegError::FileNotFound(_))));
     }
 
     #[test]
