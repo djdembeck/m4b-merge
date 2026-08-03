@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [1.0.1](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.1) (2026-08-03)
+
+
+### Bug Fixes
+
+* **audio:** eliminate TOCTOU in concat file list creation ([8afebaa](https://github.com/djdembeck/m4b-merge/commit/8afebaa6158552c50ee889d59e000e60594e947f))
+* **ffmpeg:** remove dead prepare_concat_file_list, canonicalize concat paths ([#423](https://github.com/djdembeck/m4b-merge/issues/423)) ([b148e39](https://github.com/djdembeck/m4b-merge/commit/b148e39ef6a86610945059b6692ae481eeb4a85d))
+* use absolute paths for concat file list ([#419](https://github.com/djdembeck/m4b-merge/issues/419)) ([8858d6a](https://github.com/djdembeck/m4b-merge/commit/8858d6a3364a3c4276b02ed0d40fa162a8d0915e))
+
 ## [1.0.0](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.0) (2026-07-20)
 
 
