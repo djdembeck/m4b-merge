@@ -3,7 +3,7 @@
   extends: ["config:recommended"],
   baseBranches: ["develop"],
   branchConcurrentLimit: 10,
-  commitMessagePrefix: "ci",
+  commitMessagePrefix: "chore(deps): ",
   labels: ["dependencies", "ci", "renovate"],
   schedule: ["before 6am on Monday"],
   timezone: "Etc/UTC",

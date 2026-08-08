@@ -5,6 +5,11 @@ FROM rust:1.96-alpine AS builder
 
 WORKDIR /app
 
+# Version stamp — passed by release workflow as --build-arg VERSION=vX.Y.Z.
+# The binary version itself comes from Cargo.toml (env!("CARGO_PKG_VERSION"));
+# this ARG is for image metadata labeling only.
+ARG VERSION=devel
+
 # Install build dependencies
 RUN apk add --no-cache \
     musl-dev \
@@ -48,6 +53,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # =============================================================================
 FROM alpine:3.22 AS runtime
 
+# Accept the version arg for image metadata
+ARG VERSION=devel
+LABEL org.opencontainers.image.version=$VERSION
+
 # Install runtime dependencies
 RUN apk add --no-cache ffmpeg ca-certificates
 
@@ -64,6 +73,7 @@ COPY --from=builder /usr/local/bin/m4b-merge /usr/local/bin/m4b-merge
 
 # Set environment variables
 ENV HOME=/home/appuser
+ENV APP_VERSION=$VERSION
 
 # Switch to non-root user
 USER appuser

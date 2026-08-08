@@ -1,27 +1,314 @@
+# Releases are cut on each develop → main merge; develop pushes do NOT release.
+#
+# How it works (fill_after mode):
+#   1. On every push to main, the next version is auto-bumped from commits
+#      since the last tag (conventional commits: BREAKING CHANGE/feat! →
+#      major, feat → minor, else patch). Dispatch with a `version` or `bump`
+#      input to override.
+#   2. Cargo.toml version is bumped to match the tag, Cargo.lock is synced.
+#   3. The tag is created and pushed (skipped if it already exists).
+#   4. Release Docker image is built and pushed (native multi-arch amd64+arm64).
+#   5. Version bump is synced back to develop (gitflow).
+#   6. GitHub release is created with empty body — Annalist GitHub App fills
+#      the release body via webhook.
+#
+# Re-runs are idempotent: a partial failure can be re-dispatched and the same
+# (already-existing) tag/release guards no-op or complete the work.
+#
+# Requires no repo secrets — GITHUB_TOKEN is provided automatically.
+
 name: Release
 
 on:
   push:
-    tags: ['v*.*.*']
+    branches: [main]
+    # Release only on code changes — CI/docs-only merges must not bump or cut.
+    paths-ignore: ['*.md', 'docs/**', '.github/**']
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Git tag to build Docker images for'
-        required: true
-        default: 'v1.0.0'
+      version:
+        description: "Explicit version (vX.Y.Z). Empty = auto-bump from commits."
+        required: false
+        default: ""
+      bump:
+        description: "Bump level when version is empty: auto|patch|minor|major"
+        required: false
+        default: auto
 
-permissions: read-all
+permissions:
+  contents: write
+  packages: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: release
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  TAG_NAME: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.version.outputs.new_version }}
+      tag_created: ${{ steps.tag.outputs.created }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: 1.96
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine next version
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION_INPUT="${{ inputs.version }}"
+          BUMP_INPUT="${{ inputs.bump }}"
+
+          LATEST_TAG=$(git tag -l "v*.*.*" --sort=-version:refname | head -n 1 || true)
+
+          if [ -n "$VERSION_INPUT" ]; then
+            NEW_VERSION="${VERSION_INPUT#v}"
+            if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Invalid version input: ${VERSION_INPUT} (expected vX.Y.Z)"
+              exit 1
+            fi
+            NEW_VERSION="v${NEW_VERSION}"
+          elif [ -z "$LATEST_TAG" ]; then
+            NEW_VERSION="v0.1.0"
+          else
+            MAJOR="${LATEST_TAG#v}"; MAJOR="${MAJOR%%.*}"
+            REST="${LATEST_TAG#v*.}"; MINOR="${REST%%.*}"; PATCH="${REST#*.}"
+
+            case "$BUMP_INPUT" in
+              auto|"")
+                if [ -z "$(git log --format=%H "${LATEST_TAG}..HEAD" 2>/dev/null)" ]; then
+                  PREV_TAG=$(git tag -l "v*.*.*" --sort=-version:refname | sed -n 2p || true)
+                  echo "new_version=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+                  echo "previous_tag=${PREV_TAG:-}" >> "$GITHUB_OUTPUT"
+                  echo "No commits since ${LATEST_TAG} — reusing it"
+                  exit 0
+                fi
+                LOG=$(git log --format=%B "${LATEST_TAG}..HEAD" 2>/dev/null || true)
+                if echo "$LOG" | grep -qE 'BREAKING CHANGE:|^[a-z]+(\([^)]*\))?!: '; then LEVEL=major
+                elif echo "$LOG" | grep -qE '^feat(\([^)]*\))?: '; then LEVEL=minor
+                else LEVEL=patch; fi
+                ;;
+              patch|minor|major) LEVEL="$BUMP_INPUT" ;;
+              *) echo "Invalid bump input: ${BUMP_INPUT} (auto|patch|minor|major)"; exit 1 ;;
+            esac
+
+            case "$LEVEL" in
+              major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR+1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH+1)) ;;
+            esac
+            NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          fi
+
+          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=${LATEST_TAG:-}" >> "$GITHUB_OUTPUT"
+          echo "New version: ${NEW_VERSION} (previous: ${LATEST_TAG:-none})"
+
+      - name: Bump manifest version
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.new_version }}"
+          V="${VERSION#v}"
+
+          # Skip if Cargo.toml already matches the target version
+          if grep -q "version = \"$V\"" Cargo.toml; then
+            echo "Cargo.toml already at version $V — skipping"
+            exit 0
+          fi
+
+          echo "Bumping Cargo.toml version to $V"
+          sed -i "s/^version = \".*\"/version = \"$V\"/" Cargo.toml
+
+          # Sync Cargo.lock by running cargo check
+          cargo check
+          git add Cargo.toml Cargo.lock
+
+          # Only commit if files actually changed
+          if git diff --cached --quiet; then
+            echo "No changes to commit — skipping"
+            exit 0
+          fi
+
+          git commit -m "chore(release): $VERSION"
+          git push origin HEAD
+
+      - name: Create and push tag
+        id: tag
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.new_version }}"
+          if git rev-parse "refs/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "Tag ${VERSION} already exists, skipping"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git tag -a "${VERSION}" -m "Release ${VERSION}"
+          git push origin "${VERSION}"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Sync version bump back to develop
+        if: steps.tag.outputs.created == 'true'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.new_version }}"
+
+          # if develop is protected, replace with a peter-evans/create-pull-request sync PR
+          git fetch origin develop:develop
+
+          # Skip if main is already an ancestor of develop
+          if git merge-base --is-ancestor origin/main develop; then
+            echo "main is already contained in develop — skipping sync"
+            exit 0
+          fi
+
+          git checkout develop
+          git merge --no-ff main -m "chore(release): sync ${VERSION} back to develop [skip ci]"
+          git push origin develop
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.new_version }}"
+
+          # Already released? (the tag may pre-exist from an earlier partial run)
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            echo "Release ${VERSION} already exists — nothing to do"
+            exit 0
+          fi
+
+          # Annalist GitHub App fills the release body via webhook — no API call needed
+          gh release create "${VERSION}" \
+            --title "Release ${VERSION}" \
+            --notes ""
+          echo "✓ Release ${VERSION} created"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Native multi-arch Docker build (amd64 + arm64 in parallel on native
+  # runners, then manifest assembly). Replaces QEMU emulation for ~10x
+  # faster arm64 builds.
+  # ─────────────────────────────────────────────────────────────────
+  docker-amd64:
+    needs: [release]
+    if: needs.release.outputs.tag_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: suffix=-amd64
+          tags: |
+            type=raw,value=${{ needs.release.outputs.new_version }}
+
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: VERSION=${{ needs.release.outputs.new_version }}
+          cache-from: type=gha,scope=release-amd64
+          cache-to: type=gha,scope=release-amd64,mode=max
+          platforms: linux/amd64
+
+  docker-arm64:
+    needs: [release]
+    if: needs.release.outputs.tag_created == 'true'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: suffix=-arm64
+          tags: |
+            type=raw,value=${{ needs.release.outputs.new_version }}
+
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: VERSION=${{ needs.release.outputs.new_version }}
+          cache-from: type=gha,scope=release-arm64
+          cache-to: type=gha,scope=release-arm64,mode=max
+          platforms: linux/arm64
+
+  docker-manifest:
+    needs: [docker-amd64, docker-arm64]
+    if: needs.release.outputs.tag_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assemble multi-arch manifest
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          VERSION: ${{ needs.release.outputs.new_version }}
+        run: |
+          docker buildx imagetools create -t "$IMAGE:$VERSION" \
+            "$IMAGE:$VERSION-amd64" \
+            "$IMAGE:$VERSION-arm64"
+
   build-binaries:
+    needs: [release]
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -37,9 +324,8 @@ jobs:
             binary_name: m4b-merge.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.TAG_NAME }}
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -63,17 +349,12 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: target/release/${{ matrix.binary_name }}
 
-  create-release:
-    if: github.event_name == 'push'
+  upload-to-release:
+    needs: [build-binaries, release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ env.TAG_NAME }}
-          persist-credentials: false
-
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: m4b-merge-linux
@@ -95,104 +376,13 @@ jobs:
           mv artifacts/macos/m4b-merge artifacts/m4b-merge-macos
           mv artifacts/windows/m4b-merge.exe artifacts/m4b-merge-windows.exe
 
-      - uses: softprops/action-gh-release@fe965f7af51af5f2602596916f38a38df2e33de0 # v3.0.2
-        with:
-          files: |
-            artifacts/m4b-merge-linux
-            artifacts/m4b-merge-macos
-            artifacts/m4b-merge-windows.exe
+      - name: Upload binaries to release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  docker:
-    needs: [build-binaries]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-            suffix: amd64
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            suffix: arm64
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ env.TAG_NAME }}
-          persist-credentials: false
-
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        id: meta
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          flavor: suffix=-${{ matrix.suffix }};latest=false
-          tags: |
-            type=raw,value=${{ env.TAG_NAME }}
-            type=semver,pattern={{version}},value=${{ env.TAG_NAME }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG_NAME }}
-            type=semver,pattern={{major}},value=${{ env.TAG_NAME }}
-
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # Scope the GHA cache per arch so parallel amd64/arm64 jobs don't
-          # collide on the shared cache key.
-          cache-from: type=gha,scope=${{ matrix.suffix }}
-          cache-to: type=gha,scope=${{ matrix.suffix }},mode=max
-          platforms: ${{ matrix.platform }}
-
-  docker-manifest:
-    needs: [docker]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        id: meta
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ env.TAG_NAME }}
-            type=semver,pattern={{version}},value=${{ env.TAG_NAME }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG_NAME }}
-            type=semver,pattern={{major}},value=${{ env.TAG_NAME }}
-            type=raw,value=latest
-
-      - name: Assemble multi-arch manifest
-        env:
-          TAGS: ${{ steps.meta.outputs.tags }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release.outputs.new_version }}
         run: |
-          # TAGS holds full image refs (ghcr.io/.../m4b-merge:<tag>), one per
-          # line. Pass each directly as the manifest target and derive the
-          # per-arch sources by appending the -amd64/-arm64 suffixes.
-          echo "$TAGS" | while IFS= read -r ref; do
-            [ -z "$ref" ] && continue
-            [[ "$ref" != *:* ]] && continue
-            docker buildx imagetools create -t "$ref" \
-              "$ref-amd64" \
-              "$ref-arm64"
-          done
+          set -euo pipefail
+          gh release upload "${VERSION}" \
+            artifacts/m4b-merge-linux \
+            artifacts/m4b-merge-macos \
+            artifacts/m4b-merge-windows.exe
