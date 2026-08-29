@@ -9,6 +9,12 @@ All notable changes to this project will be documented in this file. See [standa
 - Chapters are now embedded directly into the M4B container, not just written to chapters.txt
 - Full chapter metadata round-trip: extraction from source → embedding in output
 
+### Changed
+- AudiobookDB metadata source now targets the public `https://audiobookdb.org` API (v1.0.0 contract).
+  ASIN resolution uses `GET /audiobooks/external/audible/{ASIN}`, covers use the documented
+  full-resolution `sourceUrl` (or 768px `large.jpg` derivative), and series positions come from
+  the authoritative `position` object. Retry logic honors the `Retry-After` header on 429s.
+
 ### [0.5.3](https://github.com/djdembeck/m4b-merge/compare/v0.5.2...v0.5.3) (2024-08-07)
 
 ### Bug Fixes
