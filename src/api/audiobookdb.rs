@@ -6,20 +6,24 @@
 //! ASIN endpoint links one, otherwise the book's first release).
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::time::sleep;
 use tokio_retry::strategy::jitter;
 
 use crate::metadata::{BookMetadata, Chapter};
 
+use super::client::{
+    BACKOFF_BASE_MS, CONNECT_TIMEOUT_SECS, DEFAULT_TIMEOUT_SECS, MAX_RETRIES,
+    POOL_IDLE_TIMEOUT_SECS,
+};
+
 pub const DEFAULT_API_URL: &str = "https://audiobookdb.org/api";
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
-const CONNECT_TIMEOUT_SECS: u64 = 10;
-const POOL_IDLE_TIMEOUT_SECS: u64 = 30;
-const USER_AGENT: &str = "m4b-merge/0.1.0 (https://github.com/djdembeck/m4b-merge)";
-const MAX_RETRIES: usize = 3;
-const BACKOFF_BASE_MS: u64 = 1000;
+/// Upper bound (seconds) for a parsed `Retry-After` wait; longer waits are
+/// clamped so a malformed or hostile header cannot stall the client.
+const RETRY_AFTER_MAX_SECS: u64 = 60;
+const USER_AGENT: &str =
+    concat!("m4b-merge/", env!("CARGO_PKG_VERSION"), " (https://github.com/djdembeck/m4b-merge)");
 const BOOK_INCLUDE: &str = "people,releases,series,genres,images";
 
 #[derive(Debug, Error)]
@@ -91,13 +95,36 @@ impl AudiobookdbClient {
         }
     }
 
-    /// Read a `Retry-After` header (seconds) from a 429 response, if present.
+    /// Read a `Retry-After` header from a 429 response, if present.
     fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
         resp.headers()
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_secs)
+            .and_then(Self::parse_retry_after)
+    }
+
+    /// Parse a `Retry-After` header value (RFC 9110: delta-seconds or HTTP-date).
+    ///
+    /// Delta-seconds are truncated to whole seconds. HTTP-dates are converted to a
+    /// wait relative to now; past dates (negative waits) yield zero, so the caller
+    /// sleeps only its 100 ms jitter minimum. Waits are clamped to
+    /// `RETRY_AFTER_MAX_SECS` to bound how long a malformed or hostile header can
+    /// stall the client. Fractional seconds are not supported and yield `None`.
+    fn parse_retry_after(value: &str) -> Option<Duration> {
+        let value = value.trim();
+        if let Ok(secs) = value.parse::<u64>() {
+            return Some(Duration::from_secs(secs.min(RETRY_AFTER_MAX_SECS)));
+        }
+        if let Ok(date) = httpdate::parse_http_date(value) {
+            let now = SystemTime::now();
+            // A past date yields zero so the caller sleeps only its jitter minimum.
+            let wait = date
+                .duration_since(now)
+                .map(|d| d.min(Duration::from_secs(RETRY_AFTER_MAX_SECS)))
+                .unwrap_or_default();
+            return Some(wait);
+        }
+        None
     }
 
     /// Execute one HTTP attempt: send the request, parse a 200 body into `T`, and map
@@ -124,23 +151,24 @@ impl AudiobookdbClient {
         Err((Self::http_error(status, body, not_found_id), retry_after))
     }
 
-    /// Run `run_attempt` up to `MAX_RETRIES` times, retrying transient errors with
-    /// exponential backoff (honoring `Retry-After` on 429s when present).
+    /// Run `run_attempt` once, then retry transient errors up to `MAX_RETRIES` times
+    /// (`1 + MAX_RETRIES` total requests, matching the Audible client), with linear
+    /// backoff (1s, 2s, 3s; honoring `Retry-After` on 429s when present).
     async fn with_retries<'a, T, F, Fut>(&'a self, run_attempt: F) -> Result<T, AudiobookdbError>
     where
         F: FnMut() -> Fut + 'a,
         Fut: Future<Output = Result<T, (AudiobookdbError, Option<Duration>)>> + 'a,
     {
         let mut run_attempt = run_attempt;
-        for attempt in 0..MAX_RETRIES {
+        for attempt in 0..=MAX_RETRIES {
             match run_attempt().await {
                 Ok(value) => return Ok(value),
                 Err((error, retry_after)) => {
-                    if !Self::is_transient_error(&error) || attempt + 1 >= MAX_RETRIES {
+                    if !Self::is_transient_error(&error) || attempt >= MAX_RETRIES {
                         return Err(error);
                     }
                     let fallback =
-                        Duration::from_millis((attempt + 1) as u64 * BACKOFF_BASE_MS.min(8192));
+                        Duration::from_millis(((attempt + 1) as u64 * BACKOFF_BASE_MS).min(8192));
                     let delay = retry_after
                         .map(|d| d + jitter(Duration::from_millis(100)))
                         .unwrap_or_else(|| fallback + jitter(Duration::from_millis(100)));
@@ -265,7 +293,7 @@ impl AudiobookdbClient {
     }
 
     pub async fn download_cover(&self, cover_url: &str) -> Result<Vec<u8>, AudiobookdbError> {
-        self.with_retries(|| Box::pin(async { self.attempt_download(cover_url).await })).await
+        self.with_retries(|| async { self.attempt_download(cover_url).await }).await
     }
 
     async fn attempt_download(
@@ -508,9 +536,164 @@ struct AudiobookdbSeriesRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     fn json(s: &str) -> serde_json::Value {
         serde_json::from_str(s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_is_transient_error_matrix() {
+        // A refused loopback connection yields a genuine reqwest::Error for the
+        // Network arm (port 9 mirrors the other retry tests; nothing listens there).
+        let network = reqwest::get("http://127.0.0.1:9").await.unwrap_err();
+        let cases = [
+            (AudiobookdbError::Network(network), true),
+            (AudiobookdbError::Connection("refused".to_string()), true),
+            (AudiobookdbError::RateLimited, true),
+            (AudiobookdbError::Timeout, true),
+            (AudiobookdbError::ApiError { status: 499, message: "gone".into() }, false),
+            (AudiobookdbError::ApiError { status: 500, message: "boom".into() }, true),
+            (AudiobookdbError::ApiError { status: 503, message: "boom".into() }, true),
+            (AudiobookdbError::NotFound("id1".to_string()), false),
+            (AudiobookdbError::IdNotFound("id1".to_string()), false),
+            (
+                AudiobookdbError::Serialization(serde_json::from_str::<i32>("nope").unwrap_err()),
+                false,
+            ),
+        ];
+        for (error, expected) in &cases {
+            assert_eq!(AudiobookdbClient::is_transient_error(error), *expected, "{error:?}");
+        }
+    }
+
+    #[test]
+    fn test_http_error_mapping_table() {
+        let cases = [
+            (StatusCode::NOT_FOUND, "id1", Some("id1")),
+            (StatusCode::TOO_MANY_REQUESTS, "slow down", None),
+            (StatusCode::BAD_GATEWAY, "boom", Some("boom")),
+            (StatusCode::SERVICE_UNAVAILABLE, "", Some("")),
+        ];
+        for (status, body, expected_message) in cases {
+            let error = AudiobookdbClient::http_error(status, body.to_string(), "id1");
+            match error {
+                AudiobookdbError::RateLimited => {
+                    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "expected RateLimited");
+                }
+                AudiobookdbError::NotFound(id) => {
+                    assert_eq!(status, StatusCode::NOT_FOUND, "expected NotFound");
+                    assert_eq!(id, "id1");
+                }
+                AudiobookdbError::ApiError { status: got, message } => {
+                    assert_eq!(got, status.as_u16(), "expected ApiError({status})");
+                    assert_eq!(message, expected_message.as_deref().unwrap(), "message payload");
+                }
+                other => panic!("unexpected error variant: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_looks_like_asin_table() {
+        let cases = [
+            ("B08XYZ1234", true),
+            ("b08xyz1234", false),
+            ("A08XYZ1234", false),
+            ("B08XYZ123", false),
+            ("B08XYZ12345", false),
+            ("B08-XYZ123", false),
+            ("", false),
+        ];
+        for (id, expected) in cases {
+            assert_eq!(AudiobookdbClient::looks_like_asin(id), expected, "id {id:?}");
+        }
+    }
+
+    #[test]
+    fn test_parse_retry_after_table() {
+        // HTTP-dates beyond the cap clamp to exactly RETRY_AFTER_MAX_SECS, so every
+        // case here is deterministic.
+        let future_date = SystemTime::now() + Duration::from_secs(120);
+        let past_date = SystemTime::now() - Duration::from_secs(120);
+        let future = httpdate::fmt_http_date(future_date);
+        let past = httpdate::fmt_http_date(past_date);
+        let cap = Duration::from_secs(RETRY_AFTER_MAX_SECS);
+        let cases = [
+            // (input, expected)
+            ("3", Some(Duration::from_secs(3))),
+            ("0", Some(Duration::ZERO)),
+            ("  5  ", Some(Duration::from_secs(5))),
+            ("300", Some(cap)),
+            (&future, Some(cap)),
+            (&past, Some(Duration::ZERO)),
+            // Fractional seconds are not supported (documented in parse_retry_after).
+            ("12.5", None),
+            ("abc", None),
+            ("", None),
+            ("not a date", None),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(AudiobookdbClient::parse_retry_after(input), expected, "input {input:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_with_retries_attempt_count() {
+        let client =
+            AudiobookdbClient::with_base_url("http://127.0.0.1:9").expect("client should build");
+        let mut calls = 0;
+        let result: Result<u32, _> = client
+            .with_retries(|| {
+                calls += 1;
+                async {
+                    Err((
+                        AudiobookdbError::ApiError { status: 503, message: "unavailable".into() },
+                        None,
+                    ))
+                }
+            })
+            .await;
+        assert!(matches!(result, Err(AudiobookdbError::ApiError { status: 503, .. })));
+        // 1 initial attempt + MAX_RETRIES retries.
+        assert_eq!(calls, 1 + MAX_RETRIES);
+    }
+
+    #[tokio::test]
+    async fn test_with_retries_honors_retry_after() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let client =
+            AudiobookdbClient::with_base_url("http://127.0.0.1:9").expect("client should build");
+        let calls = AtomicUsize::new(0);
+        let start = Instant::now();
+        let result: Result<u32, _> = client
+            .with_retries(|| {
+                let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                async move {
+                    if n <= 2 {
+                        // A present (zero) Retry-After takes the honored branch:
+                        // delay = 0 + jitter(100ms) instead of the linear 1s/2s.
+                        Err((AudiobookdbError::RateLimited, Some(Duration::ZERO)))
+                    } else {
+                        Ok(42u32)
+                    }
+                }
+            })
+            .await;
+        assert!(matches!(result, Ok(v) if v == 42));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        // The linear fallback would sleep at least 1s + 2s; a zero Retry-After
+        // yields only two jitter sleeps, so this bound separates the branches.
+        assert!(start.elapsed() < Duration::from_millis(2500), "took {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn test_parse_retry_after_date_future_within_cap() {
+        // A future date inside the cap yields roughly the remaining wait.
+        let date = SystemTime::now() + Duration::from_secs(30);
+        let parsed = AudiobookdbClient::parse_retry_after(&httpdate::fmt_http_date(date)).unwrap();
+        assert!(parsed.as_millis() <= 30_000, "got {parsed:?}");
+        assert!(parsed.as_millis() >= 29_000, "got {parsed:?}");
     }
 
     #[test]
@@ -705,6 +888,30 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_string_fallback_boundaries() {
+        // An empty subtitle is treated as absent: it falls back to a non-empty
+        // disambiguation, and yields None when that is empty too.
+        let cases = [
+            (
+                r#""subtitle": "", "disambiguation": "The Deluxe Edition""#,
+                Some("The Deluxe Edition"),
+            ),
+            (r#""subtitle": "", "disambiguation": """#, None),
+        ];
+        for (fields, expected) in cases {
+            let book: AudiobookdbBook = serde_json::from_value(json(&format!(
+                r#"{{"id": "abc123def456", "title": "T", {fields}}}"#
+            )))
+            .unwrap();
+            assert_eq!(
+                AudiobookdbClient::map_book("abc123def456", &book, None).subtitle.as_deref(),
+                expected,
+                "{fields}"
+            );
+        }
+    }
+
+    #[test]
     fn test_release_chapters_sorted_by_ordinal_and_filtered() {
         let release: AudiobookdbRelease = serde_json::from_value(json(
             r#"{
@@ -715,6 +922,7 @@ mod tests {
                         {"title": "Chapter 3", "ordinal": 3, "startOffsetMs": 300000, "lengthMs": 100000},
                         {"title": "Chapter 1", "ordinal": 1, "startOffsetMs": 0, "lengthMs": 100000},
                         {"title": "Bad chapter", "ordinal": 4, "startOffsetMs": -1, "lengthMs": 1000},
+                        {"title": "Bad length", "ordinal": 5, "startOffsetMs": 100000, "lengthMs": -1},
                         {"title": "Chapter 2", "ordinal": 2, "startOffsetMs": 100000, "lengthMs": 100000}
                     ]
                 }
@@ -725,13 +933,15 @@ mod tests {
             &serde_json::from_value(json(r#"{"id": "abc123def456", "title": "T"}"#)).unwrap(),
             Some(&release),
         );
-        // Out-of-order ordinals are sorted; the negative offset is dropped.
+        // Out-of-order ordinals are sorted; the negative offset and negative
+        // length are dropped.
         assert_eq!(
             meta.chapters.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(),
             vec!["Chapter 1", "Chapter 2", "Chapter 3"]
         );
         assert_eq!(meta.chapters[0].start_time, Duration::ZERO);
         assert_eq!(meta.chapters[1].start_time, Duration::from_millis(100_000));
+        assert_eq!(meta.chapters[2].start_time, Duration::from_millis(300_000));
         assert_eq!(meta.chapters[2].duration, Duration::from_millis(100_000));
     }
 
@@ -767,6 +977,21 @@ mod tests {
         let no_images: AudiobookdbBook =
             serde_json::from_value(json(r#"{"id": "abc123def456", "title": "T"}"#)).unwrap();
         assert_eq!(AudiobookdbClient::map_book("abc123def456", &no_images, None).cover_url, None);
+
+        // An empty sourceUrl string is treated as absent and falls back to the
+        // 768px derivative of the base key.
+        let empty_source: AudiobookdbBook = serde_json::from_value(json(
+            r#"{
+                "id": "abc123def456",
+                "title": "T",
+                "coverImage": {"url": "img/base", "sourceUrl": ""}
+            }"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            AudiobookdbClient::map_book("abc123def456", &empty_source, None).cover_url.as_deref(),
+            Some("img/base/large.jpg")
+        );
     }
 
     #[test]

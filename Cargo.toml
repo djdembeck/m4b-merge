@@ -27,6 +27,7 @@ tempfile = "=3.27.0"
 walkdir = "2.5"
 natord = "1.0"
 regex = "1.10"
+httpdate = "=1.0.3"
 
 [dev-dependencies]
 tracing-test = "0.2"

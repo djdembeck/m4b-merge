@@ -163,14 +163,20 @@ impl Processor {
         );
 
         // Create API client based on configured metadata source
-        let api_client =
-            match MetadataSource::new(config.metadata_source, config.api_url.as_deref()) {
-                Ok(src) => Some(src),
-                Err(e) => {
-                    warn!("Failed to create metadata source: {}", e);
-                    None
-                }
-            };
+        let api_client = match MetadataSource::new(
+            config.metadata_source,
+            config.api_url.as_deref(),
+        ) {
+            Ok(src) => Some(src),
+            Err(e) => {
+                warn!("Failed to create metadata source: {}", e);
+                eprintln!(
+                    "Warning: failed to create metadata source ({}); metadata lookup will be disabled.",
+                    e
+                );
+                None
+            }
+        };
 
         let merger = Merger::new(ffmpeg.clone());
         let tagger = Tagger::new();
@@ -656,16 +662,32 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn create_test_config(temp_dir: &TempDir) -> Config {
+    /// Build a test `Config` with the standard dry-run defaults
+    /// (AudiobookDB source, no API URL override).
+    fn test_config(
+        output: Option<PathBuf>,
+        completed: Option<PathBuf>,
+        dry_run: bool,
+        metadata_id: Option<String>,
+    ) -> Config {
         Config::new(
             vec![],
-            Some(temp_dir.path().join("output")),
+            output,
             None,
             MetadataSourceKind::Audiobookdb,
-            Some(temp_dir.path().join("completed")),
+            completed,
             1,
             "info".to_string(),
             "{author}/{title}".to_string(),
+            dry_run,
+            metadata_id,
+        )
+    }
+
+    fn create_test_config(temp_dir: &TempDir) -> Config {
+        test_config(
+            Some(temp_dir.path().join("output")),
+            Some(temp_dir.path().join("completed")),
             false,
             None,
         )
@@ -737,18 +759,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_group_dry_run_no_metadata() {
         let temp_dir = TempDir::new().unwrap();
-        let config = Config::new(
-            vec![],
-            Some(temp_dir.path().join("output")),
-            None,
-            MetadataSourceKind::Audiobookdb,
-            None,
-            1,
-            "info".to_string(),
-            "{author}/{title}".to_string(),
-            true,
-            None,
-        );
+        let config = test_config(Some(temp_dir.path().join("output")), None, true, None);
         let processor = Processor::new(config).unwrap();
 
         // Create a test group with a dummy file
@@ -766,19 +777,14 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // INVALID_ID fails validation: contains underscores, which are not alphanumeric
+    // Dry-run skips metadata validation/fetching entirely, so an invalid ID
+    // (INVALID_ID) does not cause the group to fail; only the dry-run path is exercised.
     #[tokio::test]
     async fn test_process_group_dry_run_with_invalid_id() {
         let temp_dir = TempDir::new().unwrap();
-        let config = Config::new(
-            vec![],
+        let config = test_config(
             Some(temp_dir.path().join("output")),
             None,
-            MetadataSourceKind::Audiobookdb,
-            None,
-            1,
-            "info".to_string(),
-            "{author}/{title}".to_string(),
             true,
             Some("INVALID_ID".to_string()),
         );
@@ -803,18 +809,7 @@ mod tests {
     async fn test_process_group_dry_run_output_path_resolution() {
         let temp_dir = TempDir::new().unwrap();
         let output_dir = temp_dir.path().join("output");
-        let config = Config::new(
-            vec![],
-            Some(output_dir.clone()),
-            None,
-            MetadataSourceKind::Audiobookdb,
-            None,
-            1,
-            "info".to_string(),
-            "{author}/{title}".to_string(),
-            true,
-            None,
-        );
+        let config = test_config(Some(output_dir.clone()), None, true, None);
         let processor = Processor::new(config).unwrap();
 
         // Create two test groups
@@ -832,6 +827,26 @@ mod tests {
             let result = result.unwrap();
             assert!(result.output_file.starts_with(&output_dir));
             assert_eq!(result.output_file.extension().unwrap(), "m4b");
+        }
+    }
+
+    #[test]
+    fn test_extract_metadata_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
+
+        // 10+ mixed-case alphanumeric characters inside brackets are extracted;
+        // shorter IDs and IDs with non-alphanumeric characters are not.
+        let cases = [
+            ("Book [B08XYZ1234]", Some("B08XYZ1234")),
+            ("Book [abc123def456]", Some("abc123def456")),
+            ("Book [B08XYZ123]", None),
+            ("Book [ABCD_12345]", None),
+            ("Book No Tag", None),
+        ];
+        for (name, expected) in cases {
+            let group = AudioGroup { name: name.to_string(), files: vec![], disc_number: None };
+            assert_eq!(processor.extract_metadata_id(&group).as_deref(), expected, "name {name:?}");
         }
     }
 }

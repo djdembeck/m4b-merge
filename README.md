@@ -7,7 +7,7 @@ A blazing fast CLI tool for merging audiobook files into sorted, tagged M4B file
 
 m4b-merge takes split audio files (MP3, M4A, or M4B) and merges them into a single, consistently tagged M4B file. Originally written in Python and rewritten in Rust, it provides high-performance processing with zero-copy merging for files of the same format, ensuring the original bitrate and sample rate are preserved.
 
-The tool automates metadata retrieval via ASIN lookup through [AudiobookDB](https://audiobookdb.org) — a community-maintained audiobook metadata database with proper book/release separation and moderated contributions — embeds high-resolution cover art, and maintains chapter markers from source files.
+The tool automates metadata lookup by ASIN or AudiobookDB book ID through [AudiobookDB](https://audiobookdb.org) — a community-maintained audiobook metadata database with proper book/release separation and moderated contributions — embeds high-resolution cover art, and maintains chapter markers from source files.
 
 - [Install](#install)
 - [Usage](#usage)
@@ -56,7 +56,7 @@ m4b-merge -i input/book_folder/
 
 ### Metadata & High-Resolution Covers
 
-Provide an ASIN to automatically fetch metadata from [AudiobookDB](https://audiobookdb.org). (`--metadata-source audnexus` remains available for the legacy Audnexus API.)
+Provide a metadata ID (ASIN or AudiobookDB book ID) to automatically fetch metadata from [AudiobookDB](https://audiobookdb.org). (`--metadata-source audnexus` remains available for the legacy Audnexus API.)
 
 ```bash
 m4b-merge -i input/book_folder/ -a B012345678

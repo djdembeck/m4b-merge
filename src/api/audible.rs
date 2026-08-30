@@ -7,21 +7,20 @@ use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
 use crate::metadata::{BookMetadata, Chapter};
 
+use super::client::{
+    BACKOFF_BASE_MS, CONNECT_TIMEOUT_SECS, DEFAULT_TIMEOUT_SECS, MAX_RETRIES,
+    POOL_IDLE_TIMEOUT_SECS,
+};
+
 /// Default API base URL for audnexus
 pub const DEFAULT_API_URL: &str = "https://api.audnex.us";
-
-/// Default request timeout in seconds
-pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
-
-/// Maximum number of retry attempts
-pub const MAX_RETRIES: usize = 3;
-/// Base delay for exponential backoff in milliseconds
-pub const BACKOFF_BASE_MS: u64 = 1000;
 
 /// Errors that can occur when calling the Audible API
 #[derive(Debug, Error)]
 pub enum AudibleError {
-    #[error("Invalid metadata_id format: {0}")]
+    #[error(
+        "Invalid metadata_id '{0}': the audnexus source requires a 10-character ASIN (e.g. B08XYZ1234)"
+    )]
     InvalidMetadataId(String),
 
     #[error("Book not found for metadata_id: {0}")]
@@ -63,8 +62,8 @@ impl AudibleClient {
     pub fn with_base_url(base_url: impl Into<String>) -> Result<Self, AudibleError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .connect_timeout(Duration::from_secs(10)) // Connection timeout
-            .pool_idle_timeout(Duration::from_secs(30)) // Connection pool timeout
+            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+            .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT_SECS))
             .build()?;
 
         Ok(Self { client, base_url: base_url.into() })
@@ -152,7 +151,8 @@ impl AudibleClient {
 
     /// Download cover image bytes from the cover URL
     pub async fn download_cover(&self, cover_url: &str) -> Result<Vec<u8>, AudibleError> {
-        let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
+        let retry_strategy =
+            ExponentialBackoff::from_millis(BACKOFF_BASE_MS).map(jitter).take(MAX_RETRIES);
 
         let client = self.client.clone();
         let url = cover_url.to_string();

@@ -6,6 +6,25 @@ pub use audiobookdb::{AudiobookdbClient, AudiobookdbError};
 
 use crate::metadata::BookMetadata;
 
+/// HTTP client settings shared by the metadata-source clients.
+pub(crate) mod client {
+    /// Default request timeout in seconds
+    pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+    /// Connection-establishment timeout in seconds
+    pub const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+    /// Connection-pool idle timeout in seconds
+    pub const POOL_IDLE_TIMEOUT_SECS: u64 = 30;
+
+    /// Maximum number of retry attempts after the initial request.
+    /// Both metadata sources make at most `1 + MAX_RETRIES` total requests.
+    pub const MAX_RETRIES: usize = 3;
+
+    /// Base delay for backoff in milliseconds
+    pub const BACKOFF_BASE_MS: u64 = 1000;
+}
+
 /// Unified metadata-source error.
 #[derive(Debug, thiserror::Error)]
 pub enum MetadataError {
@@ -82,6 +101,31 @@ impl MetadataSource {
         match self {
             Self::Audible(c) => Ok(c.download_cover(url).await?),
             Self::Audiobookdb(c) => Ok(c.download_cover(url).await?),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metadata_source_dispatch_matrix() {
+        // Audnexus maps to the Audible client; Audiobookdb to the AudiobookDB
+        // client, independent of whether an API URL override is supplied.
+        let cases = [
+            (MetadataSourceKind::Audnexus, None, false),
+            (MetadataSourceKind::Audnexus, Some("http://localhost:1"), false),
+            (MetadataSourceKind::Audiobookdb, None, true),
+            (MetadataSourceKind::Audiobookdb, Some("http://localhost:1"), true),
+        ];
+        for (kind, api_url, expect_audiobookdb) in cases {
+            let source = MetadataSource::new(kind, api_url)
+                .unwrap_or_else(|e| panic!("{kind} {api_url:?} should build: {e}"));
+            assert!(
+                matches!(source, MetadataSource::Audiobookdb(_)) == expect_audiobookdb,
+                "{kind} with {api_url:?} dispatched to the wrong client"
+            );
         }
     }
 }

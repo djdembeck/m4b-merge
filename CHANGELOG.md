@@ -14,6 +14,10 @@ All notable changes to this project will be documented in this file. See [standa
   ASIN resolution uses `GET /audiobooks/external/audible/{ASIN}`, covers use the documented
   full-resolution `sourceUrl` (or 768px `large.jpg` derivative), and series positions come from
   the authoritative `position` object. Retry logic honors the `Retry-After` header on 429s.
+- CLI flags: `--asin` renamed to `--metadata-id` (accepts an ASIN or an AudiobookDB book ID,
+  falling back to search for other identifiers); new `--metadata-source` flag (default
+  `audiobookdb`) selects the metadata source, and new `--api-url` overrides the source's
+  default API URL.
 
 ### [0.5.3](https://github.com/djdembeck/m4b-merge/compare/v0.5.2...v0.5.3) (2024-08-07)
 
