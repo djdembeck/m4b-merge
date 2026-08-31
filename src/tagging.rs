@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -106,14 +107,93 @@ impl Tagger {
     /// Create a new Tagger with default settings
     pub fn new() -> Self {
         Self {
-            http_client: reqwest::Client::new(),
+            http_client: Self::build_http_client(),
             overwrite_behavior: OverwriteBehavior::default(),
         }
+    }
+
+    /// Build the cover-download HTTP client.
+    ///
+    /// Redirects are disabled: `download_image` validates the URL for SSRF before
+    /// requesting it, and a redirect to an internal address would bypass that check.
+    /// `download_image` treats any 3xx response as an error.
+    fn build_http_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("reqwest client with static settings cannot fail")
     }
 
     /// Ensure a file exists, returning an error if not
     fn ensure_file_exists(path: &Path) -> Result<()> {
         if !path.exists() { Err(TaggingError::FileNotFound(path.to_path_buf())) } else { Ok(()) }
+    }
+
+    /// Validate a cover URL before downloading (SSRF guard).
+    ///
+    /// Only `https` URLs are accepted. Hostnames that are loopback, private,
+    /// link-local, or unspecified address literals (e.g. `127.0.0.1`, `10.x`,
+    /// `192.168.x`, `169.254.169.254`, `::1`) are rejected, as is `localhost`.
+    /// Public CDN hostnames and public IP literals pass.
+    fn validate_cover_url(url: &str) -> Result<()> {
+        let parsed = reqwest::Url::parse(url)
+            .map_err(|e| TaggingError::CoverDownload(format!("Invalid cover URL '{url}': {e}")))?;
+
+        if parsed.scheme() != "https" {
+            return Err(TaggingError::CoverDownload(format!(
+                "Cover URL '{url}' uses scheme '{}'; only https is allowed",
+                parsed.scheme()
+            )));
+        }
+
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| TaggingError::CoverDownload(format!("Cover URL '{url}' has no host")))?;
+        // `host_str` returns bracketed IPv6 literals (e.g. "[::1]").
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+
+        let rejected = match std::net::IpAddr::from_str(host) {
+            // IP literal: block loopback/private/link-local/reserved ranges.
+            Ok(addr) => Self::is_restricted_ip(addr),
+            // Hostname: block only the loopback alias; public CDNs pass.
+            Err(_) => host.eq_ignore_ascii_case("localhost"),
+        };
+        if rejected {
+            return Err(TaggingError::CoverDownload(format!(
+                "Cover URL '{url}' points at a loopback/private/link-local address; refusing to fetch it"
+            )));
+        }
+        Ok(())
+    }
+
+    /// True for IP literals that are loopback, private, link-local, or reserved
+    /// and therefore must never be a cover-download destination.
+    fn is_restricted_ip(addr: std::net::IpAddr) -> bool {
+        match addr {
+            std::net::IpAddr::V4(v4) => {
+                let (a, b) = (v4.octets()[0], v4.octets()[1]);
+                v4.is_unspecified()
+                    || a == 127 // 127.0.0.0/8 loopback
+                    || (a == 10) // 10.0.0.0/8
+                    || (a == 172 && (16..=31).contains(&b)) // 172.16.0.0/12
+                    || (a == 192 && b == 168) // 192.168.0.0/16
+                    || (a == 169 && b == 254) // 169.254.0.0/16 link-local
+                    || (a == 100 && (64..=127).contains(&b)) // 100.64.0.0/10 CGN
+                    || a >= 224 // multicast + reserved (224.0.0.0/3)
+            }
+            std::net::IpAddr::V6(v6) => {
+                let segs = v6.segments();
+                // ::1 loopback, :: unspecified
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    // fe80::/10 link-local
+                    || (segs[0] & 0xffc0) == 0xfe80
+                    // fc00::/7 unique-local
+                    || (segs[0] & 0xfe00) == 0xfc00
+                    // IPv4-mapped (::ffff:a.b.c.d): judge by the embedded v4.
+                    || v6.to_ipv4_mapped().is_some_and(|v4| Self::is_restricted_ip(v4.into()))
+            }
+        }
     }
 
     /// Create a new Tagger with custom overwrite behavior
@@ -122,7 +202,16 @@ impl Tagger {
         self
     }
 
-    /// Create a new Tagger with a custom HTTP client
+    /// Create a new Tagger with a custom HTTP client.
+    ///
+    /// `download_image` validates the URL before requesting it and treats any
+    /// 3xx response as an error, but that only catches clients that return the
+    /// 3xx itself: a redirect-following client (reqwest's default policy)
+    /// follows the hop internally and surfaces a plain 200 from an internal
+    /// address. The no-redirect-bypass guarantee therefore holds only for
+    /// clients that do not follow redirects, as `Tagger::new()`'s built-in
+    /// client does via `Policy::none()`; inject only non-redirect-following
+    /// clients.
     pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
         self.http_client = client;
         self
@@ -320,6 +409,10 @@ impl Tagger {
     async fn download_image(&self, url: &str) -> Result<Vec<u8>> {
         const MAX_SIZE: usize = 5 * 1024 * 1024; // 5 MB
 
+        // Reject URLs that could reach loopback/private/link-local/reserved
+        // addresses (SSRF) before any request goes out.
+        Self::validate_cover_url(url)?;
+
         let response = self
             .http_client
             .get(url)
@@ -328,6 +421,14 @@ impl Tagger {
             .await
             .map_err(|e| TaggingError::CoverDownload(format!("Request failed/timeout: {}", e)))?;
 
+        // The client disables redirects (they could bypass the SSRF check above);
+        // a 3xx means the server refused to serve the image directly.
+        if response.status().is_redirection() {
+            return Err(TaggingError::CoverDownload(format!(
+                "Cover URL redirected ({}); redirects are not followed",
+                response.status()
+            )));
+        }
         if !response.status().is_success() {
             return Err(TaggingError::CoverDownload(format!("HTTP error: {}", response.status())));
         }
@@ -621,6 +722,32 @@ mod tests {
         assert_eq!(format_duration(Duration::from_secs(90)), "00:01:30.000");
         assert_eq!(format_duration(Duration::from_millis(5432100)), "01:30:32.100");
         assert_eq!(format_duration(Duration::from_millis(3661001)), "01:01:01.001");
+    }
+
+    #[test]
+    fn test_validate_cover_url_table() {
+        // (url, should pass). https + public host passes; anything that is not
+        // https, or that resolves to a non-public destination, is rejected.
+        let cases = [
+            ("https://images.example.com/covers/book.jpg", true),
+            ("https://93.184.216.34/cover.jpg", true), // public IP literal
+            ("https://localhost/cover.jpg", false),
+            ("http://images.example.com/covers/book.jpg", false), // not https
+            ("file:///etc/passwd", false),
+            ("gopher://127.0.0.1/cover", false),
+            ("https://127.0.0.1/cover.jpg", false),
+            ("https://10.0.0.5/cover.jpg", false),
+            ("https://192.168.1.10/cover.jpg", false),
+            ("https://169.254.169.254/latest/meta-data/", false), // cloud metadata
+            ("https://::1/cover.jpg", false),
+            ("https://[::1]/cover.jpg", false),
+            ("https://0.0.0.0/cover.jpg", false),
+            ("not a url", false),
+        ];
+        for (url, expected) in cases {
+            let passed = Tagger::validate_cover_url(url).is_ok();
+            assert_eq!(passed, expected, "url {url:?}");
+        }
     }
 
     #[test]

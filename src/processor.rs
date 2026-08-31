@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
-use crate::api::audible::{AudibleClient, AudibleError};
+use crate::api::{MetadataError, MetadataSource};
 use crate::audio::ffmpeg::FFmpeg;
 use crate::config::Config;
 use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
@@ -12,13 +12,14 @@ use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
 use crate::tagging::{Tagger, TaggingError};
 
-/// Static ASIN regex compiled once at startup
-static ASIN_REGEX: OnceLock<regex::Regex> = OnceLock::new();
+/// Static metadata ID regex compiled once at startup
+static METADATA_ID_REGEX: OnceLock<regex::Regex> = OnceLock::new();
 
-/// Get the static ASIN regex or initialize it
-fn get_asin_regex() -> &'static regex::Regex {
-    ASIN_REGEX.get_or_init(|| {
-        regex::Regex::new(r"\[([A-Z0-9]{10})\]").expect("Invalid ASIN regex pattern")
+/// Returns the metadata ID regex. Matches mixed-case alphanumeric IDs of 10+ characters
+/// to support both Audible ASINs (10 chars) and longer AudiobookDB internal IDs.
+fn get_metadata_id_regex() -> &'static regex::Regex {
+    METADATA_ID_REGEX.get_or_init(|| {
+        regex::Regex::new(r"\[([A-Za-z0-9]{10,})\]").expect("Invalid metadata ID regex pattern")
     })
 }
 
@@ -32,7 +33,7 @@ pub enum ProcessorError {
     Merge(#[from] MergeError),
 
     #[error("API error: {0}")]
-    Api(#[from] AudibleError),
+    Api(#[from] MetadataError),
 
     #[error("Tagging error: {0}")]
     Tagging(#[from] TaggingError),
@@ -148,7 +149,7 @@ impl ProgressHandler for NoOpProgressHandler {
 pub struct Processor {
     config: Config,
     ffmpeg: Arc<FFmpeg>,
-    api_client: Option<AudibleClient>,
+    api_client: Option<MetadataSource>,
     merger: Merger,
     tagger: Tagger,
 }
@@ -161,16 +162,19 @@ impl Processor {
             FFmpeg::discover().map_err(|e| ProcessorError::FFmpegNotFound(e.to_string()))?,
         );
 
-        // Create API client if URL is provided
-        let api_client = if config.api_url.is_empty() {
-            None
-        } else {
-            match AudibleClient::with_base_url(&config.api_url) {
-                Ok(client) => Some(client),
-                Err(e) => {
-                    warn!("Failed to create API client: {}", e);
-                    None
-                }
+        // Create API client based on configured metadata source
+        let api_client = match MetadataSource::new(
+            config.metadata_source,
+            config.api_url.as_deref(),
+        ) {
+            Ok(src) => Some(src),
+            Err(e) => {
+                warn!("Failed to create metadata source: {}", e);
+                eprintln!(
+                    "Warning: failed to create metadata source ({}); metadata lookup will be disabled.",
+                    e
+                );
+                None
             }
         };
 
@@ -185,7 +189,7 @@ impl Processor {
     pub fn with_components(
         config: Config,
         ffmpeg: Arc<FFmpeg>,
-        api_client: Option<AudibleClient>,
+        api_client: Option<MetadataSource>,
     ) -> Self {
         let merger = Merger::new(ffmpeg.clone());
         let tagger = Tagger::new();
@@ -311,31 +315,31 @@ impl Processor {
 
         debug!("Processing group '{}' with {} files", group.name, input_paths.len());
 
-        // Stage 2: API Lookup (optional - only if ASIN is provided or can be inferred)
+        // Stage 2: API Lookup (optional - only if metadata ID is provided or can be inferred)
         // Skipped in dry-run mode to avoid unnecessary network calls
         let metadata = if self.config.dry_run {
             None
         } else if let Some(client) = &self.api_client {
-            let extracted_asin = self.extract_asin(group);
+            let extracted_id = self.extract_metadata_id(group);
 
-            let asin = self.config.asin.as_deref().or(extracted_asin.as_deref());
+            let id = self.config.metadata_id.as_deref().or(extracted_id.as_deref());
 
-            if let Some(asin) = asin {
+            if let Some(id) = id {
                 progress_handler.on_progress(ProcessingProgress {
                     stage: ProcessingStage::ApiLookup,
                     current_file: Some(input_paths[0].clone()),
                     total_files: 1,
                     completed_files: 0,
-                    message: format!("Fetching metadata for ASIN: {}...", asin),
+                    message: format!("Fetching metadata for ID: {}...", id),
                 });
 
-                match client.fetch_book(asin).await {
+                match client.fetch_book(id).await {
                     Ok(book_metadata) => {
                         info!("Successfully fetched metadata for: {}", book_metadata.title);
                         Some(book_metadata)
                     }
                     Err(e) => {
-                        warn!("Failed to fetch metadata for ASIN {}: {}", asin, e);
+                        warn!("Failed to fetch metadata for ID {}: {}", id, e);
                         None
                     }
                 }
@@ -619,12 +623,12 @@ impl Processor {
         result
     }
 
-    /// Extract ASIN from audio group (folder name, existing metadata, etc.)
-    fn extract_asin(&self, group: &AudioGroup) -> Option<String> {
-        let re = get_asin_regex();
+    /// Extract metadata ID from audio group (folder name, existing metadata, etc.)
+    fn extract_metadata_id(&self, group: &AudioGroup) -> Option<String> {
+        let re = get_metadata_id_regex();
         if let Some(captures) = re.captures(&group.name) {
-            if let Some(asin) = captures.get(1) {
-                return Some(asin.as_str().to_string());
+            if let Some(capture) = captures.get(1) {
+                return Some(capture.as_str().to_string());
             }
         }
         None
@@ -636,7 +640,7 @@ impl Processor {
     }
 
     /// Get the API client
-    pub fn api_client(&self) -> Option<&AudibleClient> {
+    pub fn api_client(&self) -> Option<&MetadataSource> {
         self.api_client.as_ref()
     }
 
@@ -654,18 +658,36 @@ impl Processor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::MetadataSourceKind;
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn create_test_config(temp_dir: &TempDir) -> Config {
+    /// Build a test `Config` with the standard dry-run defaults
+    /// (AudiobookDB source, no API URL override).
+    fn test_config(
+        output: Option<PathBuf>,
+        completed: Option<PathBuf>,
+        dry_run: bool,
+        metadata_id: Option<String>,
+    ) -> Config {
         Config::new(
             vec![],
-            Some(temp_dir.path().join("output")),
-            "https://api.audnex.us".to_string(),
-            Some(temp_dir.path().join("completed")),
+            output,
+            None,
+            MetadataSourceKind::Audiobookdb,
+            completed,
             1,
             "info".to_string(),
             "{author}/{title}".to_string(),
+            dry_run,
+            metadata_id,
+        )
+    }
+
+    fn create_test_config(temp_dir: &TempDir) -> Config {
+        test_config(
+            Some(temp_dir.path().join("output")),
+            Some(temp_dir.path().join("completed")),
             false,
             None,
         )
@@ -737,17 +759,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_group_dry_run_no_metadata() {
         let temp_dir = TempDir::new().unwrap();
-        let config = Config::new(
-            vec![],
-            Some(temp_dir.path().join("output")),
-            String::new(),
-            None,
-            1,
-            "info".to_string(),
-            "{author}/{title}".to_string(),
-            true,
-            None,
-        );
+        let config = test_config(Some(temp_dir.path().join("output")), None, true, None);
         let processor = Processor::new(config).unwrap();
 
         // Create a test group with a dummy file
@@ -765,29 +777,26 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // Dry-run skips metadata validation/fetching entirely, so an invalid ID
+    // (INVALID_ID) does not cause the group to fail; only the dry-run path is exercised.
     #[tokio::test]
-    async fn test_process_group_dry_run_with_invalid_asin() {
+    async fn test_process_group_dry_run_with_invalid_id() {
         let temp_dir = TempDir::new().unwrap();
-        let config = Config::new(
-            vec![],
+        let config = test_config(
             Some(temp_dir.path().join("output")),
-            String::new(),
             None,
-            1,
-            "info".to_string(),
-            "{author}/{title}".to_string(),
             true,
-            Some("INVALID_ASIN".to_string()),
+            Some("INVALID_ID".to_string()),
         );
         let processor = Processor::new(config).unwrap();
 
-        let test_dir = temp_dir.path().join("Test Book [INVALID_ASIN]");
+        let test_dir = temp_dir.path().join("Test Book [INVALID_ID]");
         std::fs::create_dir(&test_dir).unwrap();
         let _file_path =
-            create_test_audio_file(&temp_dir, "Test Book [INVALID_ASIN]/chapter1.mp3", b"dummy");
+            create_test_audio_file(&temp_dir, "Test Book [INVALID_ID]/chapter1.mp3", b"dummy");
         let audio_file = AudioFile::new(test_dir.join("chapter1.mp3")).unwrap();
         let group = AudioGroup {
-            name: "Test Book [INVALID_ASIN]".to_string(),
+            name: "Test Book [INVALID_ID]".to_string(),
             files: vec![audio_file],
             disc_number: None,
         };
@@ -800,17 +809,7 @@ mod tests {
     async fn test_process_group_dry_run_output_path_resolution() {
         let temp_dir = TempDir::new().unwrap();
         let output_dir = temp_dir.path().join("output");
-        let config = Config::new(
-            vec![],
-            Some(output_dir.clone()),
-            String::new(),
-            None,
-            1,
-            "info".to_string(),
-            "{author}/{title}".to_string(),
-            true,
-            None,
-        );
+        let config = test_config(Some(output_dir.clone()), None, true, None);
         let processor = Processor::new(config).unwrap();
 
         // Create two test groups
@@ -828,6 +827,26 @@ mod tests {
             let result = result.unwrap();
             assert!(result.output_file.starts_with(&output_dir));
             assert_eq!(result.output_file.extension().unwrap(), "m4b");
+        }
+    }
+
+    #[test]
+    fn test_extract_metadata_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
+
+        // 10+ mixed-case alphanumeric characters inside brackets are extracted;
+        // shorter IDs and IDs with non-alphanumeric characters are not.
+        let cases = [
+            ("Book [B08XYZ1234]", Some("B08XYZ1234")),
+            ("Book [abc123def456]", Some("abc123def456")),
+            ("Book [B08XYZ123]", None),
+            ("Book [ABCD_12345]", None),
+            ("Book No Tag", None),
+        ];
+        for (name, expected) in cases {
+            let group = AudioGroup { name: name.to_string(), files: vec![], disc_number: None };
+            assert_eq!(processor.extract_metadata_id(&group).as_deref(), expected, "name {name:?}");
         }
     }
 }
