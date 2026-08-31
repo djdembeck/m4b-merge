@@ -31,8 +31,10 @@ All notable changes to this project will be documented in this file. See [standa
   the authoritative `position` object. Retry logic honors the `Retry-After` header on 429s.
 - CLI flags: `--asin` renamed to `--metadata-id` (accepts an ASIN or an AudiobookDB book ID,
   falling back to search for other identifiers); new `--metadata-source` flag (default
-  `audiobookdb`) selects the metadata source, and new `--api-url` overrides the source's
-  default API URL.
+  `audiobookdb`) selects the metadata source, and new `--api-url` overrides the
+  selected source's default API URL. `--api-url` no longer implies the Audnexus
+  source: it only overrides the URL for the source chosen by `--metadata-source`,
+  and m4b-merge warns when a URL is passed to the AudiobookDB client.
 
 ### [0.5.3](https://github.com/djdembeck/m4b-merge/compare/v0.5.2...v0.5.3) (2024-08-07)
 

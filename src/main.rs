@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use m4b_merge::api::MetadataSourceKind;
 use m4b_merge::audio::FFmpeg;
@@ -158,6 +158,15 @@ async fn main() {
     if let Err(e) = config.validate() {
         eprintln!("Error: {}", e);
         std::process::exit(1);
+    }
+
+    // `--api-url` no longer implies the audnexus source; with the default
+    // audiobookdb source it points the AudiobookDB client at a custom URL, which
+    // usually means an Audnexus proxy was intended for the audnexus source.
+    if args.api_url.is_some() && args.metadata_source == MetadataSourceKind::Audiobookdb {
+        warn!(
+            "--api-url is being passed to the AudiobookDB client; use --metadata-source audnexus if it points to an Audnexus proxy"
+        );
     }
 
     info!("m4b-merge starting with {} input(s)", args.inputs.len());

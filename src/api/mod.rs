@@ -96,13 +96,6 @@ impl MetadataSource {
             Self::Audiobookdb(c) => Ok(c.fetch_book(id).await?),
         }
     }
-
-    pub async fn download_cover(&self, url: &str) -> Result<Vec<u8>, MetadataError> {
-        match self {
-            Self::Audible(c) => Ok(c.download_cover(url).await?),
-            Self::Audiobookdb(c) => Ok(c.download_cover(url).await?),
-        }
-    }
 }
 
 #[cfg(test)]

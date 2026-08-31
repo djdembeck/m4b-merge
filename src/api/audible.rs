@@ -148,46 +148,6 @@ impl AudibleClient {
             }
         }
     }
-
-    /// Download cover image bytes from the cover URL
-    pub async fn download_cover(&self, cover_url: &str) -> Result<Vec<u8>, AudibleError> {
-        let retry_strategy =
-            ExponentialBackoff::from_millis(BACKOFF_BASE_MS).map(jitter).take(MAX_RETRIES);
-
-        let client = self.client.clone();
-        let url = cover_url.to_string();
-
-        RetryIf::start(
-            retry_strategy,
-            move || {
-                let client = client.clone();
-                let url = url.clone();
-
-                async move { Self::download_cover_once(&client, &url).await }
-            },
-            Self::is_transient_error,
-        )
-        .await
-    }
-
-    /// Single download attempt without retry logic
-    async fn download_cover_once(client: &Client, url: &str) -> Result<Vec<u8>, AudibleError> {
-        let response = client.get(url).send().await?;
-
-        match response.status() {
-            StatusCode::OK => Ok(response.bytes().await?.to_vec()),
-            StatusCode::NOT_FOUND => Err(AudibleError::NotFound("cover".to_string())),
-            StatusCode::TOO_MANY_REQUESTS => Err(AudibleError::RateLimited),
-            status if status.is_server_error() => Err(AudibleError::ApiError {
-                status: status.as_u16(),
-                message: "Server error".to_string(),
-            }),
-            status => Err(AudibleError::ApiError {
-                status: status.as_u16(),
-                message: "Failed to download cover".to_string(),
-            }),
-        }
-    }
 }
 
 /// API response structure for book lookup

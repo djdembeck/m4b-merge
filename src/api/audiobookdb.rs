@@ -2,7 +2,8 @@
 //!
 //! Resolution flow: Audible ASINs are resolved via `GET /audiobooks/external/audible/{asin}`,
 //! internal AudiobookDB IDs via `GET /books/{id}`, and any other identifier falls back to
-//! `POST /search`. Chapter data comes from `GET /releases/{id}` (the matched release when the
+//! `POST /search` (only a hit whose `id` exactly matches the input is used; otherwise
+//! the lookup errors). Chapter data comes from `GET /releases/{id}` (the matched release when the
 //! ASIN endpoint links one, otherwise the book's first release).
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
@@ -80,16 +81,18 @@ impl AudiobookdbClient {
     }
 
     /// Returns true if the identifier looks like an Audible ASIN
-    /// (exactly 10 alphanumeric characters starting with B).
+    /// (exactly 10 alphanumeric characters, mirroring `AudibleClient::validate_id`).
     fn looks_like_asin(id: &str) -> bool {
-        id.len() == 10 && id.starts_with('B') && id.chars().all(|c| c.is_ascii_alphanumeric())
+        id.len() == 10 && id.chars().all(|c| c.is_ascii_alphanumeric())
     }
 
     /// Map a non-200 response to an `AudiobookdbError`. `not_found_id` gives the 404
-    /// a meaningful id (a bare word for endpoints that have none, e.g. covers).
+    /// a meaningful id (the book/release id, or the bare word "request" for `post_json`).
     fn http_error(status: StatusCode, body: String, not_found_id: &str) -> AudiobookdbError {
         match status {
             StatusCode::NOT_FOUND => AudiobookdbError::NotFound(not_found_id.to_string()),
+            // 408 is transient like the Audible client treats it: retry with backoff.
+            StatusCode::REQUEST_TIMEOUT => AudiobookdbError::Timeout,
             StatusCode::TOO_MANY_REQUESTS => AudiobookdbError::RateLimited,
             _ => AudiobookdbError::ApiError { status: status.as_u16(), message: body },
         }
@@ -238,81 +241,99 @@ impl AudiobookdbClient {
         self.post_json::<Vec<SearchDocumentBook>>(&url, &body).await
     }
 
+    /// Pick the first endpoint for `id`: ASIN-shaped identifiers go through the
+    /// external lookup, everything else through the internal book endpoint.
+    fn resolve_endpoint(id: &str) -> BookEndpoint {
+        if Self::looks_like_asin(id) {
+            BookEndpoint::ExternalAsin
+        } else {
+            BookEndpoint::InternalBook
+        }
+    }
+
+    /// Decide the fallback after the initial lookup 404s: an ASIN-shaped id is
+    /// retried as an internal id, a searchable id falls back to search, and an
+    /// id shorter than the API's 3-character search minimum is a dead end.
+    fn not_found_fallback(id: &str, initial: BookEndpoint) -> NotFoundFallback {
+        match initial {
+            BookEndpoint::ExternalAsin => NotFoundFallback::InternalBook,
+            BookEndpoint::InternalBook => {
+                if id.len() < 3 {
+                    NotFoundFallback::GiveUp
+                } else {
+                    NotFoundFallback::Search
+                }
+            }
+        }
+    }
+
+    /// Pick the release to fetch chapter data for: the ASIN-linked matched release
+    /// wins, then the book's first release, then `None`.
+    fn release_id_for(book: &AudiobookdbBook, matched_release_id: Option<&str>) -> Option<String> {
+        matched_release_id
+            .filter(|m| !m.is_empty())
+            .map(str::to_string)
+            .or_else(|| book.releases.first().map(|r| r.id.clone()))
+    }
+
+    /// Pick the search hit for a lookup id: an exact `id` match only. Returns
+    /// `None` when no hit matches exactly — silently taking an unrelated hit would
+    /// attach a different book's metadata to the input.
+    fn select_search_hit<'a>(
+        id: &str,
+        hits: &'a [SearchDocumentBook],
+    ) -> Option<&'a SearchDocumentBook> {
+        hits.iter().find(|h| h.id == id)
+    }
+
     /// Look up book metadata by identifier.
     ///
-    /// Audible ASINs (10 alphanumeric characters starting with B) are resolved via
+    /// ASIN-shaped identifiers (10 alphanumeric characters) are resolved via
     /// `GET /audiobooks/external/audible/{asin}`; if that 404s, the identifier is
     /// retried as an internal ID. Other identifiers use `GET /books/{id}` first and
-    /// fall back to `POST /search` (preferring a hit whose `id` equals the input,
-    /// otherwise the first hit) when the book is not found directly.
+    /// fall back to `POST /search` when the book is not found directly — only a
+    /// search hit whose `id` exactly matches the input is used, otherwise the
+    /// lookup errors with `IdNotFound`.
     pub async fn fetch_book(&self, book_id: &str) -> Result<BookMetadata, AudiobookdbError> {
-        // (book, release id for chapter data)
-        let (book, matched_release_id) = if Self::looks_like_asin(book_id) {
-            match self.resolve_external(book_id).await {
-                Ok(b) => {
-                    let matched = b.matched_release_id.clone();
-                    (b, matched)
-                }
-                Err(AudiobookdbError::NotFound(_)) => {
+        let endpoint = Self::resolve_endpoint(book_id);
+        let first = match endpoint {
+            BookEndpoint::ExternalAsin => self.resolve_external(book_id).await,
+            BookEndpoint::InternalBook => self.get_book(book_id).await,
+        };
+
+        let book = match first {
+            Ok(b) => b,
+            Err(AudiobookdbError::NotFound(_)) => match Self::not_found_fallback(book_id, endpoint)
+            {
+                NotFoundFallback::InternalBook => {
                     // ASIN not in the catalog; the 10-char id might be an internal ID.
-                    (self.get_book(book_id).await?, None)
+                    self.get_book(book_id).await?
                 }
-                Err(e) => return Err(e),
-            }
-        } else {
-            match self.get_book(book_id).await {
-                Ok(b) => (b, None),
-                Err(AudiobookdbError::NotFound(_)) => {
-                    // Shorter-than-3-char identifiers cannot be searched (API minimum).
-                    if book_id.len() < 3 {
-                        return Err(AudiobookdbError::IdNotFound(book_id.to_string()));
-                    }
+                NotFoundFallback::Search => {
                     let hits = self.search_books(book_id).await?;
-                    // Prefer a hit whose id matches exactly (case-sensitive), else
-                    // keep the lenient behavior of taking the first hit.
-                    let hit = hits
-                        .iter()
-                        .find(|h| h.id == book_id)
-                        .or_else(|| hits.first())
+                    // Exact match only: an id no hit carries is an error, not a
+                    // silent fallback to an unrelated book.
+                    let hit = Self::select_search_hit(book_id, &hits)
                         .ok_or_else(|| AudiobookdbError::IdNotFound(book_id.to_string()))?;
-                    (self.get_book(&hit.id).await?, None)
+                    self.get_book(&hit.id).await?
                 }
-                Err(e) => return Err(e),
-            }
+                NotFoundFallback::GiveUp => {
+                    // Shorter-than-3-char identifiers cannot be searched (API minimum).
+                    return Err(AudiobookdbError::IdNotFound(book_id.to_string()));
+                }
+            },
+            Err(e) => return Err(e),
         };
 
         // Fetch release data for chapter information. The matched release
         // (ASIN-linked) is preferred; otherwise fall back to the book's first
         // release. Missing release data is not fatal because many books simply
         // lack chapter metadata.
-        let release_id = matched_release_id.or_else(|| book.releases.first().map(|r| r.id.clone()));
+        let release_id = Self::release_id_for(&book, book.matched_release_id.as_deref());
         let release_data =
             if let Some(rid) = release_id { self.get_release(&rid).await.ok() } else { None };
 
         Ok(Self::map_book(book_id, &book, release_data.as_ref()))
-    }
-
-    pub async fn download_cover(&self, cover_url: &str) -> Result<Vec<u8>, AudiobookdbError> {
-        self.with_retries(|| async { self.attempt_download(cover_url).await }).await
-    }
-
-    async fn attempt_download(
-        &self,
-        url: &str,
-    ) -> Result<Vec<u8>, (AudiobookdbError, Option<Duration>)> {
-        let resp = match self.client.get(url).send().await {
-            Ok(resp) => resp,
-            Err(e) => return Err((AudiobookdbError::Network(e), None)),
-        };
-        let status = resp.status();
-        let retry_after =
-            (status == StatusCode::TOO_MANY_REQUESTS).then(|| Self::retry_after(&resp)).flatten();
-        if status == StatusCode::OK {
-            let bytes = resp.bytes().await.map_err(|e| (AudiobookdbError::Network(e), None))?;
-            return Ok(bytes.to_vec());
-        }
-        let body = resp.text().await.unwrap_or_default();
-        Err((Self::http_error(status, body, "cover"), retry_after))
     }
 
     /// Map a book (and optional release) to metadata: authors/narrators from `people`,
@@ -320,6 +341,10 @@ impl AudiobookdbClient {
     /// `subtitle` (falling back to `disambiguation`), series position from
     /// `position.value`/`label`, cover from `coverImage`/`images`, chapters from the
     /// release's `chapterDetail` (sorted by ordinal, negative offsets skipped).
+    ///
+    /// `caller_id` is the identifier the caller supplied; when the resolved book
+    /// carries its own canonical id it wins for `metadata_id` (e.g. an ASIN that
+    /// resolved to an internal book), falling back to `caller_id` when absent.
     fn map_book(
         caller_id: &str,
         book: &AudiobookdbBook,
@@ -398,7 +423,13 @@ impl AudiobookdbClient {
             .unwrap_or_default();
 
         BookMetadata {
-            metadata_id: caller_id.to_string(),
+            // Prefer the resolved book's canonical id over the caller's identifier.
+            metadata_id: book
+                .id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .unwrap_or(caller_id)
+                .to_string(),
             title: book.title.clone(),
             subtitle,
             authors,
@@ -414,6 +445,26 @@ impl AudiobookdbClient {
     }
 }
 
+/// The first endpoint to try for an identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BookEndpoint {
+    /// `GET /audiobooks/external/audible/{asin}` — ASIN-shaped identifiers.
+    ExternalAsin,
+    /// `GET /books/{id}` — everything else.
+    InternalBook,
+}
+
+/// What to do when the initial lookup 404s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotFoundFallback {
+    /// Retry the id as an internal book id.
+    InternalBook,
+    /// Search for it and use an exact-`id` hit, if any.
+    Search,
+    /// Give up with `IdNotFound` (id too short to search).
+    GiveUp,
+}
+
 /// Cover URL for an image: the full-resolution original when available, otherwise
 /// the documented 768px derivative of the storage key.
 fn cover_url_of(img: &AudiobookdbImage) -> String {
@@ -423,13 +474,17 @@ fn cover_url_of(img: &AudiobookdbImage) -> String {
         .unwrap_or_else(|| format!("{}/large.jpg", img.url))
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 struct SearchDocumentBook {
     id: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 struct AudiobookdbBook {
+    /// Canonical internal AudiobookDB id (present on the book endpoints and on the
+    /// external-ASIN response's linked book).
+    #[serde(default)]
+    id: Option<String>,
     title: String,
     #[serde(default)]
     subtitle: Option<String>,
@@ -571,6 +626,7 @@ mod tests {
     fn test_http_error_mapping_table() {
         let cases = [
             (StatusCode::NOT_FOUND, "id1", Some("id1")),
+            (StatusCode::REQUEST_TIMEOUT, "took too long", None),
             (StatusCode::TOO_MANY_REQUESTS, "slow down", None),
             (StatusCode::BAD_GATEWAY, "boom", Some("boom")),
             (StatusCode::SERVICE_UNAVAILABLE, "", Some("")),
@@ -578,6 +634,9 @@ mod tests {
         for (status, body, expected_message) in cases {
             let error = AudiobookdbClient::http_error(status, body.to_string(), "id1");
             match error {
+                AudiobookdbError::Timeout => {
+                    assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "expected Timeout");
+                }
                 AudiobookdbError::RateLimited => {
                     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "expected RateLimited");
                 }
@@ -596,10 +655,14 @@ mod tests {
 
     #[test]
     fn test_looks_like_asin_table() {
+        // Mirrors `AudibleClient::validate_id`: any 10-char ASCII alphanumeric
+        // string (B-prefixed or not, any case) is ASIN-shaped.
         let cases = [
             ("B08XYZ1234", true),
-            ("b08xyz1234", false),
-            ("A08XYZ1234", false),
+            ("b08xyz1234", true),
+            ("A08XYZ1234", true),
+            ("1234567890", true),
+            ("ABCDEFGHIJ", true),
             ("B08XYZ123", false),
             ("B08XYZ12345", false),
             ("B08-XYZ123", false),
@@ -794,7 +857,8 @@ mod tests {
             }"#,
         )).unwrap();
         let meta = AudiobookdbClient::map_book("B000000000", &book, None);
-        assert_eq!(meta.metadata_id, "B000000000");
+        // The resolved book's canonical id wins over the caller's identifier.
+        assert_eq!(meta.metadata_id, "abc123def456");
         assert_eq!(meta.title, "The Name of the Wind");
         // null subtitle falls back to disambiguation
         assert_eq!(meta.subtitle.as_deref(), Some("Robin Hobb novel"));
@@ -1005,5 +1069,100 @@ mod tests {
         .unwrap();
         assert_eq!(hits[0].id, "abc123def456");
         assert_eq!(hits[1].id, "def456abc789");
+    }
+
+    #[test]
+    fn test_resolve_endpoint_table() {
+        let cases = [
+            // ASIN-shaped (10 ASCII alphanumeric, any prefix/case) → external lookup.
+            ("B08XYZ1234", BookEndpoint::ExternalAsin),
+            ("1234567890", BookEndpoint::ExternalAsin),
+            ("b08xyz1234", BookEndpoint::ExternalAsin),
+            // Internal AudiobookDB ids and other identifiers → book endpoint.
+            ("abc123def456", BookEndpoint::InternalBook),
+            ("dune", BookEndpoint::InternalBook),
+            ("123456789", BookEndpoint::InternalBook), // 9 chars: not ASIN-shaped
+        ];
+        for (id, expected) in cases {
+            assert_eq!(AudiobookdbClient::resolve_endpoint(id), expected, "id {id:?}");
+        }
+    }
+
+    #[test]
+    fn test_not_found_fallback_table() {
+        let external = BookEndpoint::ExternalAsin;
+        let internal = BookEndpoint::InternalBook;
+        let cases = [
+            // ASIN 404 on the external endpoint → retry as internal id.
+            ("B08XYZ1234", external, NotFoundFallback::InternalBook),
+            ("1234567890", external, NotFoundFallback::InternalBook),
+            // Searchable ids (>= 3 chars) 404 on the book endpoint → search.
+            ("abc123def456", internal, NotFoundFallback::Search),
+            ("dune", internal, NotFoundFallback::Search),
+            // Below the API's 3-char search minimum → give up.
+            ("ab", internal, NotFoundFallback::GiveUp),
+            ("", internal, NotFoundFallback::GiveUp),
+        ];
+        for (id, endpoint, expected) in cases {
+            assert_eq!(
+                AudiobookdbClient::not_found_fallback(id, endpoint),
+                expected,
+                "id {id:?} after {endpoint:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_select_search_hit_exact_match_only() {
+        let hits: Vec<SearchDocumentBook> = vec![
+            SearchDocumentBook { id: "def456abc789".into() },
+            SearchDocumentBook { id: "abc123def456".into() },
+        ];
+        // Exact id match wins regardless of position.
+        assert_eq!(
+            AudiobookdbClient::select_search_hit("abc123def456", &hits).map(|h| h.id.as_str()),
+            Some("abc123def456")
+        );
+        // No exact match: no lenient first-hit fallback (F5).
+        assert_eq!(AudiobookdbClient::select_search_hit("dune", &hits), None);
+        // Empty hit list: none.
+        let empty: Vec<SearchDocumentBook> = vec![];
+        assert_eq!(AudiobookdbClient::select_search_hit("abc123def456", &empty), None);
+    }
+
+    #[test]
+    fn test_metadata_id_falls_back_to_caller_id_when_book_id_absent() {
+        // A book response without an id keeps the caller's identifier.
+        let no_id: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"title": "No ID Book"}"#)).unwrap();
+        let meta = AudiobookdbClient::map_book("B000000000", &no_id, None);
+        assert_eq!(meta.metadata_id, "B000000000");
+
+        // An empty-string id is treated as absent too.
+        let empty_id: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"id": "", "title": "Empty ID Book"}"#)).unwrap();
+        let meta = AudiobookdbClient::map_book("caller-1", &empty_id, None);
+        assert_eq!(meta.metadata_id, "caller-1");
+    }
+
+    #[test]
+    fn test_release_id_for_preferred_order() {
+        let book: AudiobookdbBook = serde_json::from_value(json(
+            r#"{"id": "b1", "title": "T", "releases": [{"id": "rel1"}]}"#,
+        ))
+        .unwrap();
+        // Matched release wins over the book's first release.
+        assert_eq!(
+            AudiobookdbClient::release_id_for(&book, Some("rel-matched")),
+            Some("rel-matched".to_string())
+        );
+        // Empty matched release ID is treated as absent → book's first release.
+        assert_eq!(AudiobookdbClient::release_id_for(&book, Some("")), Some("rel1".to_string()));
+        // No matched release → first release.
+        assert_eq!(AudiobookdbClient::release_id_for(&book, None), Some("rel1".to_string()));
+        // No matched release and no releases → None (chapter fetch skipped).
+        let bare: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"id": "b2", "title": "T"}"#)).unwrap();
+        assert_eq!(AudiobookdbClient::release_id_for(&bare, None), None);
     }
 }
