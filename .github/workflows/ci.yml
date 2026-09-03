@@ -4,7 +4,6 @@ on:
   push:
     branches: [main, develop]
     tags: ['v*']
-    paths-ignore: ['*.md', 'docs/**']
   pull_request:
   workflow_dispatch:
 
@@ -20,7 +19,189 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # Path classifier for selective CI. Runs first and needs no Rust toolchain:
+  # it diffs the event's base/head and maps changed paths onto five concern
+  # flags (workflow, lint, build, test, docker) that gate every downstream
+  # job. Any uncertainty — missing base, git error, unexpected shell failure —
+  # fails safe with every flag enabled so CI never silently under-covers.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      workflow: ${{ steps.scope.outputs.workflow }}
+      lint: ${{ steps.scope.outputs.lint }}
+      build: ${{ steps.scope.outputs.build }}
+      test: ${{ steps.scope.outputs.test }}
+      docker: ${{ steps.scope.outputs.docker }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Event fields reach the script through step env (never inline ${{ }}
+      # interpolation) so the script stays injection-safe and shellcheck-clean
+      # under actionlint.
+      - id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GIT_REF: ${{ github.ref }}
+          HEAD_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          # The runner injects `bash -e` for run scripts; turn it off — this
+          # classifier self-handles every failure fail-safe instead of
+          # aborting before the outputs are emitted.
+          set +e
+          set -uo pipefail
+
+          W=0 L=0 B=0 T=0 D=0
+          BASE='' HEAD=''
+          DO_DIFF=1
+          NOTE='classified by changed paths'
+
+          # Unexpected shell/git error → every concern on; outputs are still
+          # emitted below and the step stays green so downstream jobs run.
+          # shellcheck disable=SC2317  # body runs from the ERR trap, not a call site
+          on_err() {
+            local rc=$1 line=$2
+            trap - ERR
+            W=1 L=1 B=1 T=1 D=1
+            NOTE="fail-safe: unexpected error (exit ${rc}, line ${line}) — running all concerns"
+            printf '::warning::%s\n' "$NOTE"
+          }
+          trap 'on_err "$?" "$LINENO"' ERR
+
+          # Fail-safe helper: enable every concern.
+          all_true() { W=1 L=1 B=1 T=1 D=1; }
+
+          case "$EVENT_NAME" in
+            pull_request)
+              BASE="$PR_BASE_SHA"
+              HEAD="$PR_HEAD_SHA"
+              if [ -z "$BASE" ] || ! git rev-parse --verify -q "$BASE^{commit}" >/dev/null 2>&1; then
+                all_true
+                DO_DIFF=0
+                NOTE='fail-safe: pull_request base SHA empty or unresolvable — running all concerns'
+                printf '::warning::%s\n' "$NOTE"
+              elif [ "$BASE" = "$HEAD" ]; then
+                all_true
+                DO_DIFF=0
+                NOTE='fail-safe: pull_request base equals head (same-SHA event) — running all concerns'
+                printf '::warning::%s\n' "$NOTE"
+              fi
+              ;;
+            push)
+              if [[ "$GIT_REF" == refs/tags/v* ]]; then
+                all_true
+                DO_DIFF=0
+                NOTE='tag push: full run, no diff'
+              else
+                BASE="$PUSH_BEFORE"
+                HEAD="$HEAD_SHA"
+                if [ -z "$BASE" ] || [ -z "${BASE//0/}" ] || ! git rev-parse --verify -q "$BASE^{commit}" >/dev/null 2>&1; then
+                  all_true
+                  DO_DIFF=0
+                  NOTE='fail-safe: push base (github.event.before) empty, all-zero, or unresolvable — running all concerns'
+                  printf '::warning::%s\n' "$NOTE"
+                elif [ "$BASE" = "$HEAD" ]; then
+                  all_true
+                  DO_DIFF=0
+                  NOTE='fail-safe: push base equals head (recreated branch) — running all concerns'
+                  printf '::warning::%s\n' "$NOTE"
+                fi
+              fi
+              ;;
+            workflow_dispatch)
+              all_true
+              DO_DIFF=0
+              NOTE='workflow_dispatch: manual run — full run, no diff'
+              ;;
+            *)
+              all_true
+              DO_DIFF=0
+              NOTE="fail-safe: unhandled event '$EVENT_NAME' — running all concerns"
+              printf '::warning::%s\n' "$NOTE"
+              ;;
+          esac
+
+          if [ "$DO_DIFF" -eq 1 ]; then
+            # Nonzero diff exit or empty output → fail-safe full run.
+            if [ -z "$(git diff --name-only -z --no-renames "$BASE" "$HEAD" | tr -d '\0')" ]; then
+              all_true
+              DO_DIFF=0
+              NOTE='fail-safe: git diff failed or produced no output — running all concerns'
+              printf '::warning::%s\n' "$NOTE"
+            else
+              # NUL-safe loop in the current shell so flag mutations survive;
+              # --no-renames makes a rename emit both paths, so a code→docs
+              # rename still classifies by its departed heavy path. Case-arm
+              # order matters: .github/workflows/* must win over .github/*.md.
+              # shellcheck disable=SC2221,SC2222  # safe-ignore arm list is spec-mandated; *.md subsumes CHANGELOG.md/.github/*.md in bash case globs
+              while IFS= read -r -d '' path; do
+                case "$path" in
+                  .github/workflows/*) W=1 ;;
+                  Cargo.toml|Cargo.lock) L=1 B=1 T=1 D=1 ;;
+                  clippy.toml|rustfmt.toml) L=1 ;;
+                  src/*) L=1 B=1 T=1 D=1 ;;
+                  tests/*) L=1 T=1 ;;
+                  Dockerfile|.dockerignore) D=1 ;;
+                  *.md|docs/*|LICENSE|.gitignore|.pre-commit-config.yaml|renovate.json5|.github/*.md|CHANGELOG.md|CONTRIBUTING.md) : ;;
+                  *) W=1 L=1 B=1 T=1 D=1 ;;
+                esac
+              done < <(git diff --name-only -z --no-renames "$BASE" "$HEAD")
+            fi
+          fi
+
+          flag() {
+            if [ "$1" -eq 1 ]; then printf 'true'; else printf 'false'; fi
+          }
+          {
+            echo "workflow=$(flag "$W")"
+            echo "lint=$(flag "$L")"
+            echo "build=$(flag "$B")"
+            echo "test=$(flag "$T")"
+            echo "docker=$(flag "$D")"
+          } >>"$GITHUB_OUTPUT"
+
+          {
+            echo '### Changed-path classification'
+            echo ''
+            echo '| Concern | Enabled | Gates |'
+            echo '| --- | --- | --- |'
+            echo "| workflow | $(flag "$W") | workflow-lint (actionlint over .github/workflows/**) |"
+            echo "| lint | $(flag "$L") | lint-format (cargo fmt --check, clippy --all-features, cargo audit) |"
+            echo "| build | $(flag "$B") | build (cargo check --all-features) |"
+            echo "| test | $(flag "$T") | test (ffmpeg + cargo test --all-features) |"
+            echo "| docker | $(flag "$D") | docker-amd64, docker-arm64, docker-manifest |"
+            echo ''
+            echo "> Note: ${NOTE}"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          exit 0
+
+  workflow-lint:
+    # actionlint over workflow-only changes. Kept separate from lint-format so
+    # workflow PRs pay neither a Rust toolchain nor a container setup.
+    needs: [changes]
+    if: ${{ !cancelled() && needs['changes'].result == 'success' && needs['changes'].outputs.workflow == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25'
+
+      - name: Lint workflows (actionlint)
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
   lint-format:
+    needs: [changes]
+    if: ${{ !cancelled() && needs['changes'].result == 'success' && needs['changes'].outputs.lint == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,7 +232,10 @@ jobs:
       - run: cargo audit --deny warnings
 
   build:
-    needs: [lint-format]
+    needs: [changes, workflow-lint, lint-format]
+    if: ${{ !cancelled() && needs['changes'].result == 'success' && needs['changes'].outputs.build == 'true'
+            && (needs['workflow-lint'].result == 'success' || needs['workflow-lint'].result == 'skipped')
+            && (needs['lint-format'].result == 'success' || needs['lint-format'].result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,7 +259,11 @@ jobs:
       - run: cargo check --all-features
 
   test:
-    needs: [build]
+    needs: [changes, workflow-lint, lint-format, build]
+    if: ${{ !cancelled() && needs['changes'].result == 'success' && needs['changes'].outputs.test == 'true'
+            && (needs['workflow-lint'].result == 'success' || needs['workflow-lint'].result == 'skipped')
+            && (needs['lint-format'].result == 'success' || needs['lint-format'].result == 'skipped')
+            && (needs['build'].result == 'success' || needs['build'].result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -102,8 +290,12 @@ jobs:
       - run: cargo test --all-features
 
   docker-amd64:
-    needs: [test]
-    if: success()
+    needs: [changes, workflow-lint, lint-format, build, test]
+    if: ${{ !cancelled() && needs['changes'].result == 'success' && needs['changes'].outputs.docker == 'true'
+            && (needs['workflow-lint'].result == 'success' || needs['workflow-lint'].result == 'skipped')
+            && (needs['lint-format'].result == 'success' || needs['lint-format'].result == 'skipped')
+            && (needs['build'].result == 'success' || needs['build'].result == 'skipped')
+            && (needs['test'].result == 'success' || needs['test'].result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -114,7 +306,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -183,8 +375,8 @@ jobs:
   docker-arm64:
     # Native arm64 runner only on main pushes; PRs stay amd64-only to keep
     # iteration fast and avoid burning arm64 runner-minutes on every PR.
-    needs: [test]
-    if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [changes, workflow-lint, lint-format, build, test]
+    if: ${{ !cancelled() && needs['changes'].result == 'success' && needs['changes'].outputs.docker == 'true' && (needs['workflow-lint'].result == 'success' || needs['workflow-lint'].result == 'skipped') && (needs['lint-format'].result == 'success' || needs['lint-format'].result == 'skipped') && (needs['build'].result == 'success' || needs['build'].result == 'skipped') && (needs['test'].result == 'success' || needs['test'].result == 'skipped') && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
@@ -194,7 +386,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -226,7 +418,7 @@ jobs:
     # Assembles the canonical (non-suffixed) multi-arch tags from the
     # per-arch images pushed by docker-amd64 and docker-arm64.
     needs: [docker-amd64, docker-arm64]
-    if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: ${{ !cancelled() && needs['docker-amd64'].result == 'success' && needs['docker-arm64'].result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
