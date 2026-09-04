@@ -20,10 +20,11 @@ env:
 
 jobs:
   # Path classifier for selective CI. Runs first and needs no Rust toolchain:
-  # it diffs the event's base/head and maps changed paths onto five concern
-  # flags (workflow, lint, build, test, docker) that gate every downstream
-  # job. Any uncertainty — missing base, git error, unexpected shell failure —
-  # fails safe with every flag enabled so CI never silently under-covers.
+  # it diffs the PR's merge base (or a push's before SHA) against the event
+  # head and maps changed paths onto five concern flags (workflow, lint,
+  # build, test, docker) that gate every downstream job. Any uncertainty —
+  # missing base, git error, unexpected shell failure — fails safe with
+  # every flag enabled so CI never silently under-covers.
   changes:
     runs-on: ubuntu-latest
     outputs:
