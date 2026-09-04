@@ -85,11 +85,26 @@ jobs:
                 DO_DIFF=0
                 NOTE='fail-safe: pull_request base SHA empty or unresolvable — running all concerns'
                 printf '::warning::%s\n' "$NOTE"
-              elif [ "$BASE" = "$HEAD" ]; then
-                all_true
-                DO_DIFF=0
-                NOTE='fail-safe: pull_request base equals head (same-SHA event) — running all concerns'
-                printf '::warning::%s\n' "$NOTE"
+              else
+                # Diff from the merge base (the PR's divergence point), not the
+                # current target-branch tip: against the tip, target-only
+                # changes would be misattributed to the PR and a docs-only PR
+                # would become a full run whenever the target branch moved.
+                MERGE_BASE=$(git merge-base "$BASE" "$HEAD" 2>/dev/null)
+                if [ -z "$MERGE_BASE" ]; then
+                  all_true
+                  DO_DIFF=0
+                  NOTE='fail-safe: merge-base resolution failed — running all concerns'
+                  printf '::warning::%s\n' "$NOTE"
+                else
+                  BASE="$MERGE_BASE"
+                  if [ "$BASE" = "$HEAD" ]; then
+                    all_true
+                    DO_DIFF=0
+                    NOTE='fail-safe: pull_request base equals head (same-SHA event) — running all concerns'
+                    printf '::warning::%s\n' "$NOTE"
+                  fi
+                fi
               fi
               ;;
             push)
@@ -127,30 +142,42 @@ jobs:
           esac
 
           if [ "$DO_DIFF" -eq 1 ]; then
-            # Nonzero diff exit or empty output → fail-safe full run.
-            if [ -z "$(git diff --name-only -z --no-renames "$BASE" "$HEAD" | tr -d '\0')" ]; then
+            # The diff runs exactly once into a temp file so its exit status
+            # is checked explicitly; nonzero exit or empty output → fail-safe
+            # full run.
+            DIFF_FILE=$(mktemp)
+            if [ -z "$DIFF_FILE" ]; then
               all_true
               DO_DIFF=0
-              NOTE='fail-safe: git diff failed or produced no output — running all concerns'
+              NOTE='fail-safe: could not create temp file for git diff — running all concerns'
               printf '::warning::%s\n' "$NOTE"
             else
-              # NUL-safe loop in the current shell so flag mutations survive;
-              # --no-renames makes a rename emit both paths, so a code→docs
-              # rename still classifies by its departed heavy path. Case-arm
-              # order matters: .github/workflows/* must win over .github/*.md.
-              # shellcheck disable=SC2221,SC2222  # safe-ignore arm list is spec-mandated; *.md subsumes CHANGELOG.md/.github/*.md in bash case globs
-              while IFS= read -r -d '' path; do
-                case "$path" in
-                  .github/workflows/*) W=1 ;;
-                  Cargo.toml|Cargo.lock) L=1 B=1 T=1 D=1 ;;
-                  clippy.toml|rustfmt.toml) L=1 ;;
-                  src/*) L=1 B=1 T=1 D=1 ;;
-                  tests/*) L=1 T=1 ;;
-                  Dockerfile|.dockerignore) D=1 ;;
-                  *.md|docs/*|LICENSE|.gitignore|.pre-commit-config.yaml|renovate.json5|.github/*.md|CHANGELOG.md|CONTRIBUTING.md) : ;;
-                  *) W=1 L=1 B=1 T=1 D=1 ;;
-                esac
-              done < <(git diff --name-only -z --no-renames "$BASE" "$HEAD")
+              if ! git diff --name-only -z --no-renames "$BASE" "$HEAD" >"$DIFF_FILE" || [ ! -s "$DIFF_FILE" ]; then
+                rm -f "$DIFF_FILE"
+                all_true
+                DO_DIFF=0
+                NOTE='fail-safe: git diff failed or produced no output — running all concerns'
+                printf '::warning::%s\n' "$NOTE"
+              else
+                # NUL-safe loop in the current shell so flag mutations survive;
+                # --no-renames makes a rename emit both paths, so a code→docs
+                # rename still classifies by its departed heavy path. Case-arm
+                # order matters: .github/workflows/* must win over .github/*.md.
+                # shellcheck disable=SC2221,SC2222  # safe-ignore arm list is spec-mandated; *.md subsumes CHANGELOG.md/.github/*.md in bash case globs
+                while IFS= read -r -d '' path; do
+                  case "$path" in
+                    .github/workflows/*) W=1 ;;
+                    Cargo.toml|Cargo.lock) L=1 B=1 T=1 D=1 ;;
+                    clippy.toml|rustfmt.toml) L=1 ;;
+                    src/*) L=1 B=1 T=1 D=1 ;;
+                    tests/*) L=1 T=1 ;;
+                    Dockerfile|.dockerignore) D=1 ;;
+                    *.md|docs/*|LICENSE|.gitignore|.pre-commit-config.yaml|renovate.json5|.github/*.md|CHANGELOG.md|CONTRIBUTING.md) : ;;
+                    *) W=1 L=1 B=1 T=1 D=1 ;;
+                  esac
+                done <"$DIFF_FILE"
+                rm -f "$DIFF_FILE"
+              fi
             fi
           fi
 
@@ -195,6 +222,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.25'
+          # This repo has no go.mod/go.sum — skip module cache restoration.
+          cache: false
 
       - name: Lint workflows (actionlint)
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
