@@ -163,7 +163,7 @@ impl Processor {
         );
 
         // Create API client based on configured metadata source
-        let api_client = match MetadataSource::new(
+        let api_client = match MetadataSource::new_with_region(
             config.metadata_source,
             config.api_url.as_deref(),
             config.region,
