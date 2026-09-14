@@ -166,6 +166,7 @@ impl Processor {
         let api_client = match MetadataSource::new(
             config.metadata_source,
             config.api_url.as_deref(),
+            config.region,
         ) {
             Ok(src) => Some(src),
             Err(e) => {
@@ -658,7 +659,7 @@ impl Processor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::MetadataSourceKind;
+    use crate::api::{MetadataRegion, MetadataSourceKind};
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -675,6 +676,7 @@ mod tests {
             output,
             None,
             MetadataSourceKind::Audiobookdb,
+            MetadataRegion::Us,
             completed,
             1,
             "info".to_string(),

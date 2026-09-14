@@ -1,7 +1,8 @@
 pub mod audible;
 pub mod audiobookdb;
 
-pub use audible::{AudibleClient, AudibleError};
+use audible::DEFAULT_API_URL;
+pub use audible::{AudibleClient, AudibleError, MetadataRegion};
 pub use audiobookdb::{AudiobookdbClient, AudiobookdbError};
 
 use crate::metadata::BookMetadata;
@@ -70,14 +71,17 @@ pub enum MetadataSource {
 
 impl MetadataSource {
     /// Build the selected source. `api_url`, if provided, overrides the source's
-    /// built-in default URL.
-    pub fn new(kind: MetadataSourceKind, api_url: Option<&str>) -> Result<Self, MetadataError> {
+    /// built-in default URL. `region` only applies to the audnexus source;
+    /// AudiobookDB has no region parameter.
+    pub fn new(
+        kind: MetadataSourceKind,
+        api_url: Option<&str>,
+        region: MetadataRegion,
+    ) -> Result<Self, MetadataError> {
         match kind {
             MetadataSourceKind::Audnexus => {
-                let client = match api_url {
-                    Some(u) => AudibleClient::with_base_url(u)?,
-                    None => AudibleClient::new()?,
-                };
+                let client =
+                    AudibleClient::with_base_url(api_url.unwrap_or(DEFAULT_API_URL), region)?;
                 Ok(Self::Audible(client))
             }
             MetadataSourceKind::Audiobookdb => {
@@ -113,7 +117,7 @@ mod tests {
             (MetadataSourceKind::Audiobookdb, Some("http://localhost:1"), true),
         ];
         for (kind, api_url, expect_audiobookdb) in cases {
-            let source = MetadataSource::new(kind, api_url)
+            let source = MetadataSource::new(kind, api_url, MetadataRegion::Us)
                 .unwrap_or_else(|e| panic!("{kind} {api_url:?} should build: {e}"));
             assert!(
                 matches!(source, MetadataSource::Audiobookdb(_)) == expect_audiobookdb,

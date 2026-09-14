@@ -15,6 +15,40 @@ use super::client::{
 /// Default API base URL for audnexus
 pub const DEFAULT_API_URL: &str = "https://api.audnex.us";
 
+/// Audible region for Audnexus lookups (`?region=` query parameter).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum MetadataRegion {
+    Au,
+    Ca,
+    De,
+    Es,
+    Fr,
+    In,
+    It,
+    Jp,
+    #[default]
+    Us,
+    Uk,
+}
+
+impl std::fmt::Display for MetadataRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let code = match self {
+            Self::Au => "au",
+            Self::Ca => "ca",
+            Self::De => "de",
+            Self::Es => "es",
+            Self::Fr => "fr",
+            Self::In => "in",
+            Self::It => "it",
+            Self::Jp => "jp",
+            Self::Us => "us",
+            Self::Uk => "uk",
+        };
+        f.write_str(code)
+    }
+}
+
 /// Errors that can occur when calling the Audible API
 #[derive(Debug, Error)]
 pub enum AudibleError {
@@ -25,6 +59,11 @@ pub enum AudibleError {
 
     #[error("Book not found for metadata_id: {0}")]
     NotFound(String),
+
+    #[error(
+        "Book not available in the configured region for metadata_id: {0} (try --region with the book's Audible market, e.g. --region de)"
+    )]
+    RegionUnavailable(String),
 
     #[error("Rate limited by API")]
     RateLimited,
@@ -50,23 +89,27 @@ pub enum AudibleError {
 pub struct AudibleClient {
     client: Client,
     base_url: String,
+    region: MetadataRegion,
 }
 
 impl AudibleClient {
-    /// Create a new AudibleClient with the default API URL
+    /// Create a new AudibleClient with the default API URL and US region
     pub fn new() -> Result<Self, AudibleError> {
-        Self::with_base_url(DEFAULT_API_URL)
+        Self::with_base_url(DEFAULT_API_URL, MetadataRegion::Us)
     }
 
-    /// Create a new AudibleClient with a custom base URL
-    pub fn with_base_url(base_url: impl Into<String>) -> Result<Self, AudibleError> {
+    /// Create a new AudibleClient with a custom base URL and region
+    pub fn with_base_url(
+        base_url: impl Into<String>,
+        region: MetadataRegion,
+    ) -> Result<Self, AudibleError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
             .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT_SECS))
             .build()?;
 
-        Ok(Self { client, base_url: base_url.into() })
+        Ok(Self { client, base_url: base_url.into(), region })
     }
 
     /// Determine if an error is transient and should trigger retry
@@ -103,6 +146,7 @@ impl AudibleClient {
 
         let base_url = self.base_url.clone();
         let client = self.client.clone();
+        let region = self.region;
         let id = id.to_string();
 
         RetryIf::start(
@@ -112,20 +156,36 @@ impl AudibleClient {
                 let base_url = base_url.clone();
                 let id = id.clone();
 
-                async move { Self::fetch_book_once(&client, &base_url, &id).await }
+                async move { Self::fetch_book_once(&client, &base_url, region, &id).await }
             },
             Self::is_transient_error,
         )
         .await
     }
 
+    /// Build the audnexus book URL for the configured region.
+    fn book_url(base_url: &str, id: &str, region: MetadataRegion) -> String {
+        format!("{}/books/{}?region={}", base_url, id, region)
+    }
+
+    /// Audnexus reports a wrong-region item as 404 + `REGION_UNAVAILABLE`; surface it
+    /// as a distinct error so the user sees the `--region` hint.
+    fn not_found_error(id: &str, body: &str) -> AudibleError {
+        if body.contains("REGION_UNAVAILABLE") {
+            AudibleError::RegionUnavailable(id.to_string())
+        } else {
+            AudibleError::NotFound(id.to_string())
+        }
+    }
+
     /// Single fetch attempt without retry logic
     async fn fetch_book_once(
         client: &Client,
         base_url: &str,
+        region: MetadataRegion,
         id: &str,
     ) -> Result<BookMetadata, AudibleError> {
-        let url = format!("{}/books/{}", base_url, id);
+        let url = Self::book_url(base_url, id, region);
         tracing::debug!("Fetching metadata from: {}", url);
 
         let response = client.get(&url).send().await.map_err(|e| {
@@ -139,7 +199,10 @@ impl AudibleClient {
                 let api_response: ApiBookResponse = response.json().await?;
                 Ok(api_response.into_book_metadata())
             }
-            StatusCode::NOT_FOUND => Err(AudibleError::NotFound(id.to_string())),
+            StatusCode::NOT_FOUND => {
+                let body = response.text().await.unwrap_or_default();
+                Err(Self::not_found_error(id, &body))
+            }
             StatusCode::TOO_MANY_REQUESTS => Err(AudibleError::RateLimited),
             StatusCode::REQUEST_TIMEOUT => Err(AudibleError::Timeout),
             _ => {
@@ -386,7 +449,51 @@ mod tests {
         let client = AudibleClient::new();
         assert!(client.is_ok());
 
-        let client = AudibleClient::with_base_url("https://custom.api.com");
+        let client = AudibleClient::with_base_url("https://custom.api.com", MetadataRegion::Us);
         assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_book_url_appends_region() {
+        assert_eq!(
+            AudibleClient::book_url("https://api.audnex.us", "B00BM5F96W", MetadataRegion::De),
+            "https://api.audnex.us/books/B00BM5F96W?region=de"
+        );
+        assert!(
+            AudibleClient::book_url("https://api.audnex.us", "B00BM5F96W", MetadataRegion::Us)
+                .ends_with("?region=us")
+        );
+    }
+
+    #[test]
+    fn test_not_found_error_maps_region_unavailable() {
+        let body = r#"{"error":{"code":"REGION_UNAVAILABLE","message":"Item not available in region 'us' for ASIN: B00BM5F96W","details":{"asin":"B00BM5F96W","code":"REGION_UNAVAILABLE"}}}"#;
+        assert!(matches!(
+            AudibleClient::not_found_error("B00BM5F96W", body),
+            AudibleError::RegionUnavailable(_)
+        ));
+
+        assert!(matches!(
+            AudibleClient::not_found_error("B00BM5F96W", "not found"),
+            AudibleError::NotFound(_)
+        ));
+        assert!(matches!(
+            AudibleClient::not_found_error("B00BM5F96W", ""),
+            AudibleError::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn test_region_display_codes() {
+        assert_eq!(MetadataRegion::Au.to_string(), "au");
+        assert_eq!(MetadataRegion::Ca.to_string(), "ca");
+        assert_eq!(MetadataRegion::De.to_string(), "de");
+        assert_eq!(MetadataRegion::Es.to_string(), "es");
+        assert_eq!(MetadataRegion::Fr.to_string(), "fr");
+        assert_eq!(MetadataRegion::In.to_string(), "in");
+        assert_eq!(MetadataRegion::It.to_string(), "it");
+        assert_eq!(MetadataRegion::Jp.to_string(), "jp");
+        assert_eq!(MetadataRegion::Us.to_string(), "us");
+        assert_eq!(MetadataRegion::Uk.to_string(), "uk");
     }
 }
