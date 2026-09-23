@@ -62,6 +62,8 @@ Provide a metadata ID (ASIN or AudiobookDB book ID) to automatically fetch metad
 m4b-merge -i input/book_folder/ -a B012345678
 ```
 
+Non-US Audible books need `--region` with `--metadata-source audnexus` (default `us`; accepted: `au ca de es fr in it jp us uk`).
+
 ### Custom Output & Organization
 
 Specify a custom output directory and organization template.

@@ -2,7 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use tracing::{error, info, warn};
 
-use m4b_merge::api::MetadataSourceKind;
+use m4b_merge::api::{MetadataRegion, MetadataSourceKind};
 use m4b_merge::audio::FFmpeg;
 use m4b_merge::config::Config;
 use m4b_merge::processor::{ProcessingProgress, ProcessingStage, Processor, ProgressHandler};
@@ -28,6 +28,10 @@ struct Args {
     /// Metadata source to use for lookups
     #[arg(long = "metadata-source", value_enum, default_value_t = MetadataSourceKind::Audiobookdb)]
     pub metadata_source: MetadataSourceKind,
+
+    /// Audible region for Audnexus metadata lookups
+    #[arg(long = "region", value_enum, default_value_t = MetadataRegion::Us)]
+    pub region: MetadataRegion,
 
     /// Directory path to move original input files to after processing
     #[arg(long = "completed-directory", value_name = "PATH")]
@@ -146,6 +150,7 @@ async fn main() {
         args.output.clone(),
         args.api_url.clone(),
         args.metadata_source,
+        args.region,
         args.completed_directory,
         args.num_cpus,
         args.log_level,
@@ -166,6 +171,13 @@ async fn main() {
     if args.api_url.is_some() && args.metadata_source == MetadataSourceKind::Audiobookdb {
         warn!(
             "--api-url is being passed to the AudiobookDB client; use --metadata-source audnexus if it points to an Audnexus proxy"
+        );
+    }
+
+    if args.region != MetadataRegion::Us && args.metadata_source == MetadataSourceKind::Audiobookdb
+    {
+        warn!(
+            "--region only applies to the audnexus metadata source; it is ignored for AudiobookDB lookups"
         );
     }
 
