@@ -106,7 +106,48 @@ impl AudibleClient {
     }
 
     /// Fetch book metadata by ASIN with retry logic
+    ///
+    /// Audnexus serves chapter markers from a separate endpoint
+    /// (`/books/{asin}/chapters`), so they are fetched with their own retry pass.
+    /// A chapter lookup failure does not discard the book metadata: the merge
+    /// still gets tags and cover art, just without chapters.
     pub async fn fetch_book(&self, asin: &str) -> Result<BookMetadata, AudibleError> {
+        Self::validate_asin(asin)?;
+
+        let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
+
+        let base_url = self.base_url.clone();
+        let client = self.client.clone();
+        let asin = asin.to_string();
+        let retry_asin = asin.clone();
+
+        let mut metadata = RetryIf::start(
+            retry_strategy,
+            move || {
+                let client = client.clone();
+                let base_url = base_url.clone();
+                let asin = retry_asin.clone();
+
+                async move { Self::fetch_book_once(&client, &base_url, &asin).await }
+            },
+            Self::is_transient_error,
+        )
+        .await?;
+
+        match self.fetch_chapters(&asin).await {
+            Ok(chapters) => metadata.chapters = chapters,
+            Err(e) => tracing::warn!("Failed to fetch chapters for ASIN {}: {}", asin, e),
+        }
+
+        Ok(metadata)
+    }
+
+    /// Fetch chapter markers for an ASIN with retry logic
+    ///
+    /// Audnexus exposes chapters at `GET /books/{asin}/chapters`; the book
+    /// endpoint (`GET /books/{asin}`) does not include them. A 404 means the book
+    /// has no chapter list and yields an empty vector rather than an error.
+    pub async fn fetch_chapters(&self, asin: &str) -> Result<Vec<Chapter>, AudibleError> {
         Self::validate_asin(asin)?;
 
         let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
@@ -122,11 +163,38 @@ impl AudibleClient {
                 let base_url = base_url.clone();
                 let asin = asin.clone();
 
-                async move { Self::fetch_book_once(&client, &base_url, &asin).await }
+                async move { Self::fetch_chapters_once(&client, &base_url, &asin).await }
             },
             Self::is_transient_error,
         )
         .await
+    }
+
+    /// Single chapter fetch attempt without retry logic
+    async fn fetch_chapters_once(
+        client: &Client,
+        base_url: &str,
+        asin: &str,
+    ) -> Result<Vec<Chapter>, AudibleError> {
+        let url = format!("{}/books/{}/chapters", base_url, asin);
+        tracing::debug!("Fetching chapters from: {}", url);
+
+        let response = client.get(&url).send().await?;
+        let status = response.status();
+
+        match status {
+            StatusCode::OK => {
+                let api_response: ApiChapterListResponse = response.json().await?;
+                Ok(api_response.chapters.into_iter().map(Chapter::from).collect())
+            }
+            StatusCode::NOT_FOUND => Ok(Vec::new()),
+            StatusCode::TOO_MANY_REQUESTS => Err(AudibleError::RateLimited),
+            StatusCode::REQUEST_TIMEOUT => Err(AudibleError::Timeout),
+            _ => {
+                let message = response.text().await.unwrap_or_default();
+                Err(AudibleError::ApiError { status: status.as_u16(), message })
+            }
+        }
     }
 
     /// Single fetch attempt without retry logic
@@ -218,8 +286,6 @@ struct ApiBookResponse {
     genres: Vec<ApiGenre>,
     #[serde(default, rename = "releaseDate")]
     release_date: Option<String>,
-    #[serde(default, rename = "chapterInfo")]
-    chapter_info: Option<ApiChapterInfo>,
     #[serde(default)]
     image: Option<String>,
 }
@@ -231,20 +297,6 @@ impl ApiBookResponse {
             .as_ref()
             .and_then(|date| date.split('-').next())
             .and_then(|year_str| year_str.parse().ok());
-
-        let chapters = self
-            .chapter_info
-            .map(|info| {
-                info.chapters
-                    .into_iter()
-                    .map(|ch| Chapter {
-                        title: ch.title,
-                        start_time: Duration::from_millis(ch.start_offset_ms),
-                        duration: Duration::from_millis(ch.length_ms),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
 
         let series_name = self.series.first().map(|s| s.name.clone());
         let series_position = self.series.first().and_then(|s| s.position.clone());
@@ -261,7 +313,7 @@ impl ApiBookResponse {
             genres: self.genres.into_iter().map(|g| g.name).collect(),
             year,
             cover_url: self.image,
-            chapters,
+            chapters: Vec::new(),
         }
     }
 }
@@ -283,8 +335,10 @@ struct ApiGenre {
     name: String,
 }
 
+/// Response body of `GET /books/{asin}/chapters`
 #[derive(Debug, Deserialize)]
-struct ApiChapterInfo {
+struct ApiChapterListResponse {
+    #[serde(default)]
     chapters: Vec<ApiChapter>,
 }
 
@@ -295,6 +349,16 @@ struct ApiChapter {
     start_offset_ms: u64,
     #[serde(rename = "lengthMs")]
     length_ms: u64,
+}
+
+impl From<ApiChapter> for Chapter {
+    fn from(chapter: ApiChapter) -> Self {
+        Chapter {
+            title: chapter.title,
+            start_time: Duration::from_millis(chapter.start_offset_ms),
+            duration: Duration::from_millis(chapter.length_ms),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -337,11 +401,6 @@ mod tests {
             "summary": "Test description",
             "genres": [{"name": "Fiction"}],
             "releaseDate": "2023-01-15",
-            "chapterInfo": {
-                "chapters": [
-                    {"title": "Chapter 1", "startOffsetMs": 0, "lengthMs": 360000}
-                ]
-            },
             "image": "https://example.com/cover.jpg"
         }"#;
 
@@ -355,8 +414,8 @@ mod tests {
         let metadata = response.into_book_metadata();
         assert_eq!(metadata.asin, "B08XYZ1234");
         assert_eq!(metadata.year, Some(2023));
-        assert_eq!(metadata.chapters.len(), 1);
-        assert_eq!(metadata.chapters[0].start_time, Duration::from_millis(0));
+        // The book endpoint does not carry chapters; they come from `/chapters`.
+        assert!(metadata.chapters.is_empty());
     }
 
     #[test]
@@ -393,12 +452,6 @@ mod tests {
             "summary": "An audio drama",
             "genres": [{"name": "Mystery, Thriller & Suspense"}, {"name": "Thriller & Suspense"}],
             "releaseDate": "2020-06-23",
-            "chapterInfo": {
-                "chapters": [
-                    {"title": "Chapter 1", "startOffsetMs": 0, "lengthMs": 3600000},
-                    {"title": "Chapter 2", "startOffsetMs": 3600000, "lengthMs": 3700000}
-                ]
-            },
             "image": "https://example.com/cover.jpg"
         }"#;
 
@@ -427,7 +480,79 @@ mod tests {
         assert_eq!(metadata.series_name, Some("Black Book".to_string()));
         assert_eq!(metadata.series_position, Some("2".to_string()));
         assert_eq!(metadata.year, Some(2020));
+    }
+
+    #[test]
+    fn test_api_chapter_list_deserialization() {
+        let json = r#"{
+            "asin": "B08XYZ1234",
+            "isAccurate": true,
+            "chapters": [
+                {"title": "Opening Credits", "startOffsetMs": 0, "lengthMs": 11264},
+                {"title": "Chapter 1", "startOffsetMs": 11264, "lengthMs": 2203838}
+            ]
+        }"#;
+
+        let response: ApiChapterListResponse = serde_json::from_str(json).unwrap();
+        let chapters: Vec<Chapter> = response.chapters.into_iter().map(Chapter::from).collect();
+
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0].title, "Opening Credits");
+        assert_eq!(chapters[0].start_time, Duration::from_millis(0));
+        assert_eq!(chapters[1].start_time, Duration::from_millis(11264));
+        assert_eq!(chapters[1].duration, Duration::from_millis(2203838));
+    }
+
+    /// Spin up a minimal HTTP server that mimics audnexus: book metadata at
+    /// `/books/{asin}` (which, as on the real API, carries no chapters) and the
+    /// chapter list at `/books/{asin}/chapters`. Returns the server base URL.
+    fn spawn_mock_audnexus() -> String {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let read = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let path = request.split_whitespace().nth(1).unwrap_or("");
+
+                let body = if path.ends_with("/chapters") {
+                    r#"{"asin":"B08XYZ1234","isAccurate":true,"chapters":[{"title":"Chapter 1","startOffsetMs":0,"lengthMs":3600000},{"title":"Chapter 2","startOffsetMs":3600000,"lengthMs":3700000}]}"#
+                } else {
+                    r#"{"asin":"B08XYZ1234","title":"Test Book","authors":[{"name":"Test Author"}]}"#
+                };
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        format!("http://{}", addr)
+    }
+
+    #[tokio::test]
+    async fn test_fetch_book_loads_chapters_from_chapters_endpoint() {
+        let base_url = spawn_mock_audnexus();
+        let client = AudibleClient::with_base_url(base_url).unwrap();
+
+        let metadata = client.fetch_book("B08XYZ1234").await.unwrap();
+
+        assert_eq!(metadata.title, "Test Book");
+        assert_eq!(metadata.authors, vec!["Test Author".to_string()]);
+        // The mock's book body has no chapters, so a populated list here proves
+        // `fetch_book` queried `/books/{asin}/chapters`.
         assert_eq!(metadata.chapters.len(), 2);
+        assert_eq!(metadata.chapters[0].title, "Chapter 1");
+        assert_eq!(metadata.chapters[1].start_time, Duration::from_millis(3600000));
     }
 
     #[tokio::test]
