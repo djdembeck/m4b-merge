@@ -742,15 +742,12 @@ mod tests {
         // Locate trak inside moov and inflate its declared size.
         // Layout: ftyp(24) + moov. moov children: mvhd(108) + trak + mdat...
         let moov_start = 24usize;
-        let moov_size =
-            u32::from_be_bytes(data[moov_start..moov_start + 4].try_into().unwrap()) as usize;
         let mvhd_end = moov_start + 8 + 108;
         // trak starts right after mvhd
         let trak_size_offset = mvhd_end;
         // Overwrite trak's declared size with something huge (u32::MAX-3)
         let huge: u32 = u32::MAX - 3;
         data[trak_size_offset..trak_size_offset + 4].copy_from_slice(&huge.to_be_bytes());
-        let _ = moov_size;
 
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("bad.m4b");
@@ -763,6 +760,35 @@ mod tests {
         // could wander into unrelated regions and mutate them).
         let after = std::fs::read(&path).unwrap();
         assert_eq!(&after[..moov_start + 8 + 108], &data[..moov_start + 8 + 108]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_zero_size_atom_is_bounded_to_container() -> Result<()> {
+        // A zero-sized atom inside a nested container "extends to EOF" by
+        // spec. The scanner must clamp it to the container bounds: without
+        // the bound, `pos += size` jumps past the parent (moov) and lands in
+        // unrelated file regions.
+        let mut data = minimal_mp4_bytes();
+        // moov children: mvhd(108) then trak. Give mvhd a zero size so a
+        // naive scanner would jump from mvhd straight to EOF.
+        let moov_start = 24usize;
+        let mvhd_size_offset = moov_start + 8;
+        data[mvhd_size_offset..mvhd_size_offset + 4].copy_from_slice(&0u32.to_be_bytes());
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("zero.m4b");
+        std::fs::write(&path, &data)?;
+
+        // Must terminate and must not corrupt anything beyond the (already
+        // broken) mvhd header.
+        let _ = fix_chapter_track_start(&path, 1000);
+
+        let after = std::fs::read(&path).unwrap();
+        // Everything after the sabotaged mvhd size field must be untouched.
+        assert_eq!(after[mvhd_size_offset + 4..], data[mvhd_size_offset + 4..]);
+        // And the file length must be unchanged (no runaway truncation).
+        assert_eq!(after.len(), data.len());
         Ok(())
     }
 
