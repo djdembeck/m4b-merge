@@ -323,14 +323,17 @@ impl Tagger {
 
         // mp4ameta writes the QuickTime chapter track's samples as a plain
         // sample table without an edit list (elst), so the first chapter
-        // always decodes at time 0. Apple players honor the elst media time
-        // of the chapter track, so inject one carrying the real first-chapter
-        // start (ffmpeg-based readers ignore elst and read the chpl atom,
-        // which already holds correct start times).
+        // always decodes at time 0 in Apple players. Inject an elst carrying
+        // the real first-chapter start. This repair is best-effort: the chpl
+        // chapters are already embedded and usable by non-Apple players, so a
+        // repair failure is logged rather than failing the whole embed.
         let first_start_ms = chapters_vec[0].start_time.as_millis() as u64;
-        fix_chapter_track_start(path, first_start_ms).map_err(|e| {
-            TaggingError::Mp4Meta(format!("Failed to fix chapter track start: {}", e))
-        })?;
+        if let Err(e) = fix_chapter_track_start(path, first_start_ms) {
+            warn!(
+                "Chapter track edit-list repair failed (chapters remain embedded via chpl): {}",
+                e
+            );
+        }
 
         info!("Successfully embedded {} chapters", chapters_vec.len());
         Ok(())
