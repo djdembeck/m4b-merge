@@ -3,6 +3,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
+use crate::chapter_track::fix_chapter_track_start;
 use crate::metadata::BookMetadata;
 
 /// Maximum number of characters for chapter titles in embedded chapters (chpl atom limit)
@@ -261,7 +262,10 @@ impl Tagger {
 
     /// Embed chapters into an M4B file
     ///
-    /// This method writes chapters to the MP4 container using the chapter list (chpl atom).
+    /// This method writes chapters to the MP4 container in both forms players understand:
+    /// - the Nero `chpl` atom (chapter list, read by ffmpeg and some Android apps)
+    /// - the QuickTime chapter text track + `chap` track reference (read by Apple players)
+    ///
     /// Any existing chapters in the file are replaced.
     ///
     /// # Arguments
@@ -303,14 +307,30 @@ impl Tagger {
 
         // Clear existing chapters
         tag.chapter_list_mut().clear();
+        tag.chapter_track_mut().clear();
 
-        // Convert to mp4ameta chapters and add to tag
+        // Convert to mp4ameta chapters and add to the chapter list (Nero chpl
+        // atom) and the chapter track (QuickTime text track + chap reference).
+        // Apple players (Books, Apple Music, AVFoundation) only recognize the
+        // latter, so both are written for compatibility.
         let mp4_chapters = convert_chapters_for_embedding(&chapters_vec);
-        tag.chapter_list_mut().extend(mp4_chapters);
+        tag.chapter_list_mut().extend(mp4_chapters.clone());
+        tag.chapter_track_mut().extend(mp4_chapters);
 
         // Write back to file
         tag.write_to_path(path)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write chapters: {}", e)))?;
+
+        // mp4ameta writes the QuickTime chapter track's samples as a plain
+        // sample table without an edit list (elst), so the first chapter
+        // always decodes at time 0. Apple players honor the elst media time
+        // of the chapter track, so inject one carrying the real first-chapter
+        // start (ffmpeg-based readers ignore elst and read the chpl atom,
+        // which already holds correct start times).
+        let first_start_ms = chapters_vec[0].start_time.as_millis() as u64;
+        fix_chapter_track_start(path, first_start_ms).map_err(|e| {
+            TaggingError::Mp4Meta(format!("Failed to fix chapter track start: {}", e))
+        })?;
 
         info!("Successfully embedded {} chapters", chapters_vec.len());
         Ok(())
@@ -1022,6 +1042,12 @@ mod tests {
         assert_eq!(chapter_list.len(), 2);
         assert_eq!(chapter_list[0].title, "Chapter 1");
         assert_eq!(chapter_list[1].title, "Chapter 2");
+        // Apple players only recognize the QuickTime chapter track; it must be
+        // written alongside the Nero chapter list.
+        let chapter_track = tag.chapter_track();
+        assert_eq!(chapter_track.len(), 2);
+        assert_eq!(chapter_track[0].title, "Chapter 1");
+        assert_eq!(chapter_track[1].title, "Chapter 2");
     }
 
     #[test]
@@ -1052,6 +1078,8 @@ mod tests {
         assert_eq!(chapter_list.len(), 2);
         assert_eq!(chapter_list[0].title, "New Chapter 1");
         assert_eq!(chapter_list[1].title, "New Chapter 2");
+        assert_eq!(tag.chapter_track().len(), 2);
+        assert_eq!(tag.chapter_track()[0].title, "New Chapter 1");
     }
 
     #[test]
@@ -1075,6 +1103,8 @@ mod tests {
         assert_eq!(chapter_list.len(), 2);
         assert_eq!(chapter_list[0].title, "Chapter 1");
         assert_eq!(chapter_list[1].title, "Chapter 2");
+        assert_eq!(tag.chapter_track().len(), 2);
+        assert_eq!(tag.chapter_track()[0].title, "Chapter 1");
     }
 
     #[test]
