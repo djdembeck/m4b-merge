@@ -106,7 +106,48 @@ impl AudibleClient {
     }
 
     /// Fetch book metadata by ASIN with retry logic
+    ///
+    /// Audnexus serves chapter markers from a separate endpoint
+    /// (`/books/{asin}/chapters`), so they are fetched with their own retry pass.
+    /// A chapter lookup failure does not discard the book metadata: the merge
+    /// still gets tags and cover art, just without chapters.
     pub async fn fetch_book(&self, asin: &str) -> Result<BookMetadata, AudibleError> {
+        Self::validate_asin(asin)?;
+
+        let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
+
+        let base_url = self.base_url.clone();
+        let client = self.client.clone();
+        let asin = asin.to_string();
+        let retry_asin = asin.clone();
+
+        let mut metadata = RetryIf::start(
+            retry_strategy,
+            move || {
+                let client = client.clone();
+                let base_url = base_url.clone();
+                let asin = retry_asin.clone();
+
+                async move { Self::fetch_book_once(&client, &base_url, &asin).await }
+            },
+            Self::is_transient_error,
+        )
+        .await?;
+
+        match self.fetch_chapters(&asin).await {
+            Ok(chapters) => metadata.chapters = chapters,
+            Err(e) => tracing::warn!("Failed to fetch chapters for ASIN {}: {}", asin, e),
+        }
+
+        Ok(metadata)
+    }
+
+    /// Fetch chapter markers for an ASIN with retry logic
+    ///
+    /// Audnexus exposes chapters at `GET /books/{asin}/chapters`; the book
+    /// endpoint (`GET /books/{asin}`) does not include them. A 404 means the book
+    /// has no chapter list and yields an empty vector rather than an error.
+    pub async fn fetch_chapters(&self, asin: &str) -> Result<Vec<Chapter>, AudibleError> {
         Self::validate_asin(asin)?;
 
         let retry_strategy = ExponentialBackoff::from_millis(1000).map(jitter).take(MAX_RETRIES);
@@ -122,11 +163,38 @@ impl AudibleClient {
                 let base_url = base_url.clone();
                 let asin = asin.clone();
 
-                async move { Self::fetch_book_once(&client, &base_url, &asin).await }
+                async move { Self::fetch_chapters_once(&client, &base_url, &asin).await }
             },
             Self::is_transient_error,
         )
         .await
+    }
+
+    /// Single chapter fetch attempt without retry logic
+    async fn fetch_chapters_once(
+        client: &Client,
+        base_url: &str,
+        asin: &str,
+    ) -> Result<Vec<Chapter>, AudibleError> {
+        let url = format!("{}/books/{}/chapters", base_url, asin);
+        tracing::debug!("Fetching chapters from: {}", url);
+
+        let response = client.get(&url).send().await?;
+        let status = response.status();
+
+        match status {
+            StatusCode::OK => {
+                let api_response: ApiChapterListResponse = response.json().await?;
+                Ok(api_response.chapters.into_iter().map(Chapter::from).collect())
+            }
+            StatusCode::NOT_FOUND => Ok(Vec::new()),
+            StatusCode::TOO_MANY_REQUESTS => Err(AudibleError::RateLimited),
+            StatusCode::REQUEST_TIMEOUT => Err(AudibleError::Timeout),
+            _ => {
+                let message = response.text().await.unwrap_or_default();
+                Err(AudibleError::ApiError { status: status.as_u16(), message })
+            }
+        }
     }
 
     /// Single fetch attempt without retry logic
@@ -218,8 +286,6 @@ struct ApiBookResponse {
     genres: Vec<ApiGenre>,
     #[serde(default, rename = "releaseDate")]
     release_date: Option<String>,
-    #[serde(default, rename = "chapterInfo")]
-    chapter_info: Option<ApiChapterInfo>,
     #[serde(default)]
     image: Option<String>,
 }
@@ -232,20 +298,6 @@ impl ApiBookResponse {
             .and_then(|date| date.split('-').next())
             .and_then(|year_str| year_str.parse().ok());
 
-        let chapters = self
-            .chapter_info
-            .map(|info| {
-                info.chapters
-                    .into_iter()
-                    .map(|ch| Chapter {
-                        title: ch.title,
-                        start_time: Duration::from_millis(ch.start_offset_ms),
-                        duration: Duration::from_millis(ch.length_ms),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
         let series_name = self.series.first().map(|s| s.name.clone());
         let series_position = self.series.first().and_then(|s| s.position.clone());
 
@@ -257,13 +309,162 @@ impl ApiBookResponse {
             narrators: self.narrators.into_iter().map(|n| n.name).collect(),
             series_name,
             series_position,
-            description: self.summary.unwrap_or_default(),
+            description: self.summary.as_deref().map(strip_html).unwrap_or_default(),
             genres: self.genres.into_iter().map(|g| g.name).collect(),
             year,
             cover_url: self.image,
-            chapters,
+            chapters: Vec::new(),
         }
     }
+}
+
+/// Convert the audnexus `summary` (an HTML fragment of the audible.com
+/// description) into plain text for the comment tag:
+///
+/// - block-level tags (`<p>`, `<br>`, and list/heading tags) become newlines
+/// - every other tag is removed
+/// - HTML entities (`&amp;`, `&lt;`, `&quot;`, `&#39;`, numeric, ...) are decoded
+/// - the result is trimmed of surrounding whitespace
+fn strip_html(html: &str) -> String {
+    const BLOCK_TAGS: [&str; 12] =
+        ["p", "br", "div", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6"];
+
+    let mut out = String::with_capacity(html.len());
+    let mut chars = html.char_indices().peekable();
+
+    while let Some((idx, c)) = chars.next() {
+        if c != '<' {
+            out.push(c);
+            continue;
+        }
+
+        // Find the end of the tag
+        let tag_start = idx + 1;
+        let mut tag_end = None;
+        for (i, ch) in chars.by_ref() {
+            if ch == '>' {
+                tag_end = Some(i);
+                break;
+            }
+        }
+        let Some(tag_end) = tag_end else {
+            // Unterminated tag: keep the rest as-is
+            out.push_str(&html[tag_start..]);
+            break;
+        };
+
+        let raw_tag = &html[tag_start..tag_end];
+        // Strip attributes: first whitespace-delimited token is the name
+        let name = raw_tag
+            .trim_start_matches('/')
+            .split(|ch: char| ch.is_whitespace())
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        if BLOCK_TAGS.contains(&name.as_str()) {
+            // Collapse runs of newlines so nested/adjacent blocks don't pile
+            // up blank lines.
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+
+    // Decode common HTML entities (named + numeric).
+    let decoded = decode_entities(&out);
+
+    // Trim outer whitespace and collapse 3+ consecutive newlines. Lines
+    // introduced by block tags often carry a leading space from the source
+    // markup ("<br /> 1. Shoot"), so strip whitespace at line starts.
+    let mut collapsed = String::with_capacity(decoded.len());
+    let mut newline_run = 0usize;
+    let mut at_line_start = true;
+    for ch in decoded.trim().chars() {
+        if ch == '\n' {
+            newline_run += 1;
+            at_line_start = true;
+            if newline_run > 2 {
+                continue;
+            }
+        } else {
+            if at_line_start && ch.is_whitespace() && newline_run > 0 {
+                // Skip leading whitespace on lines created by block tags
+                continue;
+            }
+            if !at_line_start || !ch.is_whitespace() {
+                newline_run = 0;
+            }
+            at_line_start = false;
+        }
+        collapsed.push(ch);
+    }
+
+    collapsed
+}
+
+/// Decode HTML entities: `&amp; &lt; &gt; &quot; &apos; &#39; &#x27;` and
+/// numeric references. Unknown entities are left verbatim.
+fn decode_entities(input: &str) -> String {
+    if !input.contains('&') {
+        return input.to_string();
+    }
+
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+
+        // Find the terminating ';' within a reasonable window (entities are
+        // short); longer than 10 chars means it's a literal '&'.
+        let Some(semi_rel) = rest[..rest.len().min(11)].find(';') else {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        };
+
+        let entity = &rest[1..semi_rel];
+        let replacement = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some('\u{00A0}'),
+            _ => {
+                // Numeric: &#123; decimal or &#x1F; hexadecimal
+                if let Some(digits) = entity.strip_prefix('#') {
+                    let code = if let Some(hex) =
+                        digits.strip_prefix('x').or_else(|| digits.strip_prefix('X'))
+                    {
+                        u32::from_str_radix(hex, 16).ok()
+                    } else {
+                        digits.parse::<u32>().ok()
+                    };
+                    code.and_then(char::from_u32)
+                } else {
+                    None
+                }
+            }
+        };
+
+        match replacement {
+            Some(ch) => {
+                out.push(ch);
+                rest = &rest[semi_rel + 1..];
+            }
+            None => {
+                // Unknown entity: emit verbatim
+                out.push_str(&rest[..semi_rel + 1]);
+                rest = &rest[semi_rel + 1..];
+            }
+        }
+    }
+
+    out.push_str(rest);
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,8 +484,10 @@ struct ApiGenre {
     name: String,
 }
 
+/// Response body of `GET /books/{asin}/chapters`
 #[derive(Debug, Deserialize)]
-struct ApiChapterInfo {
+struct ApiChapterListResponse {
+    #[serde(default)]
     chapters: Vec<ApiChapter>,
 }
 
@@ -295,6 +498,16 @@ struct ApiChapter {
     start_offset_ms: u64,
     #[serde(rename = "lengthMs")]
     length_ms: u64,
+}
+
+impl From<ApiChapter> for Chapter {
+    fn from(chapter: ApiChapter) -> Self {
+        Chapter {
+            title: chapter.title,
+            start_time: Duration::from_millis(chapter.start_offset_ms),
+            duration: Duration::from_millis(chapter.length_ms),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -337,11 +550,6 @@ mod tests {
             "summary": "Test description",
             "genres": [{"name": "Fiction"}],
             "releaseDate": "2023-01-15",
-            "chapterInfo": {
-                "chapters": [
-                    {"title": "Chapter 1", "startOffsetMs": 0, "lengthMs": 360000}
-                ]
-            },
             "image": "https://example.com/cover.jpg"
         }"#;
 
@@ -355,8 +563,8 @@ mod tests {
         let metadata = response.into_book_metadata();
         assert_eq!(metadata.asin, "B08XYZ1234");
         assert_eq!(metadata.year, Some(2023));
-        assert_eq!(metadata.chapters.len(), 1);
-        assert_eq!(metadata.chapters[0].start_time, Duration::from_millis(0));
+        // The book endpoint does not carry chapters; they come from `/chapters`.
+        assert!(metadata.chapters.is_empty());
     }
 
     #[test]
@@ -393,12 +601,6 @@ mod tests {
             "summary": "An audio drama",
             "genres": [{"name": "Mystery, Thriller & Suspense"}, {"name": "Thriller & Suspense"}],
             "releaseDate": "2020-06-23",
-            "chapterInfo": {
-                "chapters": [
-                    {"title": "Chapter 1", "startOffsetMs": 0, "lengthMs": 3600000},
-                    {"title": "Chapter 2", "startOffsetMs": 3600000, "lengthMs": 3700000}
-                ]
-            },
             "image": "https://example.com/cover.jpg"
         }"#;
 
@@ -427,7 +629,79 @@ mod tests {
         assert_eq!(metadata.series_name, Some("Black Book".to_string()));
         assert_eq!(metadata.series_position, Some("2".to_string()));
         assert_eq!(metadata.year, Some(2020));
+    }
+
+    #[test]
+    fn test_api_chapter_list_deserialization() {
+        let json = r#"{
+            "asin": "B08XYZ1234",
+            "isAccurate": true,
+            "chapters": [
+                {"title": "Opening Credits", "startOffsetMs": 0, "lengthMs": 11264},
+                {"title": "Chapter 1", "startOffsetMs": 11264, "lengthMs": 2203838}
+            ]
+        }"#;
+
+        let response: ApiChapterListResponse = serde_json::from_str(json).unwrap();
+        let chapters: Vec<Chapter> = response.chapters.into_iter().map(Chapter::from).collect();
+
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0].title, "Opening Credits");
+        assert_eq!(chapters[0].start_time, Duration::from_millis(0));
+        assert_eq!(chapters[1].start_time, Duration::from_millis(11264));
+        assert_eq!(chapters[1].duration, Duration::from_millis(2203838));
+    }
+
+    /// Spin up a minimal HTTP server that mimics audnexus: book metadata at
+    /// `/books/{asin}` (which, as on the real API, carries no chapters) and the
+    /// chapter list at `/books/{asin}/chapters`. Returns the server base URL.
+    fn spawn_mock_audnexus() -> String {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let read = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let path = request.split_whitespace().nth(1).unwrap_or("");
+
+                let body = if path.ends_with("/chapters") {
+                    r#"{"asin":"B08XYZ1234","isAccurate":true,"chapters":[{"title":"Chapter 1","startOffsetMs":0,"lengthMs":3600000},{"title":"Chapter 2","startOffsetMs":3600000,"lengthMs":3700000}]}"#
+                } else {
+                    r#"{"asin":"B08XYZ1234","title":"Test Book","authors":[{"name":"Test Author"}]}"#
+                };
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        format!("http://{}", addr)
+    }
+
+    #[tokio::test]
+    async fn test_fetch_book_loads_chapters_from_chapters_endpoint() {
+        let base_url = spawn_mock_audnexus();
+        let client = AudibleClient::with_base_url(base_url).unwrap();
+
+        let metadata = client.fetch_book("B08XYZ1234").await.unwrap();
+
+        assert_eq!(metadata.title, "Test Book");
+        assert_eq!(metadata.authors, vec!["Test Author".to_string()]);
+        // The mock's book body has no chapters, so a populated list here proves
+        // `fetch_book` queried `/books/{asin}/chapters`.
         assert_eq!(metadata.chapters.len(), 2);
+        assert_eq!(metadata.chapters[0].title, "Chapter 1");
+        assert_eq!(metadata.chapters[1].start_time, Duration::from_millis(3600000));
     }
 
     #[tokio::test]
@@ -437,5 +711,77 @@ mod tests {
 
         let client = AudibleClient::with_base_url("https://custom.api.com");
         assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_strip_html_reporter_example() {
+        // The exact sample from issue #429: inline tags removed, block tags
+        // become newlines, entities decoded.
+        let html = "<i>FM & AM</i> found Carlin officially poking fun at, while \
+            incorporating, his early material, performed in the lounges of America and on \
+            <i>The Ed Sullivan Show</i>. It also marked Carlin's metamorphosis from \
+            straight-laced to hippie, as he intentionally embraced the growing \
+            counterculture.<p> The recording is divided into two separate manifestations of \
+            humor, making it a sort of comedy concept album. One section focuses on \
+            references geared toward the more wholesome, commercial oriented AM-radio \
+            audience; the remaining material was intended for the \"hipper\" FM \
+            audience.</p><p> Tracks: <br /> 1. Shoot <br /> 2. The Hair Piece <br /> 3. Sex \
+            in Commercials <br /> 4. Drugs <br /> 5. Birth Control <br /> 6. Son of Wino \
+            <br /> 7. Divorce Game <br /> 8. Ed Sullivan Self Taught <br /> 9. Let's Make a \
+            Deal <br /> 10. The 11 O'Clock News</p><p> </p><b>Explicit Language Warning: \
+            You must be 18 years or older to purchase this program.</b>";
+
+        let text = strip_html(html);
+
+        assert!(!text.contains('<'), "no tags may remain: {}", text);
+        assert!(!text.contains("&amp;"), "entities must be decoded");
+        assert!(text.starts_with("FM & AM found Carlin"), "inline text kept: {}", text);
+        assert!(text.contains("The Ed Sullivan Show"), "inline tag content kept");
+        // Block boundaries produce line breaks
+        assert!(text.contains('\n'), "block tags must produce newlines");
+        assert!(text.lines().any(|l| l.starts_with("1. Shoot")));
+        assert!(text.lines().any(|l| l.starts_with("10. The 11 O'Clock News")));
+        assert!(
+            text.contains("Explicit Language Warning: You must be 18 years or older"),
+            "trailing bold text kept: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_strip_html_entities() {
+        assert_eq!(
+            strip_html("A &amp; B &lt;tag&gt; &quot;quoted&quot; &#39;x&#39;"),
+            "A & B <tag> \"quoted\" 'x'"
+        );
+        assert_eq!(strip_html("hex &#x27; quote"), "hex ' quote");
+        assert_eq!(strip_html("unknown &bogus; entity"), "unknown &bogus; entity");
+        assert_eq!(strip_html("lone & ampersand"), "lone & ampersand");
+    }
+
+    #[test]
+    fn test_strip_html_block_tags_newlines() {
+        let text = strip_html("<p>one</p><p>two</p><p>three</p>");
+        assert_eq!(text, "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn test_strip_html_empty_and_plain() {
+        assert_eq!(strip_html(""), "");
+        assert_eq!(strip_html("no tags here"), "no tags here");
+        assert_eq!(strip_html("<p></p>"), "");
+    }
+
+    #[test]
+    fn test_into_book_metadata_strips_summary_html() {
+        let json = r#"{
+            "asin": "B08XYZ1234",
+            "title": "Test Book",
+            "summary": "<p><b>Bold</b> intro &amp; more</p><p>Second para</p>"
+        }"#;
+
+        let response: ApiBookResponse = serde_json::from_str(json).unwrap();
+        let metadata = response.into_book_metadata();
+        assert_eq!(metadata.description, "Bold intro & more\nSecond para");
     }
 }

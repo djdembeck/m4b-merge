@@ -3,6 +3,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
+use crate::chapter_track::fix_chapter_track_start;
 use crate::metadata::BookMetadata;
 
 /// Maximum number of characters for chapter titles in embedded chapters (chpl atom limit)
@@ -261,7 +262,10 @@ impl Tagger {
 
     /// Embed chapters into an M4B file
     ///
-    /// This method writes chapters to the MP4 container using the chapter list (chpl atom).
+    /// This method writes chapters to the MP4 container in both forms players understand:
+    /// - the Nero `chpl` atom (chapter list, read by ffmpeg and some Android apps)
+    /// - the QuickTime chapter text track + `chap` track reference (read by Apple players)
+    ///
     /// Any existing chapters in the file are replaced.
     ///
     /// # Arguments
@@ -303,14 +307,33 @@ impl Tagger {
 
         // Clear existing chapters
         tag.chapter_list_mut().clear();
+        tag.chapter_track_mut().clear();
 
-        // Convert to mp4ameta chapters and add to tag
+        // Convert to mp4ameta chapters and add to the chapter list (Nero chpl
+        // atom) and the chapter track (QuickTime text track + chap reference).
+        // Apple players (Books, Apple Music, AVFoundation) only recognize the
+        // latter, so both are written for compatibility.
         let mp4_chapters = convert_chapters_for_embedding(&chapters_vec);
-        tag.chapter_list_mut().extend(mp4_chapters);
+        tag.chapter_list_mut().extend(mp4_chapters.clone());
+        tag.chapter_track_mut().extend(mp4_chapters);
 
         // Write back to file
         tag.write_to_path(path)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write chapters: {}", e)))?;
+
+        // mp4ameta writes the QuickTime chapter track's samples as a plain
+        // sample table without an edit list (elst), so the first chapter
+        // always decodes at time 0 in Apple players. Inject an elst carrying
+        // the real first-chapter start. This repair is best-effort: the chpl
+        // chapters are already embedded and usable by non-Apple players, so a
+        // repair failure is logged rather than failing the whole embed.
+        let first_start_ms = chapters_vec[0].start_time.as_millis() as u64;
+        if let Err(e) = fix_chapter_track_start(path, first_start_ms) {
+            warn!(
+                "Chapter track edit-list repair failed (chapters remain embedded via chpl): {}",
+                e
+            );
+        }
 
         info!("Successfully embedded {} chapters", chapters_vec.len());
         Ok(())
@@ -1022,6 +1045,12 @@ mod tests {
         assert_eq!(chapter_list.len(), 2);
         assert_eq!(chapter_list[0].title, "Chapter 1");
         assert_eq!(chapter_list[1].title, "Chapter 2");
+        // Apple players only recognize the QuickTime chapter track; it must be
+        // written alongside the Nero chapter list.
+        let chapter_track = tag.chapter_track();
+        assert_eq!(chapter_track.len(), 2);
+        assert_eq!(chapter_track[0].title, "Chapter 1");
+        assert_eq!(chapter_track[1].title, "Chapter 2");
     }
 
     #[test]
@@ -1052,6 +1081,8 @@ mod tests {
         assert_eq!(chapter_list.len(), 2);
         assert_eq!(chapter_list[0].title, "New Chapter 1");
         assert_eq!(chapter_list[1].title, "New Chapter 2");
+        assert_eq!(tag.chapter_track().len(), 2);
+        assert_eq!(tag.chapter_track()[0].title, "New Chapter 1");
     }
 
     #[test]
@@ -1075,6 +1106,8 @@ mod tests {
         assert_eq!(chapter_list.len(), 2);
         assert_eq!(chapter_list[0].title, "Chapter 1");
         assert_eq!(chapter_list[1].title, "Chapter 2");
+        assert_eq!(tag.chapter_track().len(), 2);
+        assert_eq!(tag.chapter_track()[0].title, "Chapter 1");
     }
 
     #[test]
@@ -1099,5 +1132,129 @@ mod tests {
         let tagger = Tagger::new();
         let result = tagger.embed_chapters(&m4b_path, &chapters);
         assert!(matches!(result, Err(TaggingError::DuplicateChapterTimes)));
+    }
+
+    #[test]
+    fn test_embed_chapters_survives_repair_failure() {
+        // The post-write QuickTime edit-list repair is best-effort: when the
+        // repair cannot run, embed_chapters must still return Ok with the
+        // chpl chapters intact.
+        //
+        // Force a repair-only failure with a container mp4ameta accepts but
+        // our surgery does not: a moov whose trak carries no audio (soun)
+        // track. mp4ameta's read/write path never needs one; the repair's
+        // `find_chapter_tracks` errors with "no audio (soun) track".
+        let temp_dir = TempDir::new().unwrap();
+        let m4b_path = temp_dir.path().join("no-soun.m4b");
+        std::fs::write(&m4b_path, minimal_mp4_no_soun_bytes()).unwrap();
+
+        // The repair alone must fail on this container...
+        let repair = crate::chapter_track::fix_chapter_track_start(&m4b_path, 0);
+        assert!(repair.is_err(), "repair must fail without an audio track");
+
+        // ...while embed_chapters still succeeds and the chpl chapters
+        // remain readable afterwards.
+        let chapters = vec![Chapter::new("Ch1", Duration::ZERO, Duration::from_secs(60))];
+        let tagger = Tagger::new();
+        let result = tagger.embed_chapters(&m4b_path, &chapters);
+        assert!(
+            result.is_ok(),
+            "embed must not fail when only the repair errors: {:?}",
+            result.err()
+        );
+
+        let tag = mp4ameta::Tag::read_from_path(&m4b_path).unwrap();
+        assert_eq!(tag.chapter_list().len(), 1, "chpl chapters must survive");
+        assert_eq!(tag.chapter_list()[0].title, "Ch1");
+    }
+
+    /// Same skeleton as `create_minimal_m4b`'s output but with a `text` hdlr
+    /// instead of `soun`, so the chapter-track repair cannot find an audio
+    /// track while mp4ameta still parses the file.
+    fn minimal_mp4_no_soun_bytes() -> Vec<u8> {
+        let mvhd_content_len = 100u32;
+        let mut mvhd = Vec::new();
+        mvhd.extend_from_slice(&(8 + mvhd_content_len).to_be_bytes());
+        mvhd.extend_from_slice(b"mvhd");
+        mvhd.extend_from_slice(&[0, 0, 0, 0]);
+        mvhd.extend_from_slice(&[0; 8]); // created/modified
+        mvhd.extend_from_slice(&1000u32.to_be_bytes()); // timescale
+        mvhd.extend_from_slice(&10_000u32.to_be_bytes()); // duration
+        mvhd.extend_from_slice(&[0; 80]);
+
+        let tkhd_content_len = 84u32;
+        let mut tkhd = Vec::new();
+        tkhd.extend_from_slice(&(8 + tkhd_content_len).to_be_bytes());
+        tkhd.extend_from_slice(b"tkhd");
+        tkhd.extend_from_slice(&[0, 0, 0, 3]);
+        tkhd.extend_from_slice(&[0; 8]); // created/modified
+        tkhd.extend_from_slice(&1u32.to_be_bytes()); // track id
+        tkhd.extend_from_slice(&[0; 4]); // reserved
+        tkhd.extend_from_slice(&10_000u32.to_be_bytes()); // duration
+        tkhd.extend_from_slice(&[0; 8]); // reserved
+        tkhd.extend_from_slice(&[0; 2]); // layer
+        tkhd.extend_from_slice(&[0; 2]); // alternate group
+        tkhd.extend_from_slice(&[0; 2]); // volume
+        tkhd.extend_from_slice(&[0; 2]); // reserved
+        tkhd.extend_from_slice(&[0; 36]); // matrix
+        tkhd.extend_from_slice(&[0; 8]); // width/height
+
+        let mdhd_content_len = 24u32;
+        let mut mdhd = Vec::new();
+        mdhd.extend_from_slice(&(8 + mdhd_content_len).to_be_bytes());
+        mdhd.extend_from_slice(b"mdhd");
+        mdhd.extend_from_slice(&[0, 0, 0, 0]);
+        mdhd.extend_from_slice(&[0; 8]);
+        mdhd.extend_from_slice(&1000u32.to_be_bytes()); // timescale
+        mdhd.extend_from_slice(&10_000u32.to_be_bytes()); // duration
+        mdhd.extend_from_slice(&[0x55, 0xC4, 0, 0]);
+
+        let hdlr_content_len = 25u32;
+        let mut hdlr = Vec::new();
+        hdlr.extend_from_slice(&(8 + hdlr_content_len).to_be_bytes());
+        hdlr.extend_from_slice(b"hdlr");
+        hdlr.extend_from_slice(&[0, 0, 0, 0]);
+        hdlr.extend_from_slice(&[0; 4]); // pre_defined
+        hdlr.extend_from_slice(b"text"); // NOT soun: repair cannot find audio
+        hdlr.extend_from_slice(&[0; 12]);
+        hdlr.push(0);
+
+        let mdia_children_len = 8 + mdhd_content_len + 8 + hdlr_content_len;
+        let mut mdia = Vec::new();
+        mdia.extend_from_slice(&(8 + mdia_children_len).to_be_bytes());
+        mdia.extend_from_slice(b"mdia");
+        mdia.extend_from_slice(&mdhd);
+        mdia.extend_from_slice(&hdlr);
+
+        let trak_children_len = (8 + tkhd_content_len) + mdia.len() as u32;
+        let mut trak = Vec::new();
+        trak.extend_from_slice(&(8 + trak_children_len).to_be_bytes());
+        trak.extend_from_slice(b"trak");
+        trak.extend_from_slice(&tkhd);
+        trak.extend_from_slice(&mdia);
+
+        let moov_children_len = (8 + mvhd_content_len) + trak.len() as u32;
+        let mut moov = Vec::new();
+        moov.extend_from_slice(&(8 + moov_children_len).to_be_bytes());
+        moov.extend_from_slice(b"moov");
+        moov.extend_from_slice(&mvhd);
+        moov.extend_from_slice(&trak);
+
+        let mut ftyp = Vec::new();
+        ftyp.extend_from_slice(&24u32.to_be_bytes());
+        ftyp.extend_from_slice(b"ftyp");
+        ftyp.extend_from_slice(b"M4A ");
+        ftyp.extend_from_slice(&0u32.to_be_bytes());
+        ftyp.extend_from_slice(b"M4A mp42");
+
+        let mut mdat = Vec::new();
+        mdat.extend_from_slice(&8u32.to_be_bytes());
+        mdat.extend_from_slice(b"mdat");
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&ftyp);
+        out.extend_from_slice(&moov);
+        out.extend_from_slice(&mdat);
+        out
     }
 }

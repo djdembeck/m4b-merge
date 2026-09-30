@@ -1,5 +1,6 @@
 pub mod api;
 pub mod audio;
+pub mod chapter_track;
 pub mod chapters;
 pub mod config;
 pub mod discovery;

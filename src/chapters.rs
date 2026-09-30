@@ -14,13 +14,40 @@ pub struct Chapter {
 
 /// Read chapters from an M4B file.
 ///
-/// Tries ffprobe first, then falls back to chpl atom parsing.
+/// Tries mp4ameta's tag reader first (it reads the Nero `chpl` atom, whose
+/// start times are exact; ffprobe prefers the QuickTime chapter text track,
+/// whose stts-encoded timeline loses the first chapter's offset), then
+/// ffprobe, then falls back to parsing the chpl atom directly.
 /// Pass `ffprobe_path` to use a specific ffprobe binary; `None` uses PATH.
 pub fn read_chapters(
     path: &Path,
     ffprobe_path: Option<&str>,
 ) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
-    // Try to read chapters using ffprobe first
+    // Try mp4ameta's chapter list (chpl atom) first: exact start times.
+    if let Ok(tag) = mp4ameta::Tag::read_from_path(path) {
+        let chapters: Vec<Chapter> = tag
+            .chapter_list()
+            .iter()
+            .map(|c| Chapter {
+                title: c.title.clone(),
+                start_time: c.start.as_millis() as u64,
+                duration: 0,
+            })
+            .collect();
+        if !chapters.is_empty() {
+            // Fill durations from successive starts
+            let mut chapters = chapters;
+            for i in 0..chapters.len() {
+                if i + 1 < chapters.len() {
+                    chapters[i].duration =
+                        chapters[i + 1].start_time.saturating_sub(chapters[i].start_time);
+                }
+            }
+            return Ok(chapters);
+        }
+    }
+
+    // Try to read chapters using ffprobe
     if let Ok(chapters) = read_chapters_ffprobe(path, ffprobe_path) {
         if !chapters.is_empty() {
             return Ok(chapters);
