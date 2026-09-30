@@ -309,13 +309,162 @@ impl ApiBookResponse {
             narrators: self.narrators.into_iter().map(|n| n.name).collect(),
             series_name,
             series_position,
-            description: self.summary.unwrap_or_default(),
+            description: self.summary.as_deref().map(strip_html).unwrap_or_default(),
             genres: self.genres.into_iter().map(|g| g.name).collect(),
             year,
             cover_url: self.image,
             chapters: Vec::new(),
         }
     }
+}
+
+/// Convert the audnexus `summary` (an HTML fragment of the audible.com
+/// description) into plain text for the comment tag:
+///
+/// - block-level tags (`<p>`, `<br>`, and list/heading tags) become newlines
+/// - every other tag is removed
+/// - HTML entities (`&amp;`, `&lt;`, `&quot;`, `&#39;`, numeric, ...) are decoded
+/// - the result is trimmed of surrounding whitespace
+fn strip_html(html: &str) -> String {
+    const BLOCK_TAGS: [&str; 12] =
+        ["p", "br", "div", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6"];
+
+    let mut out = String::with_capacity(html.len());
+    let mut chars = html.char_indices().peekable();
+
+    while let Some((idx, c)) = chars.next() {
+        if c != '<' {
+            out.push(c);
+            continue;
+        }
+
+        // Find the end of the tag
+        let tag_start = idx + 1;
+        let mut tag_end = None;
+        for (i, ch) in chars.by_ref() {
+            if ch == '>' {
+                tag_end = Some(i);
+                break;
+            }
+        }
+        let Some(tag_end) = tag_end else {
+            // Unterminated tag: keep the rest as-is
+            out.push_str(&html[tag_start..]);
+            break;
+        };
+
+        let raw_tag = &html[tag_start..tag_end];
+        // Strip attributes: first whitespace-delimited token is the name
+        let name = raw_tag
+            .trim_start_matches('/')
+            .split(|ch: char| ch.is_whitespace())
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        if BLOCK_TAGS.contains(&name.as_str()) {
+            // Collapse runs of newlines so nested/adjacent blocks don't pile
+            // up blank lines.
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+
+    // Decode common HTML entities (named + numeric).
+    let decoded = decode_entities(&out);
+
+    // Trim outer whitespace and collapse 3+ consecutive newlines. Lines
+    // introduced by block tags often carry a leading space from the source
+    // markup ("<br /> 1. Shoot"), so strip whitespace at line starts.
+    let mut collapsed = String::with_capacity(decoded.len());
+    let mut newline_run = 0usize;
+    let mut at_line_start = true;
+    for ch in decoded.trim().chars() {
+        if ch == '\n' {
+            newline_run += 1;
+            at_line_start = true;
+            if newline_run > 2 {
+                continue;
+            }
+        } else {
+            if at_line_start && ch.is_whitespace() && newline_run > 0 {
+                // Skip leading whitespace on lines created by block tags
+                continue;
+            }
+            if !at_line_start || !ch.is_whitespace() {
+                newline_run = 0;
+            }
+            at_line_start = false;
+        }
+        collapsed.push(ch);
+    }
+
+    collapsed
+}
+
+/// Decode HTML entities: `&amp; &lt; &gt; &quot; &apos; &#39; &#x27;` and
+/// numeric references. Unknown entities are left verbatim.
+fn decode_entities(input: &str) -> String {
+    if !input.contains('&') {
+        return input.to_string();
+    }
+
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+
+        // Find the terminating ';' within a reasonable window (entities are
+        // short); longer than 10 chars means it's a literal '&'.
+        let Some(semi_rel) = rest[..rest.len().min(11)].find(';') else {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        };
+
+        let entity = &rest[1..semi_rel];
+        let replacement = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some('\u{00A0}'),
+            _ => {
+                // Numeric: &#123; decimal or &#x1F; hexadecimal
+                if let Some(digits) = entity.strip_prefix('#') {
+                    let code = if let Some(hex) =
+                        digits.strip_prefix('x').or_else(|| digits.strip_prefix('X'))
+                    {
+                        u32::from_str_radix(hex, 16).ok()
+                    } else {
+                        digits.parse::<u32>().ok()
+                    };
+                    code.and_then(char::from_u32)
+                } else {
+                    None
+                }
+            }
+        };
+
+        match replacement {
+            Some(ch) => {
+                out.push(ch);
+                rest = &rest[semi_rel + 1..];
+            }
+            None => {
+                // Unknown entity: emit verbatim
+                out.push_str(&rest[..semi_rel + 1]);
+                rest = &rest[semi_rel + 1..];
+            }
+        }
+    }
+
+    out.push_str(rest);
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -562,5 +711,77 @@ mod tests {
 
         let client = AudibleClient::with_base_url("https://custom.api.com");
         assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_strip_html_reporter_example() {
+        // The exact sample from issue #429: inline tags removed, block tags
+        // become newlines, entities decoded.
+        let html = "<i>FM & AM</i> found Carlin officially poking fun at, while \
+            incorporating, his early material, performed in the lounges of America and on \
+            <i>The Ed Sullivan Show</i>. It also marked Carlin's metamorphosis from \
+            straight-laced to hippie, as he intentionally embraced the growing \
+            counterculture.<p> The recording is divided into two separate manifestations of \
+            humor, making it a sort of comedy concept album. One section focuses on \
+            references geared toward the more wholesome, commercial oriented AM-radio \
+            audience; the remaining material was intended for the \"hipper\" FM \
+            audience.</p><p> Tracks: <br /> 1. Shoot <br /> 2. The Hair Piece <br /> 3. Sex \
+            in Commercials <br /> 4. Drugs <br /> 5. Birth Control <br /> 6. Son of Wino \
+            <br /> 7. Divorce Game <br /> 8. Ed Sullivan Self Taught <br /> 9. Let's Make a \
+            Deal <br /> 10. The 11 O'Clock News</p><p> </p><b>Explicit Language Warning: \
+            You must be 18 years or older to purchase this program.</b>";
+
+        let text = strip_html(html);
+
+        assert!(!text.contains('<'), "no tags may remain: {}", text);
+        assert!(!text.contains("&amp;"), "entities must be decoded");
+        assert!(text.starts_with("FM & AM found Carlin"), "inline text kept: {}", text);
+        assert!(text.contains("The Ed Sullivan Show"), "inline tag content kept");
+        // Block boundaries produce line breaks
+        assert!(text.contains('\n'), "block tags must produce newlines");
+        assert!(text.lines().any(|l| l.starts_with("1. Shoot")));
+        assert!(text.lines().any(|l| l.starts_with("10. The 11 O'Clock News")));
+        assert!(
+            text.contains("Explicit Language Warning: You must be 18 years or older"),
+            "trailing bold text kept: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_strip_html_entities() {
+        assert_eq!(
+            strip_html("A &amp; B &lt;tag&gt; &quot;quoted&quot; &#39;x&#39;"),
+            "A & B <tag> \"quoted\" 'x'"
+        );
+        assert_eq!(strip_html("hex &#x27; quote"), "hex ' quote");
+        assert_eq!(strip_html("unknown &bogus; entity"), "unknown &bogus; entity");
+        assert_eq!(strip_html("lone & ampersand"), "lone & ampersand");
+    }
+
+    #[test]
+    fn test_strip_html_block_tags_newlines() {
+        let text = strip_html("<p>one</p><p>two</p><p>three</p>");
+        assert_eq!(text, "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn test_strip_html_empty_and_plain() {
+        assert_eq!(strip_html(""), "");
+        assert_eq!(strip_html("no tags here"), "no tags here");
+        assert_eq!(strip_html("<p></p>"), "");
+    }
+
+    #[test]
+    fn test_into_book_metadata_strips_summary_html() {
+        let json = r#"{
+            "asin": "B08XYZ1234",
+            "title": "Test Book",
+            "summary": "<p><b>Bold</b> intro &amp; more</p><p>Second para</p>"
+        }"#;
+
+        let response: ApiBookResponse = serde_json::from_str(json).unwrap();
+        let metadata = response.into_book_metadata();
+        assert_eq!(metadata.description, "Bold intro & more\nSecond para");
     }
 }
