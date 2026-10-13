@@ -51,7 +51,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # =============================================================================
 # Runtime stage - Minimal Alpine image with FFmpeg
 # =============================================================================
-FROM alpine:3.22 AS runtime
+FROM alpine:3.24 AS runtime
 
 # Accept the version arg for image metadata
 ARG VERSION=devel
