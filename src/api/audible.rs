@@ -299,7 +299,7 @@ fn strip_html(html: &str) -> String {
         text.push_str(&rest[..tag_start]);
 
         let after_lt = &rest[tag_start + 1..];
-        let Some(tag_len) = after_lt.find('>') else {
+        let Some(tag_len) = find_tag_end(after_lt) else {
             // Unterminated tag: the remainder is literal text.
             text.push_str(&rest[tag_start..]);
             rest = "";
@@ -314,6 +314,24 @@ fn strip_html(html: &str) -> String {
     text.push_str(rest);
 
     normalize_whitespace(&decode_entities(&text))
+}
+
+/// Find the `>` that closes an HTML tag, ignoring `>` characters inside
+/// single- or double-quoted attribute values.
+fn find_tag_end(tag_contents: &str) -> Option<usize> {
+    let mut open_quote: Option<char> = None;
+
+    for (index, ch) in tag_contents.char_indices() {
+        match (open_quote, ch) {
+            (Some(quote), current) if current == quote => open_quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => open_quote = Some(ch),
+            (None, '>') => return Some(index),
+            (None, _) => {}
+        }
+    }
+
+    None
 }
 
 /// Whether an HTML tag opens or closes a block-level element that should
@@ -614,6 +632,12 @@ mod tests {
             strip_html(html),
             "First paragraph with & entity.\n\nSecond 'quoted' paragraph.\nNext line."
         );
+    }
+
+    #[test]
+    fn test_strip_html_ignores_quoted_greater_than() {
+        assert_eq!(strip_html("<p><a title=\"A > B\">link</a></p>"), "link");
+        assert_eq!(strip_html("<a title='A > B'>link</a>"), "link");
     }
 
     #[test]
