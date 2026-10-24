@@ -276,13 +276,169 @@ impl ApiBookResponse {
             narrators: self.narrators.into_iter().map(|n| n.name).collect(),
             series_name,
             series_position,
-            description: self.summary.unwrap_or_default(),
+            description: self.summary.as_deref().map(strip_html).unwrap_or_default(),
             genres: self.genres.into_iter().map(|g| g.name).collect(),
             year,
             cover_url: self.image,
             chapters,
         }
     }
+}
+
+/// Convert the audnexus `summary` into plain text for the comment atom.
+///
+/// Audnexus carries the audible.com description as an HTML fragment (`<p>`,
+/// `<i>`, `<br />`, entities), so writing it verbatim leaves visible markup in
+/// the `©cmt` tag. Block-level tags become line breaks, inline and unknown
+/// tags are dropped, entities are decoded, and whitespace is normalized.
+fn strip_html(html: &str) -> String {
+    let mut text = String::with_capacity(html.len());
+    let mut rest = html;
+
+    while let Some(tag_start) = rest.find('<') {
+        text.push_str(&rest[..tag_start]);
+
+        let after_lt = &rest[tag_start + 1..];
+        let Some(tag_len) = after_lt.find('>') else {
+            // Unterminated tag: the remainder is literal text.
+            text.push_str(&rest[tag_start..]);
+            rest = "";
+            break;
+        };
+
+        if is_block_tag(&after_lt[..tag_len]) {
+            text.push('\n');
+        }
+        rest = &after_lt[tag_len + 1..];
+    }
+    text.push_str(rest);
+
+    normalize_whitespace(&decode_entities(&text))
+}
+
+/// Whether an HTML tag opens or closes a block-level element that should
+/// separate lines of prose.
+fn is_block_tag(tag_contents: &str) -> bool {
+    let name = tag_contents
+        .trim_start_matches('/')
+        .split(|c: char| c.is_whitespace() || c == '/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    matches!(
+        name.as_str(),
+        "address"
+            | "article"
+            | "blockquote"
+            | "br"
+            | "div"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "hr"
+            | "li"
+            | "ol"
+            | "p"
+            | "section"
+            | "table"
+            | "tr"
+            | "ul"
+    )
+}
+
+/// Decode the HTML entities that appear in audnexus summaries. Unknown
+/// entities are left verbatim so no information is silently dropped.
+fn decode_entities(input: &str) -> String {
+    if !input.contains('&') {
+        return input.to_string();
+    }
+
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp + 1..];
+
+        // Entities are short and contain only alphanumerics or '#'; anything
+        // else means this '&' is literal text.
+        let Some(semi) = rest.find(';').filter(|&semi| semi <= 10) else {
+            out.push('&');
+            continue;
+        };
+
+        let entity = &rest[..semi];
+        if !entity.chars().all(|c| c.is_ascii_alphanumeric() || c == '#') {
+            out.push('&');
+            continue;
+        }
+
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "apos" => Some('\''),
+            "gt" => Some('>'),
+            "hellip" => Some('…'),
+            "ldquo" => Some('“'),
+            "lsquo" => Some('‘'),
+            "lt" => Some('<'),
+            "mdash" => Some('—'),
+            "nbsp" => Some(' '),
+            "ndash" => Some('–'),
+            "quot" => Some('"'),
+            "rdquo" => Some('”'),
+            "rsquo" => Some('’'),
+            _ => decode_numeric_entity(entity),
+        };
+
+        match decoded {
+            Some(ch) => out.push(ch),
+            None => {
+                out.push('&');
+                out.push_str(&rest[..=semi]);
+            }
+        }
+        rest = &rest[semi + 1..];
+    }
+    out.push_str(rest);
+
+    out
+}
+
+/// Decode `#39` or `#x27` style numeric entity bodies.
+fn decode_numeric_entity(entity: &str) -> Option<char> {
+    let digits = entity.strip_prefix('#')?;
+    let code_point = match digits.strip_prefix('x').or_else(|| digits.strip_prefix('X')) {
+        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+        None => digits.parse::<u32>().ok()?,
+    };
+    char::from_u32(code_point)
+}
+
+/// Collapse HTML-derived whitespace: trim each line, collapse runs of spaces,
+/// keep at most one blank line between paragraphs, and trim the ends.
+fn normalize_whitespace(text: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    for line in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.is_empty() {
+            if lines.last().is_some_and(|previous| !previous.is_empty()) {
+                lines.push(String::new());
+            }
+        } else {
+            lines.push(line);
+        }
+    }
+
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+
+    lines.join("\n")
 }
 
 #[derive(Debug, Deserialize)]
@@ -447,6 +603,37 @@ mod tests {
         assert_eq!(metadata.series_position, Some("2".to_string()));
         assert_eq!(metadata.year, Some(2020));
         assert_eq!(metadata.chapters.len(), 2);
+    }
+
+    #[test]
+    fn test_strip_html_paragraph_summary() {
+        let html = "<p>First paragraph with &amp; entity.</p> <p>Second &#39;quoted&#39; \
+                    paragraph.<br/>Next line.</p>";
+
+        assert_eq!(
+            strip_html(html),
+            "First paragraph with & entity.\n\nSecond 'quoted' paragraph.\nNext line."
+        );
+    }
+
+    #[test]
+    fn test_strip_html_inline_tags_and_unknown_entities() {
+        let html = "<i>FM & AM</i> &amp; <b>more</b> &unknown; &lt;tag&gt;";
+
+        assert_eq!(strip_html(html), "FM & AM & more &unknown; <tag>");
+    }
+
+    #[test]
+    fn test_api_response_strips_html_summary() {
+        let json = r#"{
+            "asin": "B08XYZ1234",
+            "title": "Test Book",
+            "summary": "<p>First &amp; second.</p> <p>Third.</p>"
+        }"#;
+
+        let response: ApiBookResponse = serde_json::from_str(json).unwrap();
+        let metadata = response.into_book_metadata();
+        assert_eq!(metadata.description, "First & second.\n\nThird.");
     }
 
     #[tokio::test]
