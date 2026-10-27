@@ -137,6 +137,128 @@ Updating, improving and correcting the documentation
 
 -->
 
+## Releasing
+
+m4b-merge publishes from a **frozen snapshot of `develop`** that is manually
+promoted to `main`. There is no CI-driven merge from `develop` and no
+automatic version bump on push — versions are bumped explicitly on
+`develop` by `release.py prepare`. The `Release` publisher only runs
+against the newer version a promotion just promoted to `main`; it never
+republishes, retags, or rolls back anything older, and it never syncs
+`main` back to `develop`.
+
+Releases use the operator script `scripts/release.py` (Python 3.11+, stdlib
+only; it uses your local `gh`/`git` for the same remote it does in CI).
+
+### 1. Prepare a version on `develop`
+
+After your changes are merged to `develop` and CI is green:
+
+```bash
+python3 scripts/release.py prepare --bump auto
+# …or explicit, e.g. --bump minor, or --version 1.2.3
+python3 scripts/release.py prepare --dry-run --bump auto   # actions preview
+```
+
+This opens a pull request to `develop` that bumps the `Cargo.toml` /
+`Cargo.lock` package version on a short-lived
+`release-prep/vVERSION-<source>` branch. **Merge it** and wait for CI —
+the promotion in the next step freezes the commit `develop` points at.
+
+### 2. Freeze the promotion candidate
+
+```bash
+python3 scripts/release.py candidate
+python3 scripts/release.py candidate --dry-run   # actions preview
+```
+
+The command builds `release/vVERSION-<source>-<main-base>` against current
+`main` and merges the *frozen snapshot of `develop`* with `--no-ff`, so the
+promoted tree is byte-identical to `develop` at that SHA. On conflict (e.g.
+a `main` hotfix that `develop` has not picked up), it fails hard; resolve
+manually and re-run with `--resolved-commit OID`, which verifies the
+resolved commit has exactly the two expected parents, the exact expected
+tree, and a consistent version before using it.
+
+### 3. Merge the promotion PR (human review)
+
+The promotion is gated by human review, the `Release policy` status check
+when required, and `main`'s native strict-base freshness protection.
+
+- Bootstrap: the trusted `Release policy` status only protects `main`
+  **after** the first promotion has been hand-reviewed and merged (it runs
+  from `main`'s own tree). Before that first merge, verify the candidate
+  manually from a full clone. Keep `main`'s native "strict base freshness"
+  branch protection enabled — never relax it so an out-of-date promotion can
+  merge. After the first promotion is on `main`, make the `Release policy`
+  check **required** on `main`.
+- Before merging, verify the candidate's first parent, exact frozen `develop`
+  tree, and fresh version against the current `main` SHA:
+
+  ```bash
+  python3 scripts/release.py verify --head <CANDIDATE_SHA> --base <CURRENT_MAIN_SHA>
+  ```
+
+- After the merge, do not run candidate verification against the final merge
+  commit. Confirm publication eligibility against the final `main` SHA instead:
+
+  ```bash
+  python3 scripts/release.py check-publication --sha <FINAL_MAIN_SHA>
+  ```
+
+  The required policy check and the normal publisher gates also run on the
+  promoted commit.
+
+
+### 4. Publish
+
+Pushing the promotion merge to `main` starts the `Release` workflow, which
+publishes that exact commit:
+
+- Verifies it is publishable (SHA is on `main`, version is new, and no
+  conflicting tag exists) via `check-publication`.
+- Runs the **real test suite** (with `ffmpeg` installed on Linux) and
+  builds the existing Linux, macOS, and Windows binaries **from the exact
+  SHA that will be tagged**, and the Docker images natively (amd64 on an
+  x86 runner, arm64 on an ARM runner) — **no QEMU cross-build**. Per-arch
+  images are pushed as immutable `sha-<sha>-<arch>` staging tags first.
+- Only after test + binaries + Docker all succeed does the helper create
+  the `vX.Y.Z` tag (via `scripts/release.py tag --sha`) and the minimal
+  GitHub Release; the Annalist GitHub App fills the release body via
+  webhook.
+- The multi-arch `vX.Y.Z` image is assembled **only after** the per-arch
+  images from the same SHA exist; `latest` is **never** re-pointed.
+
+### Retry / immutability semantics
+
+- A tag that already exists **and** points at the same SHA is accepted
+  (same-SHA reuse, for retry after an interrupted run).
+- A tag that exists at a **different** SHA fails `check-publication`
+  hard — you cannot "republish" an older version or move a tag.
+- Publish runs are resumable: re-running the `Release` workflow on the
+  same commit reuses the existing tag/release and only adds missing outputs.
+  Runs are serialized across commits with GitHub Actions `queue: max`, which
+  permits up to 100 pending runs; GitHub's queue ordering/capacity limits mean
+  this is not a guarantee that every queued promotion will publish. Manual
+  dispatch is main-only. A same-SHA existing tag/release remains eligible for
+  retry; this does not allow an older version to be republished.
+- Staging images are reused only after their Linux architecture, OCI version
+  and revision labels match the prepared version and tested SHA. Version tags
+  must match the captured immutable image digests; multi-arch assembly uses
+  those digests, never a later mutable-tag lookup. Mismatches and registry
+  authentication/transport errors fail without overwriting existing images.
+- Release assets (including `m4b-merge-windows.exe`) are never overwritten.
+  New uploads carry an atomic GitHub asset label binding the source SHA, release
+  tag, and SHA-256 digest to the uploaded bytes. A retry reuses a labeled asset
+  only when its SHA/tag binding and GitHub-computed (or downloaded legacy)
+  digest are valid; it can therefore resume after a same-SHA rebuild differs.
+  Older unlabelled assets remain reusable only when their digest matches the
+  current build. Missing assets are uploaded on re-run; malformed labels and
+  conflicting bindings/digests fail before any upload.
+- `latest` is never rolled back; dispatching an older commit fails at
+  `check-publication` (its version is not newer than the existing release
+  baseline).
+
 ## Styleguides
 ### Commit Messages
 This project uses [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/), and all PRs/contributions must use them as well.

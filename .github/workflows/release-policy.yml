@@ -1,0 +1,53 @@
+# Trusted "Release policy" status producer for promotion PRs into main.
+#
+# Runs on pull_request_target, so it always executes with the BASE branch's
+# code. It checks out ONLY the trusted base SHA, then runs the base-owned helper
+# `scripts/release.py policy` with --report-status. The helper validates the
+# frozen promotion shape (two-parent merge, tree exactly equal to frozen
+# develop, fresh prepared version) against LIVE refs and posts a literal
+# "Release policy" status on the PR head SHA.
+#
+# Trust bootstrap: this workflow only proves anything once it and the helper
+# are merged to main. Do not require the "Release policy" check before that
+# initial promotion PR is merged by a human (with review), and never relax
+# native strict base freshness as a substitute.
+#
+# Security: the PR head is fetched as objects only. It is never checked out
+# and no code from the fork/PR is executed.
+
+name: Release Policy
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Trusted code only: the base SHA this PR targets, full history (the
+      # helper reads release tags from main history) and all tags.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Verify frozen promotion and report status
+        run: python3 scripts/release.py policy --event "$GITHUB_EVENT_PATH" --report-status

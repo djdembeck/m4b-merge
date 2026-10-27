@@ -91,16 +91,32 @@ Pull request templates belong in `.github/PULL_REQUEST_TEMPLATE.md`.
 
 ### Required Checks
 
-1. **Compile** — `cargo check` / `make check`
-2. **Test** — `cargo test --all-features`
-3. **Coverage** — ≥90% coverage, no new uncovered lines
-4. **Lint** — `cargo clippy --all-features -- -D warnings`
-5. **Format** — `cargo fmt --check`
-6. **Security** — `cargo audit --deny warnings`
+1. **Lint & Format** — `cargo fmt --check`, `cargo clippy --all-features -- -D warnings`,
+   and the release helper behavior tests
+   (`python3 -m unittest discover -s scripts -p 'test_release.py'`) and
+   publisher reconciliation tests
+   (`python3 -m unittest discover -s scripts -p 'test_publish_release.py'`)
+2. **Compile** — `cargo check --locked --all-features`
+3. **Test** — `cargo test --all-features --locked`
+4. **Docker** — amd64 build on PRs; arm64 builds and the multi-arch
+   manifest run on main pushes only and are not PR-required checks
 
-### Failing CI Actions
+The existing coverage requirement remains ≥90% with no new uncovered lines;
+this release cutover does not add or remove a coverage job.
 
-All CI failures block merge; audit findings require security review.
+`cargo audit --deny warnings` runs in CI as a **visible advisory** job
+(`audit-advisory`), deliberately outside the required chain — a new
+advisory must not force a breaking release. Findings are reviewed manually.
+
+### Release Gate
+
+`develop` reaches `main` only through a human-reviewed
+`release/v*-*-*` promotion PR (see the `Releasing` section of
+`CONTRIBUTING.md`). `main` keeps its native strict base-freshness
+protection; there is no automatic sync back to `develop`. Promotion PRs
+send a trusted `Release policy` status from the `Release Policy`
+workflow, which verifies the frozen two-parent merge shape before the
+check can be required.
 
 ---
 
