@@ -1,0 +1,53 @@
+name: Vulnerability check
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vulncheck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-audit:
+    # Advisory-only: visible failure, never a required branch-protection
+    # context. Renovate's branch/PR automerge treats any red check on the
+    # branch as blocking, so dependency-update PRs are skipped here: a
+    # pre-existing advisory would otherwise deadlock the PRs that fix it.
+    # Post-merge pushes and the daily schedule always run the audit.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.user.login != 'renovate[bot]' &&
+       github.event.pull_request.user.login != 'app/renovate')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: 1.96
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-audit-0.22.2
+          restore-keys: ${{ runner.os }}-cargo-audit-
+
+      # Pinned for Renovate's regex custom manager in renovate.json5.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Audit Cargo.lock
+        run: cargo audit --deny warnings

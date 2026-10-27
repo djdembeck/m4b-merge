@@ -46,10 +46,6 @@ jobs:
 
       - run: cargo clippy --all-features -- -D warnings
 
-      - run: command -v cargo-audit || cargo install cargo-audit --locked
-
-      - run: cargo audit --deny warnings
-
   build:
     needs: [lint-format]
     runs-on: ubuntu-latest

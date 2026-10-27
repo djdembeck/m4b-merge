@@ -17,13 +17,6 @@ repos:
         types: [rust]
         pass_filenames: false
 
-      - id: cargo-audit
-        name: cargo audit
-        entry: bash -c '(command -v cargo-audit || cargo install cargo-audit --locked) && cargo audit --deny warnings'
-        language: system
-        pass_filenames: false
-        always_run: true
-
       - id: cargo-check
         name: cargo check
         entry: cargo check --all-features

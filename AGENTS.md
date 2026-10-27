@@ -96,11 +96,18 @@ Pull request templates belong in `.github/PULL_REQUEST_TEMPLATE.md`.
 3. **Coverage** — ≥90% coverage, no new uncovered lines
 4. **Lint** — `cargo clippy --all-features -- -D warnings`
 5. **Format** — `cargo fmt --check`
-6. **Security** — `cargo audit --deny warnings`
+
+### Advisory Checks
+
+- **Security** — `cargo audit --deny warnings` runs in `.github/workflows/vulncheck.yml`.
+  It fails visibly but is **not** a required check and does **not** gate merges:
+  a pre-existing advisory must never block the dependency PRs that fix it.
+  Findings need a security review, not a blocked merge.
 
 ### Failing CI Actions
 
-All CI failures block merge; audit findings require security review.
+Build, test, lint, and format failures block merge. Audit findings are reviewed
+and fixed in follow-up PRs — they do not block dependency updates or merges.
 
 ---
 
