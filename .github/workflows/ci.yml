@@ -143,7 +143,9 @@ jobs:
       - name: Find existing PR comment
         if: >-
           github.event.pull_request.head.repo.full_name == github.repository &&
-          !endsWith(github.event.pull_request.user.login, '[bot]')
+          !endsWith(github.event.pull_request.user.login, '[bot]') &&
+          github.event.pull_request.user.login != 'renovate[bot]' &&
+          github.event.pull_request.user.login != 'app/renovate'
         uses: peter-evans/find-comment@b30e6a3c0ed37e7c023ccd3f1db5c6c0b0c23aad # v4.0.0
         id: find-comment
         with:
@@ -154,6 +156,8 @@ jobs:
         if: >-
           github.event.pull_request.head.repo.full_name == github.repository &&
           !endsWith(github.event.pull_request.user.login, '[bot]') &&
+          github.event.pull_request.user.login != 'renovate[bot]' &&
+          github.event.pull_request.user.login != 'app/renovate' &&
           steps.find-comment.outputs.comment-id == ''
         uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
         with:
@@ -161,13 +165,16 @@ jobs:
           body: |
             ## 🐳 Docker build check
 
-            The containerized amd64 build succeeded. Bot PRs (e.g. Renovate)
-            do not publish images; human PRs additionally publish a
-            test image:
+            The containerized amd64 build succeeded. This job only verifies
+            the build and does not publish. A separate, parallel
+            `docker-amd64` job publishes a test image for human same-repo
+            PRs once it succeeds (bot PRs skip it):
 
             ```bash
             docker pull ghcr.io/djdembeck/m4b-merge:pr-${{ github.event.pull_request.number }}
             ```
+
+            If the `docker-amd64` job failed, the image was not published.
 
             After merge, the `main` push publishes the `latest` and SHA
             images on both architectures.
@@ -187,7 +194,9 @@ jobs:
       ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')) ||
        (github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
-        !endsWith(github.event.pull_request.user.login, '[bot]')))
+        !endsWith(github.event.pull_request.user.login, '[bot]') &&
+        github.event.pull_request.user.login != 'renovate[bot]' &&
+        github.event.pull_request.user.login != 'app/renovate'))
     runs-on: ubuntu-latest
     permissions:
       contents: read

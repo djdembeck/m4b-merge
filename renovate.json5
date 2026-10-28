@@ -23,6 +23,7 @@
     enabled: true,
     automerge: true,
     automergeType: "pr",
+    schedule: ["before 6am"],
   },
   packageRules: [
     {
