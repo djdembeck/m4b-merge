@@ -106,7 +106,9 @@ Pull request templates belong in `.github/PULL_REQUEST_TEMPLATE.md`.
 
 `cargo audit --deny warnings` runs in CI as a **visible advisory** job
 (`audit-advisory`), deliberately outside the required chain — a new
-advisory must not force a breaking release. Findings are reviewed manually.
+advisory must not force a breaking release. Findings are reviewed manually
+and never block dependency updates or merges — they are fixed in follow-up
+PRs.
 
 ### Release Gate
 
@@ -126,7 +128,7 @@ check can be required.
 
 1. **Verify necessity** — Is there an existing solution?
 2. **Check maintenance** — Last commit date? Open issues?
-3. **Audit for vulnerabilities** — Run `cargo audit`
+3. **Audit for vulnerabilities** — Run `cargo audit` (advisory — not a required check, does not block merges)
 4. **Pin to version** — Use `version = "2.1.0"`, not `*`
 5. **Document rationale** — Why this library?
 
