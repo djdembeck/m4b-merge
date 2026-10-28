@@ -25,10 +25,13 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src && \
     echo "fn main() {}" > src/main.rs
 
-# Pre-build dependencies. BuildKit cache mounts persist the cargo registry and
-# the build target across builds, so unchanged dependencies are never recached
-# or recompiled. Sharing=locked is safe here (single buildx invocation).
+# Pre-build dependencies. BuildKit cache mounts persist the cargo registry, git
+# checkouts, and the build target across builds, so unchanged dependencies are
+# never refetched or recompiled. The git cache mount matters for the pinned
+# mp4ameta patch in Cargo.toml: without it every image build re-clones the
+# repository. Sharing=locked is safe here (single buildx invocation).
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
     cargo build --release --locked
 
@@ -40,9 +43,11 @@ COPY . .
 # COPY so cargo's fingerprint (mtime-based) invalidates the project crate --
 # the stub build recorded src/*.rs older than what COPY delivered, so without
 # this cargo would skip the rebuild and ship the stub binary. Dependencies are
-# untouched (they live in the cargo registry, not /app/src). Copy the produced
-# binary out of the cache mount into the image layer for the runtime stage.
+# untouched (they live in the cargo registry and git cache, not /app/src). Copy
+# the produced binary out of the cache mount into the image layer for the
+# runtime stage.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
     find src -type f -exec touch {} + && \
     cargo build --release --locked && \

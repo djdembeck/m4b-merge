@@ -31,3 +31,12 @@ httpdate = "=1.0.3"
 
 [dev-dependencies]
 tracing-test = "0.2"
+
+# mp4ameta 0.13.0 writes a chapter track's sample table in the movie timescale
+# while leaving the track's own media timescale untouched, so every write
+# rescales chapter times. Pin the upstream fix (PR Saecki/rust-mp4ameta#43) by
+# full commit SHA. Note: cargo audit does not match git-sourced packages, so
+# this patch stops advisory coverage for mp4ameta; replace it with a released
+# version as soon as one contains the fix.
+[patch.crates-io]
+mp4ameta = { git = "https://github.com/djdembeck/mp4ameta", rev = "f0a86397c8f6b82fc72c850761b32760a3b17491" }
