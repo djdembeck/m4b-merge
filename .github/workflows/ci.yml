@@ -117,6 +117,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # create-or-update-comment on same-repo PRs needs PR write; explicit
+      # job permissions set everything omitted to none.
+      pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -164,10 +167,17 @@ jobs:
     # develop preview (develop pushes). Local (non-PR) pushes start from a
     # fully cached, clean worktree, so the pre-Public-publish cost is small.
     needs: [test]
+    # PRs: only non-bot same-repo authors publish. Renovate's dependency PRs
+    # are same-repo (head repo == base) but must NOT publish — docker-check
+    # covers them — so the bot-author guard is what keeps dep PRs from
+    # reaching this job. Only a human same-repo PR (rare) and push to
+    # main/develop publish.
     if: >-
       success() &&
       ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')) ||
-       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.author.login.endsWith('[bot]')))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -197,8 +207,11 @@ jobs:
           # workflow (never by CI), so no type=semver lines here.
           tags: |
             type=ref,event=branch
+            # PR images take the stable pr-{N} tag so pr-cleanup.yml (which
+            # deletes pr-{N} package versions on PR close) collects them.
+            type=ref,event=pr
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=sha
+            type=sha,enable=${{ github.event_name != 'pull_request' }}
 
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
