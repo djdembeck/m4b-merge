@@ -284,6 +284,59 @@ fn test_chapter_read_from_file_without_chapters() {
 }
 
 #[test]
+fn test_chapter_embed_caps_count_at_chpl_limit() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("test.m4b");
+    create_test_m4b(&m4b_path, 10);
+
+    // 256 chapters would wrap the chpl atom's one-byte entry count.
+    let chapters: Vec<m4b_merge::metadata::Chapter> = (0..=255)
+        .map(|i| {
+            m4b_merge::metadata::Chapter::new(
+                format!("Chapter {}", i),
+                Duration::from_millis(i as u64 * 10),
+                Duration::from_millis(10),
+            )
+        })
+        .collect();
+
+    let tagger = m4b_merge::tagging::Tagger::new();
+    tagger.embed_chapters(&m4b_path, &chapters).expect("embed truncated chapter list");
+
+    let tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read back chapters");
+    assert_eq!(tag.chapter_list().len(), 255, "chpl atom holds at most 255 chapters");
+    assert_eq!(tag.chapter_list()[0].title, "Chapter 0");
+    assert_eq!(tag.chapter_list()[254].title, "Chapter 254");
+}
+
+#[test]
+fn test_chapter_embed_multibyte_title_does_not_panic() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("test.m4b");
+    create_test_m4b(&m4b_path, 10);
+
+    // 400 bytes of 2-byte characters; byte 255 falls inside a character.
+    let title = "é".repeat(200);
+    let chapters =
+        vec![m4b_merge::metadata::Chapter::new(title, Duration::ZERO, Duration::from_secs(10))];
+
+    let tagger = m4b_merge::tagging::Tagger::new();
+    tagger.embed_chapters(&m4b_path, &chapters).expect("embed multibyte chapter title");
+
+    let tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read back chapters");
+    let embedded = &tag.chapter_list()[0].title;
+    assert_eq!(embedded, &"é".repeat(127), "title truncated on a char boundary under 255 bytes");
+}
+
+#[test]
 fn test_chapter_long_duration() {
     if !ffmpeg_available() {
         return;
