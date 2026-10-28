@@ -603,3 +603,29 @@ fn test_foreign_clock_chapter_track_keeps_times_across_writes() {
         "chapter starts must survive repeated tag writes"
     );
 }
+
+#[test]
+fn test_written_metadata_uses_composer_for_narrators() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("metadata.m4b");
+    create_test_m4b(&m4b_path, 2);
+
+    let metadata = m4b_merge::metadata::BookMetadata::new("id", "Title", "description")
+        .add_author("Author One")
+        .add_narrator("Narrator One")
+        .add_narrator("Narrator Two")
+        .with_series("Series Name", "2");
+
+    let tagger = m4b_merge::tagging::Tagger::new();
+    tagger.write_metadata(&m4b_path, &metadata).expect("write metadata");
+    tagger.write_metadata(&m4b_path, &metadata).expect("rewrite metadata");
+
+    let tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read back tags");
+    assert_eq!(tag.composer(), Some("Narrator One, Narrator Two"));
+    assert_eq!(tag.artist(), Some("Author One"));
+    assert_eq!(tag.grouping(), Some("Series: Series Name #2"));
+}
