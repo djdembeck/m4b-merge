@@ -143,7 +143,51 @@ impl AudibleClient {
     }
 
     /// Fetch book metadata by ID with retry logic
+    ///
+    /// Audnexus serves chapter markers from a separate endpoint
+    /// (`/books/{asin}/chapters`), so they are fetched with their own retry pass.
+    /// A chapter lookup failure does not discard the book metadata: the merge
+    /// still gets tags and cover art, just without chapters.
     pub async fn fetch_book(&self, id: &str) -> Result<BookMetadata, AudibleError> {
+        Self::validate_id(id)?;
+
+        let retry_strategy =
+            ExponentialBackoff::from_millis(BACKOFF_BASE_MS).map(jitter).take(MAX_RETRIES);
+
+        let base_url = self.base_url.clone();
+        let client = self.client.clone();
+        let region = self.region;
+        let id = id.to_string();
+        let chapter_id = id.clone();
+
+        let mut metadata = RetryIf::start(
+            retry_strategy,
+            move || {
+                let client = client.clone();
+                let base_url = base_url.clone();
+                let id = id.clone();
+
+                async move { Self::fetch_book_once(&client, &base_url, region, &id).await }
+            },
+            Self::is_transient_error,
+        )
+        .await?;
+
+        match self.fetch_chapters(&chapter_id).await {
+            Ok(chapters) => metadata.chapters = chapters,
+            Err(e) => tracing::warn!("Failed to fetch chapters for {}: {}", chapter_id, e),
+        }
+
+        Ok(metadata)
+    }
+
+    /// Fetch chapter markers for an ID with retry logic
+    ///
+    /// Audnexus exposes chapters at `GET /books/{asin}/chapters`; the book
+    /// endpoint does not include them. A 404 means the book has no chapter list
+    /// and yields an empty vector rather than an error. Chapters that audnexus
+    /// marks as inaccurate are ignored, matching the previous pipeline.
+    pub async fn fetch_chapters(&self, id: &str) -> Result<Vec<Chapter>, AudibleError> {
         Self::validate_id(id)?;
 
         let retry_strategy =
@@ -161,16 +205,57 @@ impl AudibleClient {
                 let base_url = base_url.clone();
                 let id = id.clone();
 
-                async move { Self::fetch_book_once(&client, &base_url, region, &id).await }
+                async move { Self::fetch_chapters_once(&client, &base_url, region, &id).await }
             },
             Self::is_transient_error,
         )
         .await
     }
 
+    /// Single chapter fetch attempt without retry logic
+    async fn fetch_chapters_once(
+        client: &Client,
+        base_url: &str,
+        region: MetadataRegion,
+        id: &str,
+    ) -> Result<Vec<Chapter>, AudibleError> {
+        let url = Self::chapters_url(base_url, id, region);
+        tracing::debug!("Fetching chapters from: {}", url);
+
+        let response = client.get(&url).send().await?;
+        let status = response.status();
+
+        match status {
+            StatusCode::OK => {
+                let api_response: ApiChapterListResponse = response.json().await?;
+                if api_response.is_accurate == Some(true) {
+                    Ok(api_response.chapters.into_iter().map(Chapter::from).collect())
+                } else {
+                    tracing::warn!(
+                        "Not using chapters for {}: audnexus marks them as not accurate",
+                        id
+                    );
+                    Ok(Vec::new())
+                }
+            }
+            StatusCode::NOT_FOUND => Ok(Vec::new()),
+            StatusCode::TOO_MANY_REQUESTS => Err(AudibleError::RateLimited),
+            StatusCode::REQUEST_TIMEOUT => Err(AudibleError::Timeout),
+            _ => {
+                let message = response.text().await.unwrap_or_default();
+                Err(AudibleError::ApiError { status: status.as_u16(), message })
+            }
+        }
+    }
+
     /// Build the audnexus book URL for the configured region.
     fn book_url(base_url: &str, id: &str, region: MetadataRegion) -> String {
         format!("{}/books/{}?region={}", base_url, id, region)
+    }
+
+    /// Build the audnexus chapters URL for the configured region.
+    fn chapters_url(base_url: &str, id: &str, region: MetadataRegion) -> String {
+        format!("{}/books/{}/chapters?region={}", base_url, id, region)
     }
 
     /// Audnexus reports a wrong-region item as 404 + `REGION_UNAVAILABLE`; surface it
@@ -237,8 +322,6 @@ struct ApiBookResponse {
     genres: Vec<ApiGenre>,
     #[serde(default, rename = "releaseDate")]
     release_date: Option<String>,
-    #[serde(default, rename = "chapterInfo")]
-    chapter_info: Option<ApiChapterInfo>,
     #[serde(default)]
     image: Option<String>,
 }
@@ -250,20 +333,6 @@ impl ApiBookResponse {
             .as_ref()
             .and_then(|date| date.split('-').next())
             .and_then(|year_str| year_str.parse().ok());
-
-        let chapters = self
-            .chapter_info
-            .map(|info| {
-                info.chapters
-                    .into_iter()
-                    .map(|ch| Chapter {
-                        title: ch.title,
-                        start_time: Duration::from_millis(ch.start_offset_ms),
-                        duration: Duration::from_millis(ch.length_ms),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
 
         let series_name =
             self.series_primary.as_ref().map(|s| s.name.clone()).filter(|name| !name.is_empty());
@@ -285,7 +354,7 @@ impl ApiBookResponse {
             genres: self.genres.into_iter().map(|g| g.name).collect(),
             year,
             cover_url: self.image,
-            chapters,
+            chapters: Vec::new(),
         }
     }
 }
@@ -481,8 +550,13 @@ struct ApiGenre {
     name: String,
 }
 
+/// Response body of `GET /books/{asin}/chapters`
 #[derive(Debug, Deserialize)]
-struct ApiChapterInfo {
+struct ApiChapterListResponse {
+    /// Audnexus marks chapter offsets as reliable only when this is `true`.
+    #[serde(default, rename = "isAccurate")]
+    is_accurate: Option<bool>,
+    #[serde(default)]
     chapters: Vec<ApiChapter>,
 }
 
@@ -495,9 +569,21 @@ struct ApiChapter {
     length_ms: u64,
 }
 
+impl From<ApiChapter> for Chapter {
+    fn from(chapter: ApiChapter) -> Self {
+        Chapter {
+            title: chapter.title,
+            start_time: Duration::from_millis(chapter.start_offset_ms),
+            duration: Duration::from_millis(chapter.length_ms),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_validate_id_valid() {
@@ -535,11 +621,6 @@ mod tests {
             "summary": "Test description",
             "genres": [{"name": "Fiction"}],
             "releaseDate": "2023-01-15",
-            "chapterInfo": {
-                "chapters": [
-                    {"title": "Chapter 1", "startOffsetMs": 0, "lengthMs": 360000}
-                ]
-            },
             "image": "https://example.com/cover.jpg"
         }"#;
 
@@ -553,8 +634,8 @@ mod tests {
         let metadata = response.into_book_metadata();
         assert_eq!(metadata.metadata_id, "B08XYZ1234");
         assert_eq!(metadata.year, Some(2023));
-        assert_eq!(metadata.chapters.len(), 1);
-        assert_eq!(metadata.chapters[0].start_time, Duration::from_millis(0));
+        // The book endpoint does not carry chapters; they come from `/chapters`.
+        assert!(metadata.chapters.is_empty());
     }
 
     #[test]
@@ -638,12 +719,6 @@ mod tests {
             "summary": "An audio drama",
             "genres": [{"name": "Mystery, Thriller & Suspense"}, {"name": "Thriller & Suspense"}],
             "releaseDate": "2020-06-23",
-            "chapterInfo": {
-                "chapters": [
-                    {"title": "Chapter 1", "startOffsetMs": 0, "lengthMs": 3600000},
-                    {"title": "Chapter 2", "startOffsetMs": 3600000, "lengthMs": 3700000}
-                ]
-            },
             "image": "https://example.com/cover.jpg"
         }"#;
 
@@ -672,7 +747,7 @@ mod tests {
         assert_eq!(metadata.series_name, Some("Black Book".to_string()));
         assert_eq!(metadata.series_position, Some("2".to_string()));
         assert_eq!(metadata.year, Some(2020));
-        assert_eq!(metadata.chapters.len(), 2);
+        assert!(metadata.chapters.is_empty(), "chapters come from the chapters endpoint");
     }
 
     #[test]
@@ -767,6 +842,25 @@ mod tests {
     }
 
     #[test]
+    fn test_chapters_url_appends_region() {
+        assert_eq!(
+            AudibleClient::chapters_url("https://api.audnex.us", "B00BM5F96W", MetadataRegion::De),
+            "https://api.audnex.us/books/B00BM5F96W/chapters?region=de"
+        );
+        for (region, expected) in [
+            (MetadataRegion::Us, "?region=us"),
+            (MetadataRegion::Jp, "?region=jp"),
+            (MetadataRegion::Uk, "?region=uk"),
+        ] {
+            assert!(
+                AudibleClient::chapters_url("https://api.audnex.us", "B00BM5F96W", region)
+                    .ends_with(expected),
+                "{region} must reach the chapter query parameter"
+            );
+        }
+    }
+
+    #[test]
     fn test_not_found_error_maps_region_unavailable() {
         let body = r#"{"error":{"code":"REGION_UNAVAILABLE","message":"Item not available in region 'us' for ASIN: B00BM5F96W","details":{"asin":"B00BM5F96W","code":"REGION_UNAVAILABLE"}}}"#;
         let err = AudibleClient::not_found_error("B00BM5F96W", MetadataRegion::Jp, body);
@@ -810,5 +904,125 @@ mod tests {
         assert_eq!(MetadataRegion::Jp.to_string(), "jp");
         assert_eq!(MetadataRegion::Us.to_string(), "us");
         assert_eq!(MetadataRegion::Uk.to_string(), "uk");
+    }
+
+    /// Minimal audnexus stand-in.
+    ///
+    /// `/books/{id}` returns a book body without chapters (the real book
+    /// endpoint does not carry them). `/books/{id}/chapters` returns
+    /// `isAccurate` plus two chapters, or 404 when `chapters_status` is 404.
+    /// Every request path is recorded so tests can assert the region query.
+    fn spawn_mock_audnexus(
+        requests: Arc<Mutex<Vec<String>>>,
+        is_accurate: Option<bool>,
+        chapters_status: u16,
+    ) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let read = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+                requests.lock().unwrap().push(path.clone());
+
+                let (status, body) = if path.contains("/chapters") {
+                    if chapters_status == 404 {
+                        (404, r#"{"error":"not found"}"#.to_string())
+                    } else {
+                        let accurate =
+                            is_accurate.map(|value| value.to_string()).unwrap_or("null".into());
+                        (
+                            200,
+                            format!(
+                                r#"{{"asin":"B08XYZ1234","isAccurate":{accurate},"chapters":[{{"title":"Chapter 1","startOffsetMs":0,"lengthMs":3600000}},{{"title":"Chapter 2","startOffsetMs":3600000,"lengthMs":3700000}}]}}"#
+                            ),
+                        )
+                    }
+                } else {
+                    (
+                        200,
+                        r#"{"asin":"B08XYZ1234","title":"Test Book","authors":[{"name":"Test Author"}]}"#
+                            .to_string(),
+                    )
+                };
+
+                let reason = if status == 200 { "OK" } else { "Not Found" };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn test_fetch_book_loads_chapters_from_chapters_endpoint() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let base_url = spawn_mock_audnexus(requests.clone(), Some(true), 200);
+        let client = AudibleClient::with_base_url(base_url).expect("client should build");
+
+        let metadata = client.fetch_book("B08XYZ1234").await.expect("book and chapters");
+
+        assert_eq!(metadata.title, "Test Book");
+        assert_eq!(metadata.authors, vec!["Test Author".to_string()]);
+        assert_eq!(metadata.chapters.len(), 2);
+        assert_eq!(metadata.chapters[1].start_time, Duration::from_millis(3_600_000));
+
+        let paths = requests.lock().unwrap();
+        assert!(
+            paths.iter().any(|path| path == "/books/B08XYZ1234?region=us"),
+            "book request must carry the region: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|path| path == "/books/B08XYZ1234/chapters?region=us"),
+            "chapter request must carry the region: {paths:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inaccurate_chapters_are_ignored() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let base_url = spawn_mock_audnexus(requests, Some(false), 200);
+        let client = AudibleClient::with_base_url(base_url).expect("client should build");
+
+        let metadata = client.fetch_book("B08XYZ1234").await.expect("book metadata");
+
+        assert_eq!(metadata.title, "Test Book");
+        assert!(
+            metadata.chapters.is_empty(),
+            "audnexus-marked-inaccurate chapters must not be used"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_missing_is_accurate_is_ignored() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let base_url = spawn_mock_audnexus(requests, None, 200);
+        let client = AudibleClient::with_base_url(base_url).expect("client should build");
+
+        let metadata = client.fetch_book("B08XYZ1234").await.expect("book metadata");
+
+        assert!(metadata.chapters.is_empty(), "chapters require an explicit isAccurate=true");
+    }
+
+    #[tokio::test]
+    async fn test_chapters_404_keeps_book_metadata() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let base_url = spawn_mock_audnexus(requests, Some(true), 404);
+        let client = AudibleClient::with_base_url(base_url).expect("client should build");
+
+        let metadata = client.fetch_book("B08XYZ1234").await.expect("book metadata survives");
+
+        assert_eq!(metadata.title, "Test Book");
+        assert_eq!(metadata.authors, vec!["Test Author".to_string()]);
+        assert!(metadata.chapters.is_empty(), "404 means the book has no chapter list");
     }
 }
