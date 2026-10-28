@@ -578,9 +578,23 @@ impl Processor {
         let author = metadata.authors.first().map(|s| s.trim()).unwrap_or("Unknown");
         result = result.replace("{author}", author);
 
+        // Replace {authors} with all authors trimmed, whitespace-only filtered, joined by ", "
+        let authors: Vec<&str> =
+            metadata.authors.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let authors_value =
+            if authors.is_empty() { "Unknown".to_string() } else { authors.join(", ") };
+        result = result.replace("{authors}", &authors_value);
+
         // Replace {narrator} with first narrator (trimmed)
         let narrator = metadata.narrators.first().map(|s| s.trim()).unwrap_or("Unknown");
         result = result.replace("{narrator}", narrator);
+
+        // Replace {narrators} with all narrators trimmed, whitespace-only filtered, joined by ", "
+        let narrators: Vec<&str> =
+            metadata.narrators.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let narrators_value =
+            if narrators.is_empty() { "Unknown".to_string() } else { narrators.join(", ") };
+        result = result.replace("{narrators}", &narrators_value);
 
         // Replace {title} (trimmed)
         result = result.replace("{title}", metadata.title.trim());
@@ -727,6 +741,96 @@ mod tests {
 
         assert!(output_path.to_string_lossy().contains("My Audiobook"));
         assert!(output_path.extension().unwrap() == "m4b");
+    }
+
+    #[test]
+    fn test_format_path_authors_narrators_all_values() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let processor = Processor::new(config).unwrap();
+
+        let meta = BookMetadata::new("TESTID1234", "Title", "desc")
+            .add_author(" Alice ")
+            .add_author("Bob")
+            .add_narrator("N1")
+            .add_narrator("N2")
+            .add_narrator("N3");
+
+        assert_eq!(
+            processor.format_path("{authors} - {narrators}", &meta),
+            "Alice, Bob - N1, N2, N3"
+        );
+    }
+
+    #[test]
+    fn test_format_path_authors_narrators_empty_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let processor = Processor::new(config).unwrap();
+
+        let meta = BookMetadata::new("TESTID1234", "Title", "desc");
+
+        assert_eq!(processor.format_path("{authors}/{narrators}", &meta), "Unknown/Unknown");
+    }
+
+    #[test]
+    fn test_format_path_authors_narrators_single_backward_compat() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let processor = Processor::new(config).unwrap();
+
+        let meta = BookMetadata::new("TESTID1234", "Title", "desc")
+            .add_author("Solo")
+            .add_narrator("Narr");
+
+        assert_eq!(
+            processor.format_path("{author}/{narrator}/{authors}/{narrators}", &meta),
+            "Solo/Narr/Solo/Narr"
+        );
+    }
+
+    #[test]
+    fn test_format_path_authors_whitespace_only_filtered() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let processor = Processor::new(config).unwrap();
+
+        let meta =
+            BookMetadata::new("TESTID1234", "Title", "desc").add_author("   ").add_author("Dave");
+
+        assert_eq!(processor.format_path("{authors}", &meta), "Dave");
+    }
+
+    #[test]
+    fn test_determine_output_path_authors_single_segment() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(
+            Some(temp_dir.path().join("output")),
+            Some(temp_dir.path().join("completed")),
+            false,
+            None,
+        );
+        let mut config = config;
+        config.path_format = "{authors}/{title}".to_string();
+        let processor = Processor::new(config).unwrap();
+
+        let audio_file_path = create_test_audio_file(&temp_dir, "chapter1.mp3", b"dummy");
+        let audio_file = AudioFile::new(audio_file_path).unwrap();
+
+        let meta = BookMetadata::new("TESTID1234", "Title", "desc")
+            .add_author("A One")
+            .add_author("B Two");
+
+        let output_path = processor
+            .determine_output_path(std::slice::from_ref(&audio_file), Some(&meta))
+            .unwrap();
+
+        // The joined ", " value must survive sanitize_filename::sanitize as one segment
+        assert_eq!(
+            output_path.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new("A One, B Two"))
+        );
+        assert_eq!(output_path.file_name(), Some(std::ffi::OsStr::new("Title.m4b")));
     }
 
     #[test]
