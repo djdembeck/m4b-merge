@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [Unreleased]
+
+### Changed
+- Release pipeline: versions are prepared on `develop` and promoted to `main` as a frozen tree; the `Release` workflow publishes tested `main` SHAs without source edits, merge-back, or `latest` writes. release-please configuration and manifest removed.
+
 ## [1.0.0](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.0) (2026-07-20)
 
 

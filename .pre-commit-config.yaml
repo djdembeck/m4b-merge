@@ -3,6 +3,20 @@
 repos:
   - repo: local
     hooks:
+      - id: release-helper-tests
+        name: release helper behavior tests
+        entry: python3 -m unittest discover -s scripts -p 'test_release.py'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: publisher-helper-tests
+        name: publisher reconciliation behavior tests
+        entry: python3 -m unittest discover -s scripts -p 'test_publish_release.py'
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: cargo-fmt
         name: cargo fmt
         entry: cargo fmt --check
@@ -19,7 +33,7 @@ repos:
 
       - id: cargo-check
         name: cargo check
-        entry: cargo check --all-features
+        entry: cargo check --locked --all-features
         language: system
         types: [rust]
         pass_filenames: false
@@ -27,7 +41,7 @@ repos:
       - id: cargo-test
         # requires ffmpeg installed locally — mirrors ci.yml test job
         name: cargo test
-        entry: cargo test --all-features
+        entry: cargo test --all-features --locked
         language: system
         pass_filenames: false
         always_run: true
