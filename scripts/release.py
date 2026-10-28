@@ -388,7 +388,11 @@ class Repository:
             # Re-read immediately before reporting, so a superseded event cannot claim green.
             self.validate_pull(pull, self.api(f"repos/{repository}/pulls/{number}"), repository)
             require(self.live_ref("main") == base, "main advanced during policy verification")
-            require(self.ancestor(source, self.live_ref("develop")), "Source no longer belongs to develop")
+            closing_develop = self.live_ref("develop")
+            # develop may have advanced since the verification fetch; make
+            # the exact closing SHA locally present so ancestor can verify it.
+            self.git("fetch", "--no-tags", "origin", closing_develop)
+            require(self.ancestor(source, closing_develop), "Source no longer belongs to develop")
         except (ReleaseError, OSError, KeyError, TypeError, ValueError) as error:
             failure = str(error)
         if report_status:

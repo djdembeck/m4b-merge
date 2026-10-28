@@ -296,13 +296,19 @@ jobs:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
           # TAGS holds full image refs (ghcr.io/.../m4b-merge:<tag>). Pass each
-          # directly as the manifest target and derive the per-arch sources by
-          # appending the -amd64/-arm64 suffixes (per-arch jobs use the matching
-          # flavor suffix); explicit raw latest receives the same suffix.
+          # directly as the manifest target, but source every manifest from
+          # this run's immutable SHA-specific images. The arch jobs emit their
+          # SHA tag via metadata-action type=sha with no `prefix`/`format` override,
+          # i.e. its documented defaults: prefix "sha-", format "short" (the
+          # first 7 chars of GITHUB_SHA), plus the per-arch flavor suffix
+          # (-amd64/-arm64). main and latest resolve as shared mutable per-arch
+          # tags; pinning to this run's SHA keeps overlapping main pushes from
+          # mixing commits inside one manifest.
+          sha_tag="sha-${GITHUB_SHA::7}"
           echo "$TAGS" | while IFS= read -r ref; do
             [ -z "$ref" ] && continue
             [[ "$ref" != *:* ]] && continue
             docker buildx imagetools create -t "$ref" \
-              "$ref-amd64" \
-              "$ref-arm64"
+              "$IMAGE:$sha_tag-amd64" \
+              "$IMAGE:$sha_tag-arm64"
           done

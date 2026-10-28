@@ -572,6 +572,32 @@ class ReleaseBehavior(unittest.TestCase):
         self.assertEqual(result["source"], candidate["source"])
         self.assertEqual(self.repo.statuses[-1][1]["state"], "success")
 
+    def test_policy_tolerates_develop_advancing_in_closing_guard(self):
+        # Gap: develop advances between the closing guard's live develop
+        # read and its ancestry check, with a genuinely new remote commit
+        # the fixture has not fetched. The exact closing SHA must be
+        # fetched locally so the guard verifies ancestry instead of
+        # failing on an unfetched commit ID.
+        self.land_preparation()
+        candidate = self.repo.candidate()
+        event = self.event_for(candidate)
+        reads = {"main": 0, "develop": 0}
+        live_ref = self.repo.live_ref
+
+        def guarded_live_ref(branch, live_ref=live_ref):
+            count = reads.get(branch, 0)
+            reads[branch] = count + 1
+            # The first live develop read succeeds; the second (closing)
+            # read arms the advance so the guard observes the new tip.
+            if count == 1 and branch == "develop":
+                self.advance_remote("develop", "fix: concurrent work", "close")
+            return live_ref(branch)
+
+        self.repo.live_ref = guarded_live_ref
+        result = self.repo.policy(event, report_status=True)
+        self.assertEqual(result["source"], candidate["source"])
+        self.assertEqual(self.repo.statuses[-1][1]["state"], "success")
+
     def test_policy_never_executes_head_owned_helper(self):
         scripts = self.checkout / "scripts"
         scripts.mkdir()
