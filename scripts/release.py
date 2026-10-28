@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -25,6 +26,9 @@ VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 OID = re.compile(r"[0-9a-f]{40}\Z")
 REPOSITORY = re.compile(r"(?:git@github\.com:|https://github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?\Z")
 
+# GitHub commit-status description character cap.
+STATUS_DESCRIPTION_LIMIT = 140
+
 
 def semver(value):
     match = VERSION.fullmatch(value)
@@ -38,13 +42,29 @@ def require(condition, message):
         raise ReleaseError(message)
 
 
+# Git-targeting variables (GIT_DIR, GIT_CONFIG_*, GIT_SSH_COMMAND, ...)
+# inherited from the operator shell would silently retarget every command,
+# including force-with-lease pushes, at another repository. Strip the whole
+# GIT_ prefix: a name list can never cover git's environment surface, and
+# none of our commands need a GIT_ variable — the repository is always
+# resolved from the working directory.
+def isolated_git_environment():
+    return {key: value for key, value in os.environ.items()
+            if not key.startswith("GIT_")}
+
+
 class Repository:
     def __init__(self, root="."):
         self.root = Path(root).resolve()
 
+    @staticmethod
+    def proc(args, cwd):
+        """Single subprocess choke point; every command runs without GIT_ env."""
+        return subprocess.run(args, cwd=cwd, env=isolated_git_environment(), text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
     def run(self, *args, cwd=None, ok=(0,)):
-        result = subprocess.run(args, cwd=cwd or self.root, text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = self.proc(args, cwd or self.root)
         if result.returncode not in ok:
             raise ReleaseError(f"{' '.join(args)}: {result.stderr.strip() or result.stdout.strip()}")
         return result.stdout.strip()
@@ -84,8 +104,7 @@ class Repository:
         return value
 
     def ancestor(self, older, newer):
-        result = subprocess.run(["git", "merge-base", "--is-ancestor", older, newer],
-                                cwd=self.root, capture_output=True, text=True)
+        result = self.proc(["git", "merge-base", "--is-ancestor", older, newer], self.root)
         require(result.returncode in (0, 1), result.stderr.strip() or "Cannot inspect ancestry")
         return result.returncode == 0
 
@@ -129,8 +148,7 @@ class Repository:
 
     def tag_target(self, tag):
         ref = f"refs/m4b-release/tags/{tag}"
-        result = subprocess.run(["git", "show-ref", "--verify", "--quiet", ref],
-                                cwd=self.root, capture_output=True)
+        result = self.proc(["git", "show-ref", "--verify", "--quiet", ref], self.root)
         require(result.returncode in (0, 1), "Cannot inspect release tag")
         return self.oid(ref) if result.returncode == 0 else None
 
@@ -169,9 +187,9 @@ class Repository:
         return value
 
     def unchanged(self, base, source):
-        require(self.live_ref("main") == base, "main advanced; regenerate candidate")
+        require(self.live_ref("main") == base, "main advanced; retry")
         live_develop = self.live_ref("develop")
-        require(live_develop == source, "develop advanced while constructing candidate; retry")
+        require(live_develop == source, "develop advanced; retry")
 
     @contextmanager
     def worktree(self, ref):
@@ -361,6 +379,9 @@ class Repository:
             base = pull["base"]["sha"]
             require(self.live_ref("main") == base, "Event base is not current main")
             develop = self.live_ref("develop")
+            # develop may have advanced between fetch and this API read; make
+            # the live SHA locally present so exact_oid/ancestor can verify it.
+            self.git("fetch", "--no-tags", "origin", develop)
             version, source = self.verify(head, base, develop)
             expected_branch = f"release/v{version}-{source[:12]}-{base[:12]}"
             require(pull["head"]["ref"] == expected_branch, "Unexpected promotion branch name")
@@ -373,7 +394,8 @@ class Repository:
         if report_status:
             self.api(f"repos/{repository}/statuses/{head}", "POST", {
                 "state": "failure" if failure else "success", "context": "Release policy",
-                "description": (failure or "Frozen promotion matches current main and prepared develop")[:140],
+                "description": (failure or "Frozen promotion matches current main and prepared "
+                                       "develop")[:STATUS_DESCRIPTION_LIMIT],
             })
         if failure:
             raise ReleaseError(failure)

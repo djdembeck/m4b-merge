@@ -57,10 +57,13 @@ jobs:
       - run: cargo clippy --all-features -- -D warnings
 
   # Advisory-only: visible vulnerability audit. Deliberately outside the
-  # required chain so a new advisory cannot force a breaking release;
-  # findings are reviewed manually.
+  # required chain so a new advisory cannot force a breaking release.
+  # continue-on-error suppresses RUN-gating only: the check-run conclusion
+  # stays failure for review, and this holds only while the job is not
+  # added to any required-check list. Findings are reviewed manually.
   audit-advisory:
     needs: [lint-format]
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

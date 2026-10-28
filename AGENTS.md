@@ -43,7 +43,9 @@ Every change must improve the codebase. Never introduce regressions, technical d
 
 ### Test Requirements
 
-Target 100% coverage; 80%+ for I/O.
+Target 100% coverage on critical paths; 80%+ for I/O. Coverage is a review
+target, not a CI gate — no coverage job runs in CI, so these targets are
+enforced in code review.
 
 ---
 
@@ -79,7 +81,8 @@ Use `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`, `ci`, or `revert
 3. **Tests** — All tests passing, coverage maintained
 4. **Linting** — No warnings, no errors
 5. **Reviews** — At least 1 approval required
-6. **CI Green** — All checks must pass
+6. **CI Green** — All required checks must pass. The advisory `audit-advisory`
+   job (`continue-on-error`) reports its own failure without gating the run.
 
 #### PR Templates
 
@@ -100,9 +103,6 @@ Pull request templates belong in `.github/PULL_REQUEST_TEMPLATE.md`.
 3. **Test** — `cargo test --all-features --locked`
 4. **Docker** — amd64 build on PRs; arm64 builds and the multi-arch
    manifest run on main pushes only and are not PR-required checks
-
-The existing coverage requirement remains ≥90% with no new uncovered lines;
-this release cutover does not add or remove a coverage job.
 
 `cargo audit --deny warnings` runs in CI as a **visible advisory** job
 (`audit-advisory`), deliberately outside the required chain — a new

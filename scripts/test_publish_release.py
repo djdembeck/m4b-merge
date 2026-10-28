@@ -151,9 +151,6 @@ sys.exit(response.get('code', 0))
         self.assertFalse(any("create" in cmd for cmd in self.called()))
 
     def prepare_assets(self):
-        self.args.repo = "owner/repo"
-        self.args.tag = VERSION
-        self.args.artifacts = str(self.root / "artifacts")
         self.asset_list = []
         for number, name in enumerate(("m4b-merge-linux", "m4b-merge-macos", "m4b-merge-windows.exe")):
             path = Path(self.args.artifacts) / name / name
@@ -251,6 +248,40 @@ sys.exit(response.get('code', 0))
         with self.assertRaisesRegex(ValueError, "differs"):
             publisher.assets(self.args)
         self.assertFalse(any("upload" in cmd for cmd in self.called()))
+
+    def test_main_dispatches_stage_and_manifest_by_canonical_flags(self):
+        import sys
+        dispatched = []
+
+        def stage(args):
+            dispatched.append(("stage", args))
+
+        def manifest(args):
+            dispatched.append(("manifest", args))
+
+        with patch.object(publisher, "stage", stage), \
+                patch.object(publisher, "manifest", manifest):
+            with patch.object(sys, "argv", ["publish_release.py", "stage",
+                                            "--image", IMAGE, "--sha", SHA, "--version", VERSION,
+                                            "--arch", "amd64"]):
+                publisher.main()
+            with patch.object(sys, "argv", ["publish_release.py", "manifest",
+                                            "--image", IMAGE, "--sha", SHA, "--version", VERSION,
+                                            "--amd64", AMD, "--arm64", ARM]):
+                publisher.main()
+        self.assertEqual([name for name, _ in dispatched], ["stage", "manifest"])
+        staged = dispatched[0][1]
+        self.assertEqual(staged.image, IMAGE)
+        self.assertEqual(staged.sha, SHA)
+        self.assertEqual(staged.version, VERSION)
+        self.assertEqual(staged.arch, "amd64")
+        self.assertFalse(staged.required)
+        manifested = dispatched[1][1]
+        self.assertEqual(manifested.image, IMAGE)
+        self.assertEqual(manifested.sha, SHA)
+        self.assertEqual(manifested.version, VERSION)
+        self.assertEqual(manifested.amd64, AMD)
+        self.assertEqual(manifested.arm64, ARM)
 
 
 if __name__ == "__main__":

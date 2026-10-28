@@ -57,6 +57,19 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # Manual dispatch exists only to resume an interrupted publication from
+  # main. From any other ref every real job would skip and the run would
+  # end green — fail loudly so a wrong-ref dispatch can never look like a
+  # completed retry.
+  ref-guard:
+    if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse non-main dispatch
+        run: |
+          echo "::error::The Release workflow must run from main"
+          exit 1
+
   # ─────────────────────────────────────────────────────────────────
   # Validate the promoted SHA. All version knowledge comes from the
   # frozen source manifests; the helper prints the bare vX.Y.Z.
@@ -189,6 +202,8 @@ jobs:
     outputs:
       digest: ${{ steps.capture.outputs.digest }}
     env:
+      # Job-level env cannot read the workflow env context; build the
+      # reference from github.repository (identical value to the workflow env).
       IMAGE: ghcr.io/${{ github.repository }}
       VERSION: ${{ needs.check.outputs.version }}
       SHA: ${{ github.sha }}
@@ -239,6 +254,8 @@ jobs:
     outputs:
       digest: ${{ steps.capture.outputs.digest }}
     env:
+      # Job-level env cannot read the workflow env context; build the
+      # reference from github.repository (identical value to the workflow env).
       IMAGE: ghcr.io/${{ github.repository }}
       VERSION: ${{ needs.check.outputs.version }}
       SHA: ${{ github.sha }}
@@ -349,7 +366,7 @@ jobs:
 
       - name: Assemble multi-arch manifest (validate before reuse)
         env:
-          IMAGE: ghcr.io/${{ github.repository }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           VERSION: ${{ needs.check.outputs.version }}
           SHA: ${{ github.sha }}
           AMD64: ${{ needs.docker-amd64.outputs.digest }}

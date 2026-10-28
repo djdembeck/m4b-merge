@@ -172,6 +172,39 @@ class ReleaseBehavior(unittest.TestCase):
         self.git("push", "origin", "develop")
         return sha
 
+    def advance_remote(self, branch, message, content):
+        # Advance a remote branch from a scratch clone, so the new tip is an
+        # object the fixture checkout has not fetched.
+        scratch = Path(self.temp.name) / f"scratch-{branch}"
+        self.command(self.checkout, "git", "clone", str(self.remote), str(scratch))
+        self.command(scratch, "git", "checkout", "-q", "-B", branch,
+                     self.repo.remote_git("rev-parse", f"refs/heads/{branch}"))
+        self.command(scratch, "git", "config", "user.name", "Remote Test")
+        self.command(scratch, "git", "config", "user.email", "late@example.invalid")
+        (scratch / "late.txt").write_text(content + "\n")
+        self.command(scratch, "git", "add", "late.txt")
+        self.command(scratch, "git", "commit", "-q", "-m", message)
+        self.command(scratch, "git", "push", "origin", f"HEAD:refs/heads/{branch}")
+        return self.repo.remote_git("rev-parse", f"refs/heads/{branch}")
+
+    def push_commit_to(self, branch, message, content, suffix=""):
+        # Advance a remote branch from a scratch clone, so the new tip is an
+        # object the fixture checkout has not fetched.
+        sequence = getattr(self, "_scratch_seq", 0) + 1
+        self._scratch_seq = sequence
+        scratch = Path(self.temp.name) / (f"scratch-{sequence}-"
+            f"{branch.replace('/', '_')}" + (f"-{suffix}" if suffix else ""))
+        self.command(self.checkout.parent, "git", "clone", "-q", str(self.remote), str(scratch))
+        self.command(scratch, "git", "checkout", "-q", "-B", branch,
+                     self.repo.remote_git("rev-parse", f"refs/heads/{branch}"))
+        self.command(scratch, "git", "config", "user.name", "Remote Test")
+        self.command(scratch, "git", "config", "user.email", "late@example.invalid")
+        (scratch / "late.txt").write_text(content + "\n")
+        self.command(scratch, "git", "add", "late.txt")
+        self.command(scratch, "git", "commit", "-q", "-m", message)
+        self.command(scratch, "git", "push", "origin", f"HEAD:refs/heads/{branch}")
+        return self.repo.remote_git("rev-parse", f"refs/heads/{branch}")
+
     def land_preparation(self, **kwargs):
         result = self.repo.prepare(**kwargs)
         self.git("merge", "--ff-only", result["head"])
@@ -301,6 +334,81 @@ class ReleaseBehavior(unittest.TestCase):
         event = self.event_for(candidate)
         self.repo.policy(event, report_status=True)
         self.assertEqual(self.repo.statuses[-1][1]["state"], "success")
+
+    def test_inherited_git_environment_cannot_retarget_commands(self):
+        foreign = Path(self.temp.name) / "foreign"
+        self.command(foreign.parent, "git", "init", str(foreign))
+        self.command(foreign, "git", "config", "user.name", "Release Test")
+        self.command(foreign, "git", "config", "user.email", "test@example.invalid")
+        (foreign / "foreign.txt").write_text("must stay untouched\n")
+        self.command(foreign, "git", "add", "foreign.txt")
+        self.command(foreign, "git", "commit", "-q", "-m", "foreign")
+        foreign_head = self.command(foreign, "git", "rev-parse", "HEAD")
+
+        def assert_clean_results():
+            self.assertEqual(self.repo.oid("main"), self.initial_main)
+            self.assertTrue(self.repo.ancestor(self.initial_main, self.repo.remote_git("rev-parse", "refs/heads/develop")))
+            self.assertEqual(self.repo.remote_git("rev-parse", "main"), self.initial_main)
+            self.assertIsNotNone(self.repo.tag_target("v1.0.1"))
+            self.assertEqual(self.repo.prepare(dry_run=True)["version"], "v1.1.0")
+
+        with patch.dict(os.environ, {"GIT_DIR": str(foreign / ".git"),
+                                     "GIT_WORK_TREE": str(foreign)}, clear=False):
+            assert_clean_results()
+        # The foreign target is a bare repo; assert its ref set through
+        # --git-dir for-each-ref so a retargeted ref push is visible (a
+        # non-bare rev-parse HEAD cannot detect one).
+        foreign_bare = Path(self.temp.name) / "foreign-bare.git"
+        self.command(foreign.parent, "git", "clone", "--bare", "-q", str(foreign), str(foreign_bare))
+
+        def foreign_refs():
+            return self.command(foreign_bare, "git", "--git-dir", str(foreign_bare), "for-each-ref")
+
+        def assert_exercised_operations_leave_foreign_untouched():
+            before = foreign_refs()
+            self.assertEqual(self.repo.oid("main"), self.initial_main)
+            self.assertTrue(self.repo.ancestor(self.initial_main,
+                                               self.repo.remote_git("rev-parse", "refs/heads/develop")))
+            self.assertEqual(self.repo.remote_git("rev-parse", "main"), self.initial_main)
+            self.assertIsNotNone(self.repo.tag_target("v1.0.1"))
+            self.assertEqual(self.repo.prepare(dry_run=True)["version"], "v1.1.0")
+            self.assertEqual(foreign_refs(), before)
+
+        # url.insteadOf rewrites the fixture remote URL for every command that
+        # resolves it: oid, ancestor, tag_target and prepare all exercise it.
+        with patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1",
+                                     "GIT_CONFIG_KEY_0": f"url.{foreign_bare}.insteadOf",
+                                     "GIT_CONFIG_VALUE_0": str(self.remote)}, clear=False):
+            assert_exercised_operations_leave_foreign_untouched()
+        self.assertEqual(self.command(foreign, "git", "rev-parse", "HEAD"), foreign_head)
+
+    def test_isolated_git_environment_keeps_transport_ambient_variables(self):
+        # Ambient transport variables (GH_TOKEN, HOME, PATH) must survive
+        # isolation while GIT_* does not, and no non-GIT_ variable may be
+        # dropped: isolating to a subset of the ambient environment would
+        # silently strip variables other release machinery depends on.
+        with patch.dict(os.environ, {"GH_TOKEN": "ci-token", "HOME": "/home/ci",
+                                     "PATH": "/usr/bin", "GIT_DIR": "/dev/null",
+                                     "GIT_CONFIG_COUNT": "1",
+                                     "GIT_CONFIG_KEY_0": "core.bare",
+                                     "GIT_CONFIG_VALUE_0": "true"}, clear=True):
+            expected = {key: value for key, value in os.environ.items()
+                        if not key.startswith("GIT_")}
+            self.assertEqual(release.isolated_git_environment(), expected)
+            self.assertEqual(release.isolated_git_environment()["GH_TOKEN"], "ci-token")
+            self.assertEqual(release.isolated_git_environment()["HOME"], "/home/ci")
+            self.assertEqual(release.isolated_git_environment()["PATH"], "/usr/bin")
+        # A hostile inherited GIT_DIR (the bare remote) must not retarget the
+        # repository's git commands, and the in-process API transport must
+        # still succeed.
+        with patch.dict(os.environ, {"GIT_DIR": str(self.remote),
+                                     "GIT_CONFIG_COUNT": "1",
+                                     "GIT_CONFIG_KEY_0": "core.bare",
+                                     "GIT_CONFIG_VALUE_0": "true"}, clear=False):
+            self.assertEqual(self.repo.git("rev-parse", "--is-bare-repository"), "false")
+            self.assertEqual(self.repo.live_ref("main"), self.initial_main)
+            self.assertEqual(self.repo.live_ref("develop"),
+                             self.repo.remote_git("rev-parse", "refs/heads/develop"))
 
     def test_stale_main_and_unforwarded_hotfix_fail_closed(self):
         self.land_preparation()
@@ -442,6 +550,28 @@ class ReleaseBehavior(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "already has a tag"):
             self.repo.prepare(dry_run=True)
 
+    def test_policy_tolerates_develop_advancing_after_fetch(self):
+        # Gap: develop advances between the full fetch inside policy() and
+        # the live develop API read. The new tip is a remote object the
+        # fixture has not fetched; the exact live SHA must be fetched
+        # locally so exact_oid and the ancestry check can run.
+        self.land_preparation()
+        candidate = self.repo.candidate()
+        event = self.event_for(candidate)
+        advanced = set()
+        live_ref = self.repo.live_ref
+
+        def develop_then_advance(branch):
+            if branch == "develop" and "develop" not in advanced:
+                advanced.add("develop")
+                self.advance_remote("develop", "fix: concurrent work", "late")
+            return live_ref(branch)
+
+        self.repo.live_ref = develop_then_advance
+        result = self.repo.policy(event, report_status=True)
+        self.assertEqual(result["source"], candidate["source"])
+        self.assertEqual(self.repo.statuses[-1][1]["state"], "success")
+
     def test_policy_never_executes_head_owned_helper(self):
         scripts = self.checkout / "scripts"
         scripts.mkdir()
@@ -487,6 +617,258 @@ class ReleaseBehavior(unittest.TestCase):
         with patch.object(release, "Repository", return_value=self.repo), contextlib.redirect_stdout(output):
             self.assertEqual(release.main(["version", "--ref", source]), 0)
         self.assertEqual(output.getvalue(), "v1.0.1\n")
+
+    def remote_refset(self):
+        return {ref: oid for oid, ref in
+                (line.split() for line in self.repo.remote_git("show-ref").splitlines())}
+
+    def fixture_refset(self):
+        return {ref: oid for oid, ref, _ in
+                (line.split() for line in self.git("for-each-ref").splitlines())}
+
+    def test_unchanged_abort_arms_publish_nothing_when_remote_advances(self):
+        # Live main/develop advancing between the fetched base and the push
+        # must abort the operation before any ref is published or PR created.
+        self.land_preparation()
+        for name, operation, target, message in (
+                ("candidate:main", self.repo.candidate, "main", "main advanced; retry"),
+                ("prepare:main", self.repo.prepare, "main", "main advanced; retry"),
+                ("prepare:develop", self.repo.prepare, "develop", "develop advanced; retry")):
+            with self.subTest(arm=name):
+                before = self.remote_refset()
+                pulls = len(self.repo.pulls)
+                live_ref = self.repo.live_ref
+
+                def advancing_live_ref(branch, live_ref=live_ref):
+                    # Advance on the first live read of the target branch: the
+                    # remote ref moves from a scratch clone, out of process,
+                    # before the owned push can run.
+                    value = live_ref(branch)
+                    if branch == target:
+                        value = self.push_commit_to(target, "fix: inter-process advance",
+                                                    f"gate-{name}")
+                    return value
+
+                self.repo.live_ref = advancing_live_ref
+                try:
+                    with self.assertRaisesRegex(release.ReleaseError, message):
+                        operation()
+                finally:
+                    self.repo.live_ref = live_ref
+                after = self.remote_refset()
+                # The arm tip moved (the race is real, out-of-process) but no
+                # owned ref was ever published: the ref set is unchanged and
+                # every other ref kept its exact value.
+                self.assertEqual(set(after), set(before))
+                moved = f"refs/heads/{target}"
+                for ref, oid in before.items():
+                    if ref != moved:
+                        self.assertEqual(after[ref], oid)
+                self.assertNotEqual(after[moved], before[moved])
+
+    def test_create_only_push_refuses_branch_created_between_check_and_push(self):
+        self.land_preparation()
+        source = self.git("rev-parse", "develop")
+        branch = f"release/v1.1.0-{source[:12]}-{self.initial_main[:12]}"
+        fixture = self.fixture_refset()
+        # The raced ref must point at a genuinely foreign value: a create-only
+        # push racing the empty-expectation lease with its own target value
+        # would be a no-op and never raise.
+        raced = source
+        pulls = len(self.repo.pulls)
+        real_run = self.repo.run
+
+        def racing_run(*args, **kwargs):
+            if args[:2] == ("git", "push") and any(
+                    a.endswith(f":refs/heads/{branch}") for a in args):
+                # The ref was absent at the remote_branch() check; a concurrent
+                # operator creates it at a new main tip before the create-only
+                # push reaches git.
+                self.repo.remote_git("update-ref", f"refs/heads/{branch}", raced)
+            return real_run(*args, **kwargs)
+
+        self.repo.run = racing_run
+        try:
+            with self.assertRaisesRegex(release.ReleaseError, "stale info"):
+                self.repo.candidate()
+        finally:
+            self.repo.run = real_run
+        self.assertEqual(self.remote_refset()[f"refs/heads/{branch}"], raced)
+        self.assertEqual(self.fixture_refset(), fixture)
+        self.assertEqual(len(self.repo.pulls), pulls)
+
+    def test_prepare_is_idempotent_when_develop_already_prepared(self):
+        self.land_preparation()
+        refs = self.remote_refset()
+        working_head = self.git("rev-parse", "HEAD")
+        result = self.repo.prepare(version="1.1.0")
+        self.assertEqual(result["message"], "develop already contains the prepared version")
+        self.assertEqual(result["version"], "v1.1.0")
+        self.assertEqual(result["head"], self.git("rev-parse", "develop"))
+        self.assertIsNone(result["branch"])
+        self.assertIsNone(result["pull_request"])
+        self.assertIsNone(result["pending_pr"])
+        self.assertEqual(self.remote_refset(), refs)
+        # No open PR may be created: the landed preparation's PR stays closed.
+        self.assertEqual([p["state"] for p in self.repo.pulls], ["closed"])
+        self.assertEqual(self.git("rev-parse", "HEAD"), working_head)
+
+    def test_policy_repository_gate_fails_before_any_api_request(self):
+        self.land_preparation()
+        candidate = self.repo.candidate()
+        event = self.event_for(candidate)
+        event["repository"]["full_name"] = "outsider/fork"
+        calls = []
+        real_api = self.repo.api
+
+        def recording_api(endpoint, method="GET", fields=None):
+            calls.append((endpoint, method))
+            return real_api(endpoint, method, fields)
+
+        self.repo.api = recording_api
+        try:
+            with self.assertRaisesRegex(release.ReleaseError, "Event repository does not match origin"):
+                self.repo.policy(event, report_status=True)
+        finally:
+            self.repo.api = real_api
+        self.assertEqual(calls, [])
+        self.assertEqual(self.repo.statuses, [])
+
+    def test_policy_closing_guards_race_live_main_and_develop(self):
+        self.land_preparation()
+        candidate = self.repo.candidate()
+        event = self.event_for(candidate)
+        cases = [
+            (None, None, "success"),
+            ("main-advanced", "main advanced during policy verification", "failure"),
+            ("develop-rebased", "Source no longer belongs to develop", "failure"),
+        ]
+        for mode, expected, state in cases:
+            with self.subTest(arm=mode or "success"):
+                reads = {"main": 0, "develop": 0}
+                target = {"main-advanced": "main", "develop-rebased": "develop"}.get(mode)
+                live_ref = self.repo.live_ref
+
+                def guarded_live_ref(branch, live_ref=live_ref):
+                    count = reads.get(branch, 0)
+                    reads[branch] = count + 1
+                    # The first live read of the target branch succeeds; the
+                    # second read races it out of process so the closing
+                    # guard observes the new value.
+                    if count >= 1 and target and branch == target:
+                        if target == "main":
+                            self.push_commit_to("main", "fix: inter-process promotion",
+                                                "policy-main-race")
+                        else:
+                            self.repo.remote_git("update-ref", "refs/heads/develop",
+                                                 self.initial_main)
+                    return live_ref(branch)
+
+                pristine_main = self.repo.remote_git("rev-parse", "refs/heads/main")
+                pristine_develop = self.repo.remote_git("rev-parse", "refs/heads/develop")
+                self.repo.live_ref = guarded_live_ref
+                try:
+                    if expected is None:
+                        result = self.repo.policy(event, report_status=True)
+                        self.assertEqual(result["source"], candidate["source"])
+                    else:
+                        with self.assertRaisesRegex(release.ReleaseError, expected):
+                            self.repo.policy(event, report_status=True)
+                finally:
+                    self.repo.live_ref = live_ref
+                self.assertEqual(self.repo.statuses[-1][1]["state"], state)
+                self.repo.remote_git("update-ref", "refs/heads/main", pristine_main)
+                self.repo.remote_git("update-ref", "refs/heads/develop", pristine_develop)
+
+    def test_ensure_pr_fails_closed_on_head_move_duplicate_and_mismatch(self):
+        self.land_preparation()
+        candidate = self.repo.candidate()
+        branch, head = candidate["branch"], candidate["head"]
+        archive = copy.deepcopy(self.repo.pulls)
+        repository = self.repo.repository()
+
+        def open_pull(number, sha):
+            return {"number": number, "state": "open",
+                    "html_url": f"https://github.com/{repository}/pull/{number}",
+                    "head": {"ref": branch, "sha": sha, "repo": {"full_name": repository}},
+                    "base": {"ref": "main", "sha": candidate["base"],
+                             "repo": {"full_name": repository}}}
+
+        mismatch = open_pull(2, head)
+        mismatch["head"]["sha"] = self.initial_main
+        cases = [
+            ("head-moved", self.initial_main, [],
+             "Release branch changed before PR creation"),
+            ("duplicate", head, [open_pull(1, head), open_pull(2, head)],
+             "More than one open release PR exists"),
+            ("mismatch", head, [mismatch],
+             "Existing PR does not match release branch and head"),
+        ]
+        try:
+            for name, remote_head, pulls, message in cases:
+                with self.subTest(arm=name):
+                    # Re-anchor the remote branch on the expected head so the
+                    # ls-remote gate is the only thing each arm exercises.
+                    self.repo.remote_git("update-ref", f"refs/heads/{branch}", remote_head)
+                    self.repo.pulls = copy.deepcopy(pulls)
+                    with self.assertRaisesRegex(release.ReleaseError, message):
+                        self.repo.ensure_pr(branch, "main", head,
+                                             "chore(release): v1.1.0", "body")
+        finally:
+            self.repo.remote_git("update-ref", f"refs/heads/{branch}", head)
+            self.repo.pulls = archive
+
+    def test_policy_failure_status_description_is_truncated_to_the_github_cap(self):
+        self.land_preparation()
+        candidate = self.repo.candidate()
+        event = self.event_for(candidate)
+        long_failure = "policy verification: " + "x" * (500 - len("policy verification: "))
+        real_verify = self.repo.verify
+
+        def failing_verify(*args, **kwargs):
+            raise release.ReleaseError(long_failure)
+
+        self.repo.verify = failing_verify
+        try:
+            with self.assertRaisesRegex(release.ReleaseError, r"policy verification: x+"):
+                self.repo.policy(event, report_status=True)
+        finally:
+            self.repo.verify = real_verify
+        field = self.repo.statuses[-1][1]
+        self.assertEqual(self.repo.statuses[-1][0], candidate["head"])
+        self.assertEqual(field["state"], "failure")
+        self.assertEqual(field["context"], "Release policy")
+        self.assertLessEqual(len(field["description"]), release.STATUS_DESCRIPTION_LIMIT)
+        self.assertEqual(field["description"], long_failure[:release.STATUS_DESCRIPTION_LIMIT])
+
+    def test_main_dispatches_policy_check_publication_and_tag(self):
+        self.land_preparation()
+        candidate = self.repo.candidate()
+        event = self.event_for(candidate)
+        event_path = Path(self.temp.name) / "event.json"
+        event_path.write_text(json.dumps(event))
+
+        def dispatch(argv):
+            output = io.StringIO()
+            with patch.object(release, "Repository", return_value=self.repo), \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(release.main(argv), 0)
+            return output.getvalue()
+
+        # The policy arm needs the promotion PR open, so it runs before the
+        # candidate lands and closes it; check-publication/tag need the
+        # landed main.
+        with self.subTest(argv="policy"):
+            self.assertEqual(
+                json.loads(dispatch(
+                    ["policy", "--event", str(event_path), "--report-status"]))["version"],
+                candidate["version"])
+        final = self.land_candidate(candidate)
+        for argv, expect in (
+                (["check-publication", "--sha", final], "v1.1.0\n"),
+                (["tag", "--sha", final], "v1.1.0\n")):
+            with self.subTest(argv=argv[0]):
+                self.assertEqual(dispatch(argv), expect)
 
 
 if __name__ == "__main__":

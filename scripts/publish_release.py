@@ -106,6 +106,18 @@ def parse_asset_label(label):
     return match.groups()
 
 
+def asset_digest(asset, repo):
+    """Use the API-provided digest; hash the downloaded bytes for older
+    assets that predate GitHub's digest field."""
+    actual = asset.get("digest")
+    if actual is None:
+        data = run("gh", "api", "--hostname", "github.com", "-H",
+                   "Accept: application/octet-stream",
+                   f"repos/{repo}/releases/assets/{asset['id']}")
+        actual = "sha256:" + hashlib.sha256(data).hexdigest()
+    return actual
+
+
 def assets(args):
     if not re.fullmatch(r"[0-9a-f]{40}", args.sha):
         raise ValueError(f"Invalid source SHA: {args.sha!r}")
@@ -136,21 +148,11 @@ def assets(args):
             bound_sha, bound_tag, bound_digest = parse_asset_label(label)
             if bound_sha != args.sha or bound_tag != args.tag:
                 raise ValueError(f"Existing asset provenance differs from this publication: {name}")
-            actual = asset.get("digest")
-            if actual is None:
-                data = run("gh", "api", "--hostname", "github.com", "-H",
-                           "Accept: application/octet-stream",
-                           f"repos/{args.repo}/releases/assets/{asset['id']}")
-                actual = "sha256:" + hashlib.sha256(data).hexdigest()
+            actual = asset_digest(asset, args.repo)
             if actual != "sha256:" + bound_digest:
                 raise ValueError(f"Existing asset digest differs from provenance label: {name}")
             continue
-        actual = asset.get("digest")
-        if actual is None:
-            data = run("gh", "api", "--hostname", "github.com", "-H",
-                       "Accept: application/octet-stream",
-                       f"repos/{args.repo}/releases/assets/{asset['id']}")
-            actual = "sha256:" + hashlib.sha256(data).hexdigest()
+        actual = asset_digest(asset, args.repo)
         if actual != expected:
             raise ValueError(f"Existing asset differs from tested build: {name}")
     for path, label in pending:
