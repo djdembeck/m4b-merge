@@ -158,9 +158,16 @@ jobs:
           body: |
             ## 🐳 Docker build check
 
-            The containerized amd64 build succeeded. No image is published for
-            PRs anymore — after merge, the `main` push publishes the `latest`
-            and SHA images on both architectures.
+            The containerized amd64 build succeeded. Bot PRs (e.g. Renovate)
+            do not publish images; human PRs additionally publish a
+            test image:
+
+            ```bash
+            docker pull ghcr.io/djdembeck/m4b-merge:pr-${{ github.event.pull_request.number }}
+            ```
+
+            After merge, the `main` push publishes the `latest` and SHA
+            images on both architectures.
 
   docker-amd64:
     # Pushes the -amd64-suffixed images for docker-manifest (main) and the
@@ -169,15 +176,15 @@ jobs:
     needs: [test]
     # PRs: only non-bot same-repo authors publish. Renovate's dependency PRs
     # are same-repo (head repo == base) but must NOT publish — docker-check
-    # covers them — so the bot-author guard is what keeps dep PRs from
-    # reaching this job. Only a human same-repo PR (rare) and push to
-    # main/develop publish.
+    # covers them — so the [bot]-author guard is what keeps dep PRs (and
+    # other bot PRs, e.g. Dependabot) from reaching this job. Human same-repo
+    # PRs and push to main/develop publish.
     if: >-
       success() &&
       ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')) ||
        (github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
-        !github.event.pull_request.author.login.endsWith('[bot]')))
+        !endsWith(github.event.pull_request.user.login, '[bot]')))
     runs-on: ubuntu-latest
     permissions:
       contents: read
