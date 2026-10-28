@@ -217,31 +217,18 @@ impl Tagger {
         self
     }
 
-    /// Write metadata tags to an MP4 file
+    /// Map `BookMetadata` onto an MP4 tag.
     ///
-    /// Maps BookMetadata to MP4 atoms:
+    /// Atoms:
     /// - title -> ©nam
     /// - artist (authors) -> ©ART
     /// - album (title) -> ©alb
     /// - genre -> ©gen
     /// - year -> ©day
     /// - comment (description) -> ©cmt
-    /// - narrator -> ©nrt (custom)
+    /// - narrator -> ©wrt (composer), multiple narrators joined with ", "
     /// - series -> ©grp (grouping)
-    pub fn write_metadata<P: AsRef<Path>>(
-        &self,
-        file_path: P,
-        metadata: &BookMetadata,
-    ) -> Result<()> {
-        let path = file_path.as_ref();
-
-        Self::ensure_file_exists(path)?;
-
-        debug!("Writing metadata to: {}", path.display());
-
-        // Read existing tag or create new one
-        let mut tag = mp4ameta::Tag::read_from_path(path).unwrap_or_default();
-
+    fn apply_metadata(tag: &mut mp4ameta::Tag, metadata: &BookMetadata) {
         // Standard tags
         tag.set_title(&metadata.title);
 
@@ -269,13 +256,10 @@ impl Tagger {
             tag.set_comment(&metadata.description);
         }
 
-        // Extended tags (using custom atoms)
-
-        // Narrator
+        // Narrator (composer is the convention used by Prologue, Audiobookshelf,
+        // and Audible for audiobook narrators)
         if !metadata.narrators.is_empty() {
-            let narrators = metadata.narrators.join(", ");
-            // Use grouping atom for narrator (custom convention)
-            tag.set_grouping(format!("Narrator: {}", narrators));
+            tag.set_composer(metadata.narrators.join(", "));
         }
 
         // Series information
@@ -292,6 +276,26 @@ impl Tagger {
                 tag.set_grouping(format!("{} | Series: {}", existing_grouping, series_info));
             }
         }
+    }
+
+    /// Write metadata tags to an MP4 file
+    ///
+    /// See [`Tagger::apply_metadata`] for the metadata-to-atom mapping.
+    pub fn write_metadata<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+        metadata: &BookMetadata,
+    ) -> Result<()> {
+        let path = file_path.as_ref();
+
+        Self::ensure_file_exists(path)?;
+
+        debug!("Writing metadata to: {}", path.display());
+
+        // Read existing tag or create new one
+        let mut tag = mp4ameta::Tag::read_from_path(path).unwrap_or_default();
+
+        Self::apply_metadata(&mut tag, metadata);
 
         // Write the tag back to file
         tag.write_to_path(path)
@@ -920,6 +924,45 @@ mod tests {
 
         let result = tagger.write_metadata("/nonexistent/path/file.m4b", &metadata);
         assert!(matches!(result, Err(TaggingError::FileNotFound(_))));
+    }
+
+    #[test]
+    fn test_apply_metadata_writes_narrators_to_composer() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc")
+            .add_author("Author One")
+            .add_author("Author Two")
+            .add_narrator("Narrator One")
+            .add_narrator("Narrator Two");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.composer(), Some("Narrator One, Narrator Two"));
+        assert_eq!(tag.artist(), Some("Author One, Author Two"));
+        assert_eq!(tag.grouping(), None, "narrator must not be duplicated in grouping");
+    }
+
+    #[test]
+    fn test_apply_metadata_keeps_series_in_grouping() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc")
+            .add_narrator("Narrator One")
+            .with_series("My Series", "2");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.composer(), Some("Narrator One"));
+        assert_eq!(tag.grouping(), Some("Series: My Series #2"));
+    }
+
+    #[test]
+    fn test_apply_metadata_without_narrators_leaves_composer_unset() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc").add_author("Author");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.composer(), None);
     }
 
     #[test]
