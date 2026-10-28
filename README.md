@@ -93,6 +93,23 @@ Check FFmpeg installation and version.
 m4b-merge --check-ffmpeg
 ```
 
+## Embedded Tags
+
+| Atom    | Source                                                        |
+|---------|---------------------------------------------------------------|
+| `©nam`  | Title; subtitle appended as `title - subtitle` when present   |
+| `©ART`  | All authors, joined by `, `                                   |
+| `©aART` | Same as `©ART` (album artist)                                 |
+| `©alb`  | Base title only (never the subtitle)                           |
+| `©gen`  | All genres, joined by `/` (single `©gen` value)                |
+| `©day`  | Release year                                                  |
+| `©cmt`  | Description                                                   |
+| `©wrt`  | All narrators, joined by `, `                                 |
+| `©grp`  | `Series: <name> #<position>`                                  |
+
+A tag with no corresponding metadata is removed, so retagging from a different
+source cannot leave stale values behind.
+
 ## Path Format Variables
 
 The output path is generated using the `-p` / `--path-format` template.

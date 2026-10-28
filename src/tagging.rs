@@ -217,33 +217,53 @@ impl Tagger {
         self
     }
 
+    /// Separator between genres in `©gen`.
+    ///
+    /// `©gen` is a single string; the pre-Rust pipeline joined every genre
+    /// with `/` and player/library conventions (and Audiobookshelf's parser)
+    /// recognize that form, so it is kept for compatibility.
+    const GENRE_SEPARATOR: &'static str = "/";
+
     /// Map `BookMetadata` onto an MP4 tag.
     ///
     /// Atoms:
-    /// - title -> ©nam
-    /// - artist (authors) -> ©ART
-    /// - album (title) -> ©alb
-    /// - genre -> ©gen
+    /// - title, plus subtitle when present -> ©nam (`"title - subtitle"`)
+    /// - artist (authors), joined with ", " -> ©ART
+    /// - album (base title only) -> ©alb
+    /// - album artist (authors), joined with ", " -> ©aART
+    /// - genre (all genres), joined with "/" -> ©gen
     /// - year -> ©day
     /// - comment (description) -> ©cmt
     /// - narrator -> ©wrt (composer), multiple narrators joined with ", "
     /// - series -> ©grp (grouping)
+    ///
+    /// Tags with no corresponding metadata are removed rather than left
+    /// untouched, so retagging a file from a different source cannot leave
+    /// stale values behind.
     fn apply_metadata(tag: &mut mp4ameta::Tag, metadata: &BookMetadata) {
-        // Standard tags
-        tag.set_title(&metadata.title);
+        // Title (base title plus subtitle, when the subtitle is non-blank).
+        // `BookMetadata::full_title` owns the documented `"title - subtitle"`
+        // form so every consumer of the title agrees on the separator.
+        tag.set_title(metadata.full_title());
 
-        // Artist (authors)
-        if !metadata.authors.is_empty() {
-            let authors = metadata.authors.join(", ");
-            tag.set_artist(&authors);
+        // Artist and album artist (authors)
+        let authors = Self::join_values(&metadata.authors, ", ");
+        if let Some(authors) = authors.as_deref() {
+            tag.set_artist(authors);
+            tag.set_album_artist(authors);
+        } else {
+            tag.remove_artists();
+            tag.remove_album_artists();
         }
 
-        // Album (use title for audiobooks)
+        // Album (base title only, so album grouping stays stable across
+        // editions and unchanged by the subtitle)
         tag.set_album(&metadata.title);
 
-        // Genre
-        if let Some(first_genre) = metadata.genres.first() {
-            tag.set_genre(first_genre.as_str());
+        // Genre (all genres in a single `©gen` value)
+        match Self::join_values(&metadata.genres, Self::GENRE_SEPARATOR) {
+            Some(genres) => tag.set_genre(genres),
+            None => tag.remove_genres(),
         }
 
         // Year
@@ -284,6 +304,14 @@ impl Tagger {
                 tag.set_grouping(segments.join(" | "));
             }
         }
+    }
+
+    /// Join non-blank values with `separator`, or `None` when every value is
+    /// blank.
+    fn join_values(values: &[String], separator: &str) -> Option<String> {
+        let kept: Vec<&str> =
+            values.iter().map(|value| value.trim()).filter(|value| !value.is_empty()).collect();
+        if kept.is_empty() { None } else { Some(kept.join(separator)) }
     }
 
     /// Grouping segments that this tool did not generate.
@@ -967,6 +995,98 @@ mod tests {
         assert_eq!(tag.composer(), Some("Narrator One, Narrator Two"));
         assert_eq!(tag.artist(), Some("Author One, Author Two"));
         assert_eq!(tag.grouping(), None, "narrator must not be duplicated in grouping");
+    }
+
+    #[test]
+    fn test_apply_metadata_includes_subtitle_in_title() {
+        let metadata =
+            BookMetadata::new("B08XYZ1234", "Test Book", "Desc").with_subtitle("The Sequel");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.title(), Some("Test Book - The Sequel"));
+        assert_eq!(tag.album(), Some("Test Book"), "album keeps the base title only");
+    }
+
+    #[test]
+    fn test_apply_metadata_without_subtitle_uses_plain_title() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.title(), Some("Test Book"));
+    }
+
+    #[test]
+    fn test_apply_metadata_ignores_blank_subtitle() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc").with_subtitle("   ");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.title(), Some("Test Book"));
+    }
+
+    #[test]
+    fn test_apply_metadata_joins_all_genres() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc")
+            .add_genre("Fiction")
+            .add_genre("Science Fiction")
+            .add_genre("Adventure");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.genre(), Some("Fiction/Science Fiction/Adventure"));
+    }
+
+    #[test]
+    fn test_apply_metadata_single_genre_unchanged() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc").add_genre("Fiction");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.genre(), Some("Fiction"));
+    }
+
+    #[test]
+    fn test_apply_metadata_without_genres_leaves_genre_unset() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc");
+
+        let mut tag = mp4ameta::Tag::default();
+        tag.set_genre("Stale Genre");
+
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.genre(), None, "retagging must not keep a stale genre");
+    }
+
+    #[test]
+    fn test_apply_metadata_writes_album_artist_from_authors() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc")
+            .add_author("Author One")
+            .add_author("Author Two");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.album_artist(), Some("Author One, Author Two"));
+        assert_eq!(tag.album(), Some("Test Book"));
+    }
+
+    #[test]
+    fn test_apply_metadata_without_authors_leaves_album_artist_unset() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc");
+
+        let mut tag = mp4ameta::Tag::default();
+        tag.set_album_artist("Stale Artist");
+
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.album_artist(), None, "retagging must not keep a stale album artist");
     }
 
     #[test]
