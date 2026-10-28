@@ -81,8 +81,9 @@ Use `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`, `ci`, or `revert
 3. **Tests** — All tests passing, coverage maintained
 4. **Linting** — No warnings, no errors
 5. **Reviews** — At least 1 approval required
-6. **CI Green** — All required checks must pass. The advisory `audit-advisory`
-   job (`continue-on-error`) reports its own failure without gating the run.
+6. **CI Green** — All required checks must pass. The advisory vulnerability
+   audit (the standalone `cargo-audit` check in `vulncheck.yml`) reports its
+   own failure without gating the run.
 
 #### PR Templates
 
@@ -104,11 +105,14 @@ Pull request templates belong in `.github/PULL_REQUEST_TEMPLATE.md`.
 4. **Docker** — amd64 build on PRs; arm64 builds and the multi-arch
    manifest run on main pushes only and are not PR-required checks
 
-`cargo audit --deny warnings` runs in CI as a **visible advisory** job
-(`audit-advisory`), deliberately outside the required chain — a new
-advisory must not force a breaking release. Findings are reviewed manually
-and never block dependency updates or merges — they are fixed in follow-up
-PRs.
+On every PR, `cargo audit --deny warnings` runs as the standalone
+**visible advisory** `cargo-audit` job in `vulncheck.yml`, deliberately
+outside the CI required chain — a new advisory must not force a breaking
+release. Human PRs show the failure for review, while
+Renovate-authored dependency PRs tolerate the audit step so that pre-existing
+advisories never deadlock the bot PRs that fix them. Findings are reviewed
+manually and fixed in follow-up PRs; the check must never be added to the
+required-check list.
 
 ### Release Gate
 
