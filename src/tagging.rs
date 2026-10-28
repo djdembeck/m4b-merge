@@ -693,7 +693,7 @@ fn detect_image_format(data: &[u8]) -> Result<ImageFormat> {
 }
 
 /// Format a Duration as HH:MM:SS.mmm
-fn format_duration(duration: Duration) -> String {
+pub(crate) fn format_duration(duration: Duration) -> String {
     let total_millis = duration.as_millis();
     let hours = total_millis / 3_600_000;
     let minutes = (total_millis % 3_600_000) / 60_000;

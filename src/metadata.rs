@@ -143,6 +143,23 @@ impl BookMetadata {
 
         Some(max_end_time)
     }
+
+    /// Remove chapters that start at or beyond `file_duration`.
+    ///
+    /// A chapter whose start time is past the end of the audio cannot be
+    /// represented in the chapter track. Returns the removed chapters so the
+    /// caller can report them.
+    pub fn drop_out_of_range_chapters(&mut self, file_duration: Duration) -> Vec<Chapter> {
+        let mut dropped = Vec::new();
+        self.chapters.retain(|chapter| {
+            let in_range = chapter.start_time < file_duration;
+            if !in_range {
+                dropped.push(chapter.clone());
+            }
+            in_range
+        });
+        dropped
+    }
 }
 
 /// Trait for types that can be converted to metadata
@@ -235,5 +252,48 @@ mod tests {
 
         let empty_metadata = BookMetadata::new("A1", "Title", "Desc");
         assert_eq!(empty_metadata.total_duration(), None);
+    }
+
+    #[test]
+    fn test_drop_out_of_range_chapters() {
+        let mut metadata = BookMetadata::new("A1", "Title", "Desc")
+            .add_chapter(Chapter::new("Intro", Duration::ZERO, Duration::from_secs(60)))
+            .add_chapter(Chapter::new("Body", Duration::from_secs(60), Duration::from_secs(60)))
+            .add_chapter(Chapter::new(
+                "End Credits",
+                Duration::from_secs(180),
+                Duration::from_secs(30),
+            ));
+
+        let dropped = metadata.drop_out_of_range_chapters(Duration::from_secs(120));
+
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].title, "End Credits");
+        assert_eq!(metadata.chapters.len(), 2);
+        assert_eq!(metadata.chapters[1].title, "Body");
+    }
+
+    #[test]
+    fn test_drop_out_of_range_chapters_boundaries() {
+        // A chapter starting exactly at the file duration has no playable
+        // range, so it is out of range.
+        let mut metadata = BookMetadata::new("A1", "Title", "Desc").add_chapter(Chapter::new(
+            "Last",
+            Duration::from_secs(120),
+            Duration::from_secs(10),
+        ));
+        let dropped = metadata.drop_out_of_range_chapters(Duration::from_secs(120));
+        assert_eq!(dropped.len(), 1);
+        assert!(metadata.chapters.is_empty());
+
+        // A chapter starting one millisecond before the end is kept.
+        let mut metadata = BookMetadata::new("A1", "Title", "Desc").add_chapter(Chapter::new(
+            "Last",
+            Duration::from_millis(119_999),
+            Duration::from_secs(10),
+        ));
+        let dropped = metadata.drop_out_of_range_chapters(Duration::from_secs(120));
+        assert!(dropped.is_empty());
+        assert_eq!(metadata.chapters.len(), 1);
     }
 }

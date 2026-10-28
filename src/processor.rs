@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
 use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
-use crate::tagging::{Tagger, TaggingError};
+use crate::tagging::{Tagger, TaggingError, format_duration};
 
 /// Static metadata ID regex compiled once at startup
 static METADATA_ID_REGEX: OnceLock<regex::Regex> = OnceLock::new();
@@ -352,7 +352,7 @@ impl Processor {
         };
 
         // Extract chapters from input file if API didn't provide them
-        let metadata = if let Some(mut meta) = metadata {
+        let mut metadata = if let Some(mut meta) = metadata {
             if meta.chapters.is_empty() && !group.files.is_empty() {
                 // Try to read chapters from the first input file
                 match crate::chapters::read_chapters(
@@ -433,6 +433,33 @@ impl Processor {
         let merged_path = self.merger.merge(&merge_job).map_err(ProcessorError::Merge)?;
 
         info!("Successfully merged to: {}", merged_path.display());
+
+        // Drop chapters that start at or beyond the merged file's duration.
+        // mp4ameta writes the start time verbatim, so such a chapter would be
+        // embedded as an unplayable entry; warn and skip it instead.
+        if let Some(meta) = metadata.as_mut() {
+            if !meta.chapters.is_empty() {
+                match self.ffmpeg.get_duration(&merged_path) {
+                    Ok(duration) => {
+                        for chapter in meta.drop_out_of_range_chapters(duration) {
+                            warn!(
+                                "Chapter '{}' start: {}, playlength of file: {}, chapter cannot be set",
+                                chapter.title,
+                                format_duration(chapter.start_time),
+                                format_duration(duration)
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Could not determine duration of {}; skipping chapter range check: {}",
+                            merged_path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
 
         // Stage 4: Tagging
         progress_handler.on_progress(ProcessingProgress {
