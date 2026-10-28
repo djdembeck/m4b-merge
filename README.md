@@ -108,6 +108,10 @@ The output path is generated using the `-p` / `--path-format` template.
 | `{series_name}` | Series name                    |
 | `{series_position}` | Series position number    |
 | `{year}`     | Release year                    |
+| `{genre}`      | First genre                     |
+| `{metadata_id}` | Looked-up metadata ID (ASIN or AudiobookDB book ID) |
+
+A token whose value is missing or empty does not contribute a path segment (empty segments are stripped). The only exceptions are `{author}` and `{narrator}`, which substitute `Unknown` when no person is known.
 
 **Default:** `{author}/{title}`
 

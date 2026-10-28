@@ -599,6 +599,13 @@ impl Processor {
         // Replace {title} (trimmed)
         result = result.replace("{title}", metadata.title.trim());
 
+        // Replace {genre} with first genre, or remove if none (trimmed)
+        if let Some(genre) = &metadata.genres.first().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            result = result.replace("{genre}", genre);
+        } else {
+            result = result.replace("{genre}", "");
+        }
+
         // Replace {subtitle} or remove if none (trimmed)
         if let Some(subtitle) = &metadata.subtitle {
             result = result.replace("{subtitle}", subtitle.trim());
@@ -626,6 +633,9 @@ impl Processor {
         } else {
             result = result.replace("{year}", "");
         }
+
+        // Replace {metadata_id} (the looked-up ASIN/AudiobookDB id)
+        result = result.replace("{metadata_id}", &metadata.metadata_id);
 
         // Clean up: remove empty path segments and normalize slashes
         result = result
@@ -934,6 +944,86 @@ mod tests {
             assert!(result.output_file.starts_with(&output_dir));
             assert_eq!(result.output_file.extension().unwrap(), "m4b");
         }
+    }
+
+    fn test_metadata_with_genres() -> BookMetadata {
+        BookMetadata::new("B08XYZ1234", "Test Book", "")
+            .add_author("Test Author")
+            .add_genre("Mystery")
+            .add_genre("Thriller")
+    }
+
+    #[test]
+    fn test_format_path_new_tokens_populated() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
+        let meta = test_metadata_with_genres();
+
+        let result = processor.format_path("{author}/{genre}/{metadata_id}/{title}", &meta);
+        assert_eq!(result, "Test Author/Mystery/B08XYZ1234/Test Book");
+    }
+
+    #[test]
+    fn test_format_path_first_genre_with_comma() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
+        let meta = BookMetadata::new("B08XYZ1234", "Test Book", "")
+            .add_genre("Mystery, Thriller & Suspense");
+
+        let result = processor.format_path("{genre}", &meta);
+        assert_eq!(result, "Mystery, Thriller & Suspense");
+    }
+
+    #[test]
+    fn test_format_path_empty_genres_strips_segment() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
+
+        let no_genres = BookMetadata::new("B08XYZ1234", "Test Book", "").add_author("Test Author");
+        let result = processor.format_path("{author}/{genre}/{metadata_id}/{title}", &no_genres);
+        assert_eq!(result, "Test Author/B08XYZ1234/Test Book");
+
+        let whitespace_only = no_genres.clone().add_genre(" ");
+        let result =
+            processor.format_path("{author}/{genre}/{metadata_id}/{title}", &whitespace_only);
+        assert_eq!(result, "Test Author/B08XYZ1234/Test Book");
+    }
+
+    #[test]
+    fn test_format_path_metadata_id_inline() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
+        let meta = BookMetadata::new("B08XYZ1234", "Test Book", "");
+
+        let result = processor.format_path("{metadata_id}-{title}", &meta);
+        assert_eq!(result, "B08XYZ1234-Test Book");
+    }
+
+    #[test]
+    fn test_determine_output_path_all_unset_tokens() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().join("output");
+        let config = Config::new(
+            vec![],
+            Some(output_dir.clone()),
+            None,
+            MetadataSourceKind::Audiobookdb,
+            MetadataRegion::Us,
+            Some(temp_dir.path().join("completed")),
+            1,
+            "info".to_string(),
+            "{genre}/{subtitle}".to_string(),
+            false,
+            None,
+        );
+        let processor = Processor::new(config).unwrap();
+
+        let file_path = create_test_audio_file(&temp_dir, "chapter1.mp3", b"dummy");
+        let audio_file = AudioFile::new(file_path).unwrap();
+        let meta = BookMetadata::new("B08XYZ1234", "Test Book", "");
+
+        let output_path = processor.determine_output_path(&[audio_file], Some(&meta)).unwrap();
+        assert_eq!(output_path, output_dir.join("output.m4b"));
     }
 
     #[test]
