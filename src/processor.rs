@@ -53,6 +53,11 @@ pub enum ProcessorError {
     #[error("Processing failed for {path}: {reason}")]
     ProcessingFailed { path: PathBuf, reason: String },
 
+    #[error(
+        "Refusing to embed chapters for {path}: {count} chapter(s) start at or past the {playlength} playlength ({details})"
+    )]
+    ChaptersOutOfRange { path: PathBuf, count: usize, playlength: String, details: String },
+
     #[error("Cleanup failed: {0}")]
     CleanupFailed(String),
 
@@ -352,7 +357,7 @@ impl Processor {
         };
 
         // Extract chapters from input file if API didn't provide them
-        let mut metadata = if let Some(mut meta) = metadata {
+        let metadata = if let Some(mut meta) = metadata {
             if meta.chapters.is_empty() && !group.files.is_empty() {
                 // Try to read chapters from the first input file
                 match crate::chapters::read_chapters(
@@ -434,20 +439,33 @@ impl Processor {
 
         info!("Successfully merged to: {}", merged_path.display());
 
-        // Drop chapters that start at or beyond the merged file's duration.
-        // mp4ameta writes the start time verbatim, so such a chapter would be
-        // embedded as an unplayable entry; warn and skip it instead.
-        if let Some(meta) = metadata.as_mut() {
+        // Reject chapters that start at or beyond the merged file's duration.
+        // mp4ameta writes start times verbatim, so embedding them would create
+        // unplayable entries; dropping them would silently shorten the chapter
+        // list, so fail the book and name every offending chapter.
+        if let Some(meta) = metadata.as_ref() {
             if !meta.chapters.is_empty() {
                 match self.ffmpeg.get_duration(&merged_path) {
                     Ok(duration) => {
-                        for chapter in meta.drop_out_of_range_chapters(duration) {
-                            warn!(
-                                "Chapter '{}' start: {}, playlength of file: {}, chapter cannot be set",
-                                chapter.title,
-                                format_duration(chapter.start_time),
-                                format_duration(duration)
-                            );
+                        let out_of_range = meta.out_of_range_chapters(duration);
+                        if !out_of_range.is_empty() {
+                            let details = out_of_range
+                                .iter()
+                                .map(|chapter| {
+                                    format!(
+                                        "'{}' at {}",
+                                        chapter.title,
+                                        format_duration(chapter.start_time)
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            return Err(ProcessorError::ChaptersOutOfRange {
+                                path: merged_path,
+                                count: out_of_range.len(),
+                                playlength: format_duration(duration),
+                                details,
+                            });
                         }
                     }
                     Err(e) => {
