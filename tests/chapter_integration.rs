@@ -622,6 +622,7 @@ fn test_written_metadata_uses_composer_for_narrators() {
 
     let tagger = m4b_merge::tagging::Tagger::new();
     tagger.write_metadata(&m4b_path, &metadata).expect("write metadata");
+    tagger.write_metadata(&m4b_path, &metadata).expect("rewrite metadata");
 
     let tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read back tags");
     assert_eq!(tag.composer(), Some("Narrator One, Narrator Two"));
