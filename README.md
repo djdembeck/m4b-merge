@@ -101,6 +101,8 @@ The output path is generated using the `-p` / `--path-format` template.
 |---------------|----------------------------------|
 | `{author}`   | Author name                     |
 | `{narrator}`  | Narrator name                   |
+| `{authors}`   | All authors, joined by `, ` (empty: `Unknown`) |
+| `{narrators}` | All narrators, joined by `, ` (empty: `Unknown`) |
 | `{title}`    | Book title                      |
 | `{subtitle}`  | Book subtitle                   |
 | `{series_name}` | Series name                    |
