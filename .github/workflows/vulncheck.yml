@@ -17,15 +17,10 @@ concurrency:
 
 jobs:
   cargo-audit:
-    # Advisory-only: visible failure, never a required branch-protection
-    # context. Renovate's branch/PR automerge treats any red check on the
-    # branch as blocking, so dependency-update PRs are skipped here: a
-    # pre-existing advisory would otherwise deadlock the PRs that fix it.
-    # Post-merge pushes and the daily schedule always run the audit.
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.user.login != 'renovate[bot]' &&
-       github.event.pull_request.user.login != 'app/renovate')
+    # Advisory-only: visible failure, never a required gate. The audit
+    # step is continue-on-error on bot-authored (Renovate) PRs, so a
+    # pre-existing advisory can never block the dependency PRs that fix
+    # it, while findings stay visible.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,12 +37,15 @@ jobs:
             ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-audit-0.22.2
-          restore-keys: ${{ runner.os }}-cargo-audit-
+          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('.github/workflows/vulncheck.yml') }}
 
       # Pinned for Renovate's regex custom manager in renovate.json5.
       - name: Install cargo-audit
-        run: cargo install cargo-audit --version 0.22.2 --locked
+        run: cargo install cargo-audit --version 0.22.2 --locked --force
 
       - name: Audit Cargo.lock
+        continue-on-error: >-
+          ${{ github.event_name == 'pull_request' &&
+             (github.event.pull_request.user.login == 'renovate[bot]' ||
+              github.event.pull_request.user.login == 'app/renovate') }}
         run: cargo audit --deny warnings

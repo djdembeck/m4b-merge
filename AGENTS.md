@@ -79,7 +79,7 @@ Use `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`, `ci`, or `revert
 3. **Tests** — All tests passing, coverage maintained
 4. **Linting** — No warnings, no errors
 5. **Reviews** — At least 1 approval required
-6. **CI Green** — All checks must pass
+6. **CI Green** — All required checks must pass
 
 #### PR Templates
 
@@ -117,7 +117,7 @@ and fixed in follow-up PRs — they do not block dependency updates or merges.
 
 1. **Verify necessity** — Is there an existing solution?
 2. **Check maintenance** — Last commit date? Open issues?
-3. **Audit for vulnerabilities** — Run `cargo audit`
+3. **Audit for vulnerabilities** — Run `cargo audit` (advisory — not a required check, does not block merges)
 4. **Pin to version** — Use `version = "2.1.0"`, not `*`
 5. **Document rationale** — Why this library?
 
