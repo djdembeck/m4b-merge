@@ -21,10 +21,14 @@ RUN apk add --no-cache \
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
-# Build with persistent BuildKit cache mounts so the cargo registry and
-# compiled artifacts survive across builds; unchanged dependencies are never
-# recompiled.
+# Build with persistent BuildKit cache mounts so the cargo registry, git
+# checkouts, and compiled artifacts survive across builds; unchanged
+# dependencies are never refetched or recompiled. The git cache mount matters
+# for the pinned mp4ameta patch in Cargo.toml: without it every image build
+# re-clones that repository. sharing=locked is safe here (single buildx
+# invocation).
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
     cargo build --release --locked && \
     cp target/release/m4b-merge /usr/local/bin/m4b-merge
