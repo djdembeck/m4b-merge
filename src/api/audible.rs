@@ -229,8 +229,8 @@ struct ApiBookResponse {
     authors: Vec<ApiPerson>,
     #[serde(default)]
     narrators: Vec<ApiPerson>,
-    #[serde(default)]
-    series: Vec<ApiSeries>,
+    #[serde(default, rename = "seriesPrimary")]
+    series_primary: Option<ApiSeries>,
     #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
@@ -265,8 +265,13 @@ impl ApiBookResponse {
             })
             .unwrap_or_default();
 
-        let series_name = self.series.first().map(|s| s.name.clone());
-        let series_position = self.series.first().and_then(|s| s.position.clone());
+        let series_name =
+            self.series_primary.as_ref().map(|s| s.name.clone()).filter(|name| !name.is_empty());
+        let series_position = self
+            .series_primary
+            .as_ref()
+            .and_then(|s| s.position.clone())
+            .filter(|position| !position.is_empty());
 
         BookMetadata {
             metadata_id: self.asin,
@@ -352,7 +357,7 @@ mod tests {
             "subtitle": "A Test Subtitle",
             "authors": [{"name": "Test Author"}],
             "narrators": [{"name": "Test Narrator"}],
-            "series": [{"name": "Test Series", "position": "1"}],
+            "seriesPrimary": {"asin": "B01N123456", "name": "Test Series", "position": "1"},
             "summary": "Test description",
             "genres": [{"name": "Fiction"}],
             "releaseDate": "2023-01-15",
@@ -395,6 +400,53 @@ mod tests {
     }
 
     #[test]
+    fn test_audnexus_series_primary_maps_to_metadata() {
+        // Shape of a live audnex.us /books/{asin} payload (B017V4IM1G, fetched 2026-10-27).
+        // Book-detail responses carry seriesPrimary/seriesSecondary; there is no `series` array.
+        let json = r#"{
+            "asin": "B017V4IM1G",
+            "title": "Harry Potter and the Sorcerer's Stone, Book 1",
+            "authors": [{"asin": "B000AP9A6K", "name": "J.K. Rowling"}],
+            "narrators": [{"name": "Jim Dale"}],
+            "seriesPrimary": {"asin": "B0182NWM9I", "name": "Harry Potter", "position": "1"},
+            "seriesSecondary": {"asin": "B07CM5ZDJL", "name": "Wizarding World Collection", "position": "1"},
+            "releaseDate": "2015-11-20T00:00:00.000Z"
+        }"#;
+
+        let response: ApiBookResponse = serde_json::from_str(json).unwrap();
+        let metadata = response.into_book_metadata();
+        assert_eq!(metadata.series_name.as_deref(), Some("Harry Potter"));
+        assert_eq!(metadata.series_position.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn test_audnexus_series_with_empty_fields_maps_to_none() {
+        let json = r#"{
+            "asin": "B08XYZ1234",
+            "title": "Standalone",
+            "seriesPrimary": {"asin": "B08C6YJ1LT", "name": "Solo", "position": ""}
+        }"#;
+
+        let response: ApiBookResponse = serde_json::from_str(json).unwrap();
+        let metadata = response.into_book_metadata();
+        assert_eq!(metadata.series_name.as_deref(), Some("Solo"));
+        assert_eq!(metadata.series_position, None);
+    }
+
+    #[test]
+    fn test_audnexus_without_series_primary_maps_to_none() {
+        let json = r#"{
+            "asin": "B08XYZ1234",
+            "title": "Standalone"
+        }"#;
+
+        let response: ApiBookResponse = serde_json::from_str(json).unwrap();
+        let metadata = response.into_book_metadata();
+        assert_eq!(metadata.series_name, None);
+        assert_eq!(metadata.series_position, None);
+    }
+
+    #[test]
     fn test_api_response_multi_author_multi_narrator() {
         let json = r#"{
             "asin": "B08C6YJ1LS",
@@ -408,7 +460,7 @@ mod tests {
                 {"name": "Luke Treadaway"},
                 {"name": "Krysten Ritter"}
             ],
-            "series": [{"name": "Black Book", "position": "2"}],
+            "seriesPrimary": {"asin": "B08C6YJ1LT", "name": "Black Book", "position": "2"},
             "summary": "An audio drama",
             "genres": [{"name": "Mystery, Thriller & Suspense"}, {"name": "Thriller & Suspense"}],
             "releaseDate": "2020-06-23",
@@ -430,9 +482,9 @@ mod tests {
         assert_eq!(response.narrators.len(), 2);
         assert_eq!(response.narrators[0].name, "Luke Treadaway");
         assert_eq!(response.narrators[1].name, "Krysten Ritter");
-        assert_eq!(response.series.len(), 1);
-        assert_eq!(response.series[0].name, "Black Book");
-        assert_eq!(response.series[0].position, Some("2".to_string()));
+        let series_primary = response.series_primary.as_ref().unwrap();
+        assert_eq!(series_primary.name, "Black Book");
+        assert_eq!(series_primary.position, Some("2".to_string()));
 
         let metadata = response.into_book_metadata();
         assert_eq!(metadata.metadata_id, "B08C6YJ1LS");
