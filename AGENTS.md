@@ -79,7 +79,7 @@ Use `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`, `ci`, or `revert
 3. **Tests** — All tests passing, coverage maintained
 4. **Linting** — No warnings, no errors
 5. **Reviews** — At least 1 approval required
-6. **CI Green** — All checks must pass
+6. **CI Green** — All required checks must pass
 
 #### PR Templates
 
@@ -96,11 +96,18 @@ Pull request templates belong in `.github/PULL_REQUEST_TEMPLATE.md`.
 3. **Coverage** — ≥90% coverage, no new uncovered lines
 4. **Lint** — `cargo clippy --all-features -- -D warnings`
 5. **Format** — `cargo fmt --check`
-6. **Security** — `cargo audit --deny warnings`
+
+### Advisory Checks
+
+- **Security** — `cargo audit --deny warnings` runs in `.github/workflows/vulncheck.yml`.
+  It fails visibly but is **not** a required check and does **not** gate merges:
+  a pre-existing advisory must never block the dependency PRs that fix it.
+  Findings need a security review, not a blocked merge.
 
 ### Failing CI Actions
 
-All CI failures block merge; audit findings require security review.
+Build, test, lint, and format failures block merge. Audit findings are reviewed
+and fixed in follow-up PRs — they do not block dependency updates or merges.
 
 ---
 
@@ -110,7 +117,7 @@ All CI failures block merge; audit findings require security review.
 
 1. **Verify necessity** — Is there an existing solution?
 2. **Check maintenance** — Last commit date? Open issues?
-3. **Audit for vulnerabilities** — Run `cargo audit`
+3. **Audit for vulnerabilities** — Run `cargo audit` (advisory — not a required check, does not block merges)
 4. **Pin to version** — Use `version = "2.1.0"`, not `*`
 5. **Document rationale** — Why this library?
 

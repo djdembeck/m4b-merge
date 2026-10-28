@@ -9,11 +9,12 @@
   timezone: "Etc/UTC",
   rebaseWhen: "auto",
   stabilityDays: 5,
+  automergeStrategy: "squash",
+  platformAutomerge: false,
   lockFileMaintenance: {
     enabled: true,
     automerge: true,
     automergeType: "pr",
-    platformAutomerge: true,
   },
   packageRules: [
     {
@@ -24,7 +25,19 @@
       description: "Automatically merge minor and patch-level updates",
       matchUpdateTypes: ["minor", "digest", "patch"],
       automerge: true,
-      automergeType: "branch",
+      automergeType: "pr",
+    },
+  ],
+  customManagers: [
+    {
+      customType: "regex",
+      description: "Update the cargo-audit pin in vulncheck.yml",
+      managerFilePatterns: ["/^\\.github/workflows/vulncheck\\.yml$/"],
+      matchStrings: [
+        "cargo install cargo-audit --version (?<currentValue>[0-9.]+)",
+      ],
+      depNameTemplate: "cargo-audit",
+      datasourceTemplate: "crate",
     },
   ],
   vulnerabilityAlerts: {
