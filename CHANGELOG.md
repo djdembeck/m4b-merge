@@ -53,6 +53,9 @@ All notable changes to this project will be documented in this file. See [standa
 ### Fixed
 - Audnexus lookups now fetch chapter markers from `/books/{asin}/chapters` (the book endpoint never returns them), honor `isAccurate`, and carry the configured region on both requests.
 
+### Fixed
+- Chapter embedding now writes the QuickTime chapter text track (`chap` reference) alongside the Nero `chpl` list via mp4ameta, so Apple/AVFoundation players see chapter markers.
+
 ## [1.0.0](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.0) (2026-07-20)
 
 

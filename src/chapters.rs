@@ -43,7 +43,9 @@ pub fn generate_chapters_from_durations(durations: &[u64]) -> Vec<Chapter> {
 
 /// Read chapters from an M4B file.
 ///
-/// Tries ffprobe first, then falls back to chpl atom parsing.
+/// Prefers the Nero `chpl` list because its start times are exact; ffprobe
+/// prefers the QuickTime chapter text track, whose sample timeline is rebased
+/// to zero. Falls back to ffprobe, then to direct chpl parsing.
 /// Pass `ffprobe_path` to use a specific ffprobe binary; `None` uses PATH.
 pub fn read_chapters(
     path: &Path,
@@ -59,9 +61,11 @@ pub fn read_chapters(
             // while the track holds the full set: use the track only when the
             // list is exactly that cap and repeats the track's prefix.
             //
-            // Otherwise the two disagree because the track is stale —
-            // `embed_chapters` replaces the list and leaves any pre-existing
-            // track untouched — so the list is authoritative.
+            // Otherwise the two disagree and the list is authoritative: a
+            // truncated list means the track is also incomplete, and a
+            // matching-length disagreement says the two representations were
+            // written independently (e.g. by a tool other than
+            // `embed_chapters`) and the chpl list is the canonical form.
             let source =
                 if list.is_empty() || list_is_truncated_chpl(list, track) { track } else { list };
 

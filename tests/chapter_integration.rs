@@ -35,6 +35,33 @@ fn create_test_m4b(path: &Path, duration_secs: u32) {
     assert!(status.success(), "FFmpeg failed to create test M4B file");
 }
 
+/// Create a test M4B with the `moov` atom written before `mdat` (streaming
+/// layout), the layout that exposes chunk-offset corruption after post-write
+/// byte splicing.
+fn create_faststart_m4b(path: &Path, duration_secs: u32) {
+    let status = Command::new("ffmpeg")
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=mono",
+            "-t",
+            &duration_secs.to_string(),
+            "-c:a",
+            "aac",
+            "-b:a",
+            "64k",
+            "-movflags",
+            "+faststart",
+            "-y",
+        ])
+        .arg(path)
+        .status()
+        .expect("Failed to run FFmpeg");
+
+    assert!(status.success(), "FFmpeg failed to create faststart fixture");
+}
+
 #[test]
 fn test_chapter_embed_and_read_roundtrip() {
     if !ffmpeg_available() {
@@ -702,6 +729,84 @@ fn chapter_starts_ms(chapters: &[m4b_merge::chapters::Chapter]) -> Vec<u64> {
     chapters.iter().map(|chapter| chapter.start_time).collect()
 }
 
+fn ffprobe_available() -> bool {
+    Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// Decode the file end to end; a corrupt chunk offset makes this fail.
+fn decode_ok(path: &Path) -> bool {
+    let output = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-f", "null", "-"])
+        .output()
+        .expect("Failed to run FFmpeg decode");
+
+    output.status.success() && output.stderr.is_empty()
+}
+
+fn ffprobe_chapter_count(path: &Path) -> usize {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-show_chapters", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .expect("Failed to run ffprobe");
+    assert!(output.status.success(), "ffprobe failed on {}", path.display());
+
+    String::from_utf8_lossy(&output.stdout).lines().filter(|line| !line.trim().is_empty()).count()
+}
+
+/// `(payload_start, end)` of the `mdat` atom.
+fn mdat_payload_range(path: &Path) -> (u64, u64) {
+    let buf = std::fs::read(path).expect("read fixture");
+    let mdat = atoms_in(&buf, 0, buf.len())
+        .into_iter()
+        .find(|atom| &atom.fourcc == b"mdat")
+        .expect("mdat atom");
+
+    ((mdat.start + mdat.header) as u64, mdat.end as u64)
+}
+
+/// True when `moov` is stored before `mdat` (faststart layout).
+fn moov_precedes_mdat(path: &Path) -> bool {
+    let buf = std::fs::read(path).expect("read fixture");
+    let atoms = atoms_in(&buf, 0, buf.len());
+    let moov = atoms.iter().find(|atom| &atom.fourcc == b"moov").expect("moov atom");
+    let mdat = atoms.iter().find(|atom| &atom.fourcc == b"mdat").expect("mdat atom");
+
+    moov.start < mdat.start
+}
+
+/// All absolute chunk offsets from `stco` atoms (the audio track uses `stco`).
+fn stco_offsets(path: &Path) -> Vec<u64> {
+    let buf = std::fs::read(path).expect("read fixture");
+    let moov = atoms_in(&buf, 0, buf.len())
+        .into_iter()
+        .find(|atom| &atom.fourcc == b"moov")
+        .expect("moov atom");
+
+    let mut offsets = Vec::new();
+    for trak in atoms_in(&buf, moov.start + moov.header, moov.end)
+        .into_iter()
+        .filter(|atom| &atom.fourcc == b"trak")
+    {
+        let Some(stco) = descend(&buf, trak, &[b"mdia", b"minf", b"stbl", b"stco"]) else {
+            continue;
+        };
+        let content = stco.start + stco.header;
+        let count = be_u32(&buf, content + 4) as usize;
+        for index in 0..count {
+            offsets.push(u64::from(be_u32(&buf, content + 8 + index * 4)));
+        }
+    }
+
+    offsets
+}
+
 #[test]
 fn test_foreign_clock_chapter_track_keeps_times_across_writes() {
     if !ffmpeg_available() {
@@ -738,6 +843,128 @@ fn test_foreign_clock_chapter_track_keeps_times_across_writes() {
         vec![0, 2_000, 7_000],
         "chapter starts must survive repeated tag writes"
     );
+
+    let tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag");
+    let track_starts: Vec<u64> =
+        tag.chapter_track().iter().map(|chapter| chapter.start.as_millis() as u64).collect();
+    assert_eq!(
+        track_starts,
+        vec![0, 2_000, 7_000],
+        "QuickTime chapter track must keep the same starts"
+    );
+}
+
+#[test]
+fn test_embed_writes_chpl_and_quicktime_track() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("dual-format.m4b");
+    create_test_m4b(&m4b_path, 10);
+
+    let tagger = m4b_merge::tagging::Tagger::new();
+    tagger.embed_chapters(&m4b_path, &fixture_chapters()).expect("embed chapters");
+
+    let tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag");
+    assert_eq!(tag.chapter_list().len(), 3, "Nero chpl chapter list");
+    assert_eq!(tag.chapter_track().len(), 3, "QuickTime chapter text track");
+    assert_eq!(tag.chapter_list()[1].start, Duration::from_secs(2));
+    assert_eq!(tag.chapter_track()[1].start, Duration::from_secs(2));
+
+    let buf = std::fs::read(&m4b_path).expect("read output");
+    let trak = chapter_track(&buf);
+    let hdlr = descend(&buf, trak, &[b"mdia", b"hdlr"]).expect("text hdlr");
+    let subtype = &buf[hdlr.start + hdlr.header + 8..hdlr.start + hdlr.header + 12];
+    assert_eq!(subtype, b"text", "chapter track must use the text handler");
+
+    assert!(decode_ok(&m4b_path), "output must decode cleanly");
+    if ffprobe_available() {
+        assert_eq!(ffprobe_chapter_count(&m4b_path), 3);
+    }
+}
+
+#[test]
+fn test_embed_on_faststart_input_keeps_chunks_decodable() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("faststart.m4b");
+    create_faststart_m4b(&m4b_path, 10);
+    assert!(moov_precedes_mdat(&m4b_path), "fixture must use the faststart layout");
+
+    let tagger = m4b_merge::tagging::Tagger::new();
+    tagger.embed_chapters(&m4b_path, &fixture_chapters()).expect("embed chapters");
+
+    assert!(moov_precedes_mdat(&m4b_path), "layout must be preserved");
+    assert!(decode_ok(&m4b_path), "audio must remain decodable after chapter embedding");
+
+    let (mdat_start, mdat_end) = mdat_payload_range(&m4b_path);
+    let offsets = stco_offsets(&m4b_path);
+    assert!(!offsets.is_empty(), "audio track must keep its chunk offsets");
+    for offset in offsets {
+        assert!(
+            offset >= mdat_start && offset < mdat_end,
+            "chunk offset {offset} must point inside mdat [{mdat_start}, {mdat_end})"
+        );
+    }
+
+    let tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag");
+    assert_eq!(tag.chapter_track().len(), 3);
+}
+
+#[test]
+fn test_read_chapters_derives_last_duration_from_media_duration() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("last-duration.m4b");
+    create_test_m4b(&m4b_path, 10);
+
+    let tagger = m4b_merge::tagging::Tagger::new();
+    tagger.embed_chapters(&m4b_path, &fixture_chapters()).expect("embed chapters");
+
+    let chapters = m4b_merge::chapters::read_chapters(&m4b_path, None).expect("read chapters");
+    let last = chapters.last().expect("chapters");
+    assert_eq!(last.start_time, 7_000);
+    assert_eq!(last.duration, 3_000, "last chapter must end at the media duration");
+}
+
+#[test]
+fn test_embed_replaces_both_chapter_representations() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("replace-both.m4b");
+    create_test_m4b(&m4b_path, 10);
+
+    let tagger = m4b_merge::tagging::Tagger::new();
+    tagger.embed_chapters(&m4b_path, &fixture_chapters()).expect("first embed");
+
+    let replacement = vec![
+        m4b_merge::metadata::Chapter::new("New One", Duration::ZERO, Duration::from_secs(4)),
+        m4b_merge::metadata::Chapter::new(
+            "New Two",
+            Duration::from_secs(4),
+            Duration::from_secs(6),
+        ),
+    ];
+    tagger.embed_chapters(&m4b_path, &replacement).expect("second embed");
+
+    let tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag");
+    for chapters in [tag.chapter_list(), tag.chapter_track()] {
+        assert_eq!(chapters.len(), 2);
+        let titles: Vec<&str> = chapters.iter().map(|chapter| chapter.title.as_str()).collect();
+        assert_eq!(titles, vec!["New One", "New Two"]);
+    }
+    assert!(decode_ok(&m4b_path));
 }
 
 #[test]

@@ -526,8 +526,13 @@ impl Tagger {
 
     /// Embed chapters into an M4B file
     ///
-    /// This method writes chapters to the MP4 container using the chapter list (chpl atom).
-    /// Any existing chapters in the file are replaced.
+    /// This method writes chapters to the MP4 container in both forms players
+    /// understand:
+    /// - the Nero `chpl` atom (chapter list, read by ffmpeg and some Android apps)
+    /// - the QuickTime chapter text track with a `chap` track reference (read by
+    ///   Apple players, which ignore `chpl`)
+    ///
+    /// Any existing chapters in either form are replaced.
     ///
     /// # Arguments
     ///
@@ -575,14 +580,16 @@ impl Tagger {
         let mut tag = mp4ameta::Tag::read_from_path(path)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to read tag: {}", e)))?;
 
-        // Clear existing chapters
+        // Clear existing chapters in both representations
         tag.chapter_list_mut().clear();
+        tag.chapter_track_mut().clear();
 
-        // Convert to mp4ameta chapters and write the chpl representation. The
-        // chpl atom cannot represent more than 255 entries; other chapter
-        // representations (the QuickTime chapter track) use the full list.
+        // Convert to mp4ameta chapters and write both representations: the
+        // Nero `chpl` list, truncated to the atom's 255-entry cap, and the
+        // QuickTime chapter text track, which holds the full list.
         let mp4_chapters = convert_chapters_for_embedding(&chapters_vec);
         tag.chapter_list_mut().extend_from_slice(chpl_chapters(&mp4_chapters));
+        tag.chapter_track_mut().extend(mp4_chapters);
 
         // Write back to file
         tag.write_to_path(path)
