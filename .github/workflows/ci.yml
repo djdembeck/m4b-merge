@@ -141,7 +141,9 @@ jobs:
 
       # Post a "Checked, not published" comment on same-repo PRs (create-only, never update)
       - name: Find existing PR comment
-        if: github.event.pull_request.head.repo.full_name == github.repository
+        if: >-
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          !endsWith(github.event.pull_request.user.login, '[bot]')
         uses: peter-evans/find-comment@b30e6a3c0ed37e7c023ccd3f1db5c6c0b0c23aad # v4.0.0
         id: find-comment
         with:
@@ -151,6 +153,7 @@ jobs:
       - name: Post Docker build check comment
         if: >-
           github.event.pull_request.head.repo.full_name == github.repository &&
+          !endsWith(github.event.pull_request.user.login, '[bot]') &&
           steps.find-comment.outputs.comment-id == ''
         uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
         with:
