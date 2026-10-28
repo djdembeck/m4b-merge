@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file. See [standa
 ### Changed
 - Release pipeline: versions are prepared on `develop` and promoted to `main` as a frozen tree; the `Release` workflow publishes tested `main` SHAs without source edits, merge-back, or `latest` writes. release-please configuration and manifest removed.
 
+### Fixed
+- Chapter embedding now writes the QuickTime chapter text track (`chap` reference) alongside the Nero `chpl` list via mp4ameta, so Apple/AVFoundation players see chapter markers.
+
 ## [1.0.0](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.0) (2026-07-20)
 
 

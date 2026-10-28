@@ -14,13 +14,45 @@ pub struct Chapter {
 
 /// Read chapters from an M4B file.
 ///
-/// Tries ffprobe first, then falls back to chpl atom parsing.
+/// Prefers the Nero `chpl` list because its start times are exact; ffprobe
+/// prefers the QuickTime chapter text track, whose sample timeline is rebased
+/// to zero. Falls back to ffprobe, then to direct chpl parsing.
 /// Pass `ffprobe_path` to use a specific ffprobe binary; `None` uses PATH.
 pub fn read_chapters(
     path: &Path,
     ffprobe_path: Option<&str>,
 ) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
-    // Try to read chapters using ffprobe first
+    // Try mp4ameta's chapter list (chpl atom) first: exact start times.
+    if let Ok(tag) = mp4ameta::Tag::read_from_path(path) {
+        let media_duration_ms = tag.duration().as_millis() as u64;
+        let mut chapters: Vec<Chapter> = tag
+            .chapter_list()
+            .iter()
+            .map(|chapter| Chapter {
+                title: chapter.title.clone(),
+                start_time: chapter.start.as_millis() as u64,
+                duration: 0,
+            })
+            .collect();
+
+        if !chapters.is_empty() {
+            for index in 0..chapters.len() {
+                if index + 1 < chapters.len() {
+                    chapters[index].duration =
+                        chapters[index + 1].start_time.saturating_sub(chapters[index].start_time);
+                }
+            }
+            // The chpl atom stores starts, not durations; derive the last
+            // chapter's end from the media duration so `chapters.txt` reports
+            // the real total instead of ending at the last start.
+            if let Some(last) = chapters.last_mut() {
+                last.duration = media_duration_ms.saturating_sub(last.start_time);
+            }
+            return Ok(chapters);
+        }
+    }
+
+    // Try to read chapters using ffprobe
     if let Ok(chapters) = read_chapters_ffprobe(path, ffprobe_path) {
         if !chapters.is_empty() {
             return Ok(chapters);
