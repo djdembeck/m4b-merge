@@ -5,7 +5,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use crate::api::{MetadataError, MetadataSource};
-use crate::audio::ffmpeg::FFmpeg;
+use crate::audio::ffmpeg::{FFmpeg, FFmpegError};
 use crate::config::Config;
 use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
 use crate::merge::{MergeError, MergeJob, Merger};
@@ -57,6 +57,13 @@ pub enum ProcessorError {
         "Refusing to embed chapters for {path}: {count} chapter(s) start at or past the {playlength} playlength ({details})"
     )]
     ChaptersOutOfRange { path: PathBuf, count: usize, playlength: String, details: String },
+
+    #[error("Could not determine duration of {path}; refusing to tag chapters: {source}")]
+    ProbeFailed {
+        path: PathBuf,
+        #[source]
+        source: FFmpegError,
+    },
 
     #[error("Cleanup failed: {0}")]
     CleanupFailed(String),
@@ -470,10 +477,11 @@ impl Processor {
                     }
                     Err(e) => {
                         warn!(
-                            "Could not determine duration of {}; skipping chapter range check: {}",
+                            "Could not determine duration of {}; refusing to tag chapters: {}",
                             merged_path.display(),
                             e
                         );
+                        return Err(ProcessorError::ProbeFailed { path: merged_path, source: e });
                     }
                 }
             }
@@ -705,7 +713,8 @@ impl Processor {
 mod tests {
     use super::*;
     use crate::api::{MetadataRegion, MetadataSourceKind};
-    use std::io::Write;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
     use tempfile::TempDir;
 
     /// Build a test `Config` with the standard dry-run defaults
@@ -745,6 +754,111 @@ mod tests {
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(content).unwrap();
         path
+    }
+
+    /// Build a non-dry-run `Config` whose metadata source is a local stub API.
+    fn api_test_config(temp_dir: &TempDir, api_url: &str) -> Config {
+        Config::new(
+            vec![],
+            Some(temp_dir.path().join("output")),
+            Some(api_url.to_string()),
+            MetadataSourceKind::Audiobookdb,
+            MetadataRegion::Us,
+            Some(temp_dir.path().join("completed")),
+            1,
+            "info".to_string(),
+            "{author}/{title}".to_string(),
+            false,
+            None,
+        )
+    }
+
+    /// Create a real M4B of `seconds` duration using FFmpeg.
+    fn create_test_m4b(dir: &std::path::Path, seconds: u32) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join("audio.m4b");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", &seconds.to_string()])
+            .args(["-c:a", "aac", "-b:a", "64k", "-y"])
+            .arg(&path)
+            .status()
+            .expect("run ffmpeg");
+        assert!(status.success(), "ffmpeg failed to create test audio");
+        path
+    }
+
+    /// Spawn a local AudiobookDB stub.
+    ///
+    /// Books with id `abc123def456` return a chapter past the audio duration;
+    /// every other id returns a single in-range chapter.
+    fn spawn_metadata_api() -> String {
+        fn respond(stream: &mut std::net::TcpStream, body: serde_json::Value) {
+            let body = body.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_err() {
+                    continue;
+                }
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                        break;
+                    }
+                }
+
+                let path = request_line.split_whitespace().nth(1).unwrap_or_default();
+                let id = path
+                    .strip_prefix("/books/")
+                    .or_else(|| path.strip_prefix("/releases/rel-"))
+                    .and_then(|rest| rest.split(['?', '/']).next());
+
+                let Some(id) = id else { continue };
+                let book = || {
+                    serde_json::json!({
+                        "id": id,
+                        "title": format!("Book {id}"),
+                        "matchedReleaseId": format!("rel-{id}"),
+                        "people": [{"role": {"name": "author"}, "person": {"name": "Test Author"}}],
+                    })
+                };
+                let first = serde_json::json!({
+                    "title": "Intro", "ordinal": 1, "startOffsetMs": 0, "lengthMs": 10_000
+                });
+                let body = if path.starts_with("/books/") {
+                    book()
+                } else if id == "abc123def456" {
+                    serde_json::json!({
+                        "id": format!("rel-{id}"),
+                        "chapterDetail": {"chapters": [
+                            first,
+                            {"title": "End Credits", "ordinal": 2, "startOffsetMs": 20_000, "lengthMs": 30_000},
+                        ]},
+                    })
+                } else {
+                    serde_json::json!({
+                        "id": format!("rel-{id}"),
+                        "chapterDetail": {"chapters": [first]},
+                    })
+                };
+                respond(&mut stream, body);
+            }
+        });
+
+        url
     }
 
     #[test]
@@ -894,6 +1008,101 @@ mod tests {
         for (name, expected) in cases {
             let group = AudioGroup { name: name.to_string(), files: vec![], disc_number: None };
             assert_eq!(processor.extract_metadata_id(&group).as_deref(), expected, "name {name:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_group_rejects_out_of_range_chapters_before_tagging_or_move() {
+        let temp_dir = TempDir::new().unwrap();
+        let api_url = spawn_metadata_api();
+        let processor = Processor::new(api_test_config(&temp_dir, &api_url)).unwrap();
+
+        let book_dir = temp_dir.path().join("Bad Book [abc123def456]");
+        let input = create_test_m4b(&book_dir, 10);
+        let group = AudioGroup {
+            name: "Bad Book [abc123def456]".to_string(),
+            files: vec![AudioFile::new(input.clone()).unwrap()],
+            disc_number: None,
+        };
+
+        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+
+        match &err {
+            ProcessorError::ChaptersOutOfRange { count, playlength, details, .. } => {
+                assert_eq!(*count, 1);
+                assert_eq!(playlength, "00:00:10.000");
+                assert!(details.contains("End Credits"), "{details}");
+            }
+            other => panic!("expected ChaptersOutOfRange, got {other:?}"),
+        }
+
+        // The check runs before tagging: the copied output has no chapters and
+        // no chapters.txt was written.
+        let output = temp_dir.path().join("output/Test Author/Book abc123def456.m4b");
+        assert!(output.exists());
+        let tag = mp4ameta::Tag::read_from_path(&output).unwrap();
+        assert!(tag.chapter_list().is_empty(), "chapters must not be embedded");
+        assert!(!output.with_extension("chapters.txt").exists());
+
+        // And before the source files are moved.
+        assert!(input.exists(), "source file must not be moved after a failed check");
+        let completed = temp_dir.path().join("completed");
+        let moved = std::fs::read_dir(&completed).map(|entries| entries.count()).unwrap_or(0);
+        assert_eq!(moved, 0);
+    }
+
+    #[tokio::test]
+    async fn test_process_group_fails_when_duration_probe_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let api_url = spawn_metadata_api();
+        let processor = Processor::new(api_test_config(&temp_dir, &api_url)).unwrap();
+
+        // Garbage M4B: the native single-file copy succeeds, but ffprobe cannot
+        // read the merged output, so the range check must fail closed.
+        let book_dir = temp_dir.path().join("Bad Probe [abc123def456]");
+        std::fs::create_dir_all(&book_dir).unwrap();
+        let input = book_dir.join("audio.m4b");
+        std::fs::write(&input, b"not audio").unwrap();
+        let group = AudioGroup {
+            name: "Bad Probe [abc123def456]".to_string(),
+            files: vec![AudioFile::new(input).unwrap()],
+            disc_number: None,
+        };
+
+        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+        let message = err.to_string();
+
+        match &err {
+            ProcessorError::ProbeFailed { path, .. } => {
+                assert!(path.to_string_lossy().ends_with("Book abc123def456.m4b"));
+            }
+            other => panic!("expected ProbeFailed, got {other:?}"),
+        }
+        assert!(message.contains("refusing to tag chapters"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn test_batch_continues_after_a_group_fails_chapter_validation() {
+        let temp_dir = TempDir::new().unwrap();
+        let api_url = spawn_metadata_api();
+        let processor = Processor::new(api_test_config(&temp_dir, &api_url)).unwrap();
+
+        let bad_dir = temp_dir.path().join("Bad Book [abc123def456]");
+        create_test_m4b(&bad_dir, 10);
+        let good_dir = temp_dir.path().join("Good Book [xyz987uvw654]");
+        create_test_m4b(&good_dir, 10);
+
+        let result =
+            processor.process_with_progress(vec![bad_dir, good_dir], &NoOpProgressHandler).await;
+
+        match result {
+            Err(ProcessorError::PartialFailure { results, detail }) => {
+                assert_eq!(results.len(), 1, "only the valid group should complete");
+                assert!(detail.contains("Refusing to embed chapters"), "{detail}");
+                let tag = mp4ameta::Tag::read_from_path(&results[0].output_file).unwrap();
+                assert_eq!(tag.chapter_list()[0].title, "Intro");
+            }
+            other => panic!("expected PartialFailure, got {other:?}"),
         }
     }
 }
