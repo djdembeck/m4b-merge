@@ -7,23 +7,6 @@ All notable changes to this project will be documented in this file. See [standa
 ### Changed
 - Release pipeline: versions are prepared on `develop` and promoted to `main` as a frozen tree; the `Release` workflow publishes tested `main` SHAs without source edits, merge-back, or `latest` writes. release-please configuration and manifest removed.
 
-## [1.0.0](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.0) (2026-07-20)
-
-
-### Features
-
-* **ci:** add workflow_dispatch to release workflow ([83ade7b](https://github.com/djdembeck/m4b-merge/commit/83ade7ba76d80f0d4bbe923f355f7ae25a5d28b1))
-
-
-### Bug Fixes
-
-* **ci:** pass full image refs to docker manifest assembly ([4b833b7](https://github.com/djdembeck/m4b-merge/commit/4b833b71d8d11b362734ccd67470a1cfadafff1c))
-* **docker:** disable auto-generated latest tag and skip tagless refs ([d68f93d](https://github.com/djdembeck/m4b-merge/commit/d68f93d97a280fe29702a4f7bb3bac3abbfabeb4))
-* **docker:** disable latest tag in manifest job metadata ([29ee9ee](https://github.com/djdembeck/m4b-merge/commit/29ee9ee13d9073c4d8b5394d06ea2df480f7bdbd))
-* **docker:** point latest tag at multi-arch manifest ([8880992](https://github.com/djdembeck/m4b-merge/commit/888099289ae5995c4749ba3f4b587ee6ee1947e3))
-
-## [Unreleased]
-
 ### Added
 - Chapter embedding into M4B files using native mp4ameta library
 - Chapters are now embedded directly into the M4B container, not just written to chapters.txt
@@ -43,6 +26,29 @@ All notable changes to this project will be documented in this file. See [standa
   selected source's default API URL. `--api-url` no longer implies the Audnexus
   source: it only overrides the URL for the source chosen by `--metadata-source`,
   and m4b-merge warns when a URL is passed to the AudiobookDB client.
+
+## [1.0.1](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.1) (2026-08-03)
+
+### Bug Fixes
+
+* **audio:** eliminate TOCTOU in concat file list creation ([8afebaa](https://github.com/djdembeck/m4b-merge/commit/8afebaa6158552c50ee889d59e000e60594e947f))
+* **ffmpeg:** remove dead prepare_concat_file_list, canonicalize concat paths ([#423](https://github.com/djdembeck/m4b-merge/issues/423)) ([b148e39](https://github.com/djdembeck/m4b-merge/commit/b148e39ef6a86610945059b6692ae481eeb4a85d))
+* use absolute paths for concat file list ([#419](https://github.com/djdembeck/m4b-merge/issues/419)) ([8858d6a](https://github.com/djdembeck/m4b-merge/commit/8858d6a3364a3c4276b02ed0d40fa162a8d0915e))
+
+## [1.0.0](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.0) (2026-07-20)
+
+
+### Features
+
+* **ci:** add workflow_dispatch to release workflow ([83ade7b](https://github.com/djdembeck/m4b-merge/commit/83ade7ba76d80f0d4bbe923f355f7ae25a5d28b1))
+
+
+### Bug Fixes
+
+* **ci:** pass full image refs to docker manifest assembly ([4b833b7](https://github.com/djdembeck/m4b-merge/commit/4b833b71d8d11b362734ccd67470a1cfadafff1c))
+* **docker:** disable auto-generated latest tag and skip tagless refs ([d68f93d](https://github.com/djdembeck/m4b-merge/commit/d68f93d97a280fe29702a4f7bb3bac3abbfabeb4))
+* **docker:** disable latest tag in manifest job metadata ([29ee9ee](https://github.com/djdembeck/m4b-merge/commit/29ee9ee13d9073c4d8b5394d06ea2df480f7bdbd))
+* **docker:** point latest tag at multi-arch manifest ([8880992](https://github.com/djdembeck/m4b-merge/commit/888099289ae5995c4749ba3f4b587ee6ee1947e3))
 
 ### [0.5.3](https://github.com/djdembeck/m4b-merge/compare/v0.5.2...v0.5.3) (2024-08-07)
 
