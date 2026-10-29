@@ -19,3 +19,7 @@ Thumbs.db
 .sisyphus/
 .opencode/
 .chunkhound/
+
+# Python release helpers
+__pycache__/
+

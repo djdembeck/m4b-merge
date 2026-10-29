@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
-use crate::api::audible::{AudibleClient, AudibleError};
+use crate::api::{MetadataError, MetadataSource};
 use crate::audio::ffmpeg::FFmpeg;
 use crate::config::Config;
 use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
@@ -12,13 +12,19 @@ use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
 use crate::tagging::{Tagger, TaggingError};
 
-/// Static ASIN regex compiled once at startup
-static ASIN_REGEX: OnceLock<regex::Regex> = OnceLock::new();
+/// Static metadata ID regex compiled once at startup
+static METADATA_ID_REGEX: OnceLock<regex::Regex> = OnceLock::new();
 
-/// Get the static ASIN regex or initialize it
-fn get_asin_regex() -> &'static regex::Regex {
-    ASIN_REGEX.get_or_init(|| {
-        regex::Regex::new(r"\[([A-Z0-9]{10})\]").expect("Invalid ASIN regex pattern")
+/// Returns the metadata ID regex. Matches exactly the two ID shapes the API
+/// clients accept: an Audible ASIN (10 alphanumeric characters; the 10-char
+/// alternative is case-insensitive to match `AudibleClient::validate_id` and
+/// `AudiobookdbClient::looks_like_asin`) or an AudiobookDB internal id (12
+/// alphanumeric characters). A bracketed word whose content is neither 10 nor
+/// 12 alphanumeric characters (e.g. `[Unabridged 2020]`) yields no lookup.
+fn get_metadata_id_regex() -> &'static regex::Regex {
+    METADATA_ID_REGEX.get_or_init(|| {
+        regex::Regex::new(r"\[([A-Za-z0-9]{10}|[A-Za-z0-9]{12})\]")
+            .expect("Invalid metadata ID regex pattern")
     })
 }
 
@@ -32,7 +38,7 @@ pub enum ProcessorError {
     Merge(#[from] MergeError),
 
     #[error("API error: {0}")]
-    Api(#[from] AudibleError),
+    Api(#[from] MetadataError),
 
     #[error("Tagging error: {0}")]
     Tagging(#[from] TaggingError),
@@ -148,7 +154,7 @@ impl ProgressHandler for NoOpProgressHandler {
 pub struct Processor {
     config: Config,
     ffmpeg: Arc<FFmpeg>,
-    api_client: Option<AudibleClient>,
+    api_client: Option<MetadataSource>,
     merger: Merger,
     tagger: Tagger,
 }
@@ -161,16 +167,20 @@ impl Processor {
             FFmpeg::discover().map_err(|e| ProcessorError::FFmpegNotFound(e.to_string()))?,
         );
 
-        // Create API client if URL is provided
-        let api_client = if config.api_url.is_empty() {
-            None
-        } else {
-            match AudibleClient::with_base_url(&config.api_url) {
-                Ok(client) => Some(client),
-                Err(e) => {
-                    warn!("Failed to create API client: {}", e);
-                    None
-                }
+        // Create API client based on configured metadata source
+        let api_client = match MetadataSource::new_with_region(
+            config.metadata_source,
+            config.api_url.as_deref(),
+            config.region,
+        ) {
+            Ok(src) => Some(src),
+            Err(e) => {
+                warn!("Failed to create metadata source: {}", e);
+                eprintln!(
+                    "Warning: failed to create metadata source ({}); metadata lookup will be disabled.",
+                    e
+                );
+                None
             }
         };
 
@@ -185,7 +195,7 @@ impl Processor {
     pub fn with_components(
         config: Config,
         ffmpeg: Arc<FFmpeg>,
-        api_client: Option<AudibleClient>,
+        api_client: Option<MetadataSource>,
     ) -> Self {
         let merger = Merger::new(ffmpeg.clone());
         let tagger = Tagger::new();
@@ -311,31 +321,31 @@ impl Processor {
 
         debug!("Processing group '{}' with {} files", group.name, input_paths.len());
 
-        // Stage 2: API Lookup (optional - only if ASIN is provided or can be inferred)
+        // Stage 2: API Lookup (optional - only if metadata ID is provided or can be inferred)
         // Skipped in dry-run mode to avoid unnecessary network calls
         let metadata = if self.config.dry_run {
             None
         } else if let Some(client) = &self.api_client {
-            let extracted_asin = self.extract_asin(group);
+            let extracted_id = self.extract_metadata_id(group);
 
-            let asin = self.config.asin.as_deref().or(extracted_asin.as_deref());
+            let id = self.config.metadata_id.as_deref().or(extracted_id.as_deref());
 
-            if let Some(asin) = asin {
+            if let Some(id) = id {
                 progress_handler.on_progress(ProcessingProgress {
                     stage: ProcessingStage::ApiLookup,
                     current_file: Some(input_paths[0].clone()),
                     total_files: 1,
                     completed_files: 0,
-                    message: format!("Fetching metadata for ASIN: {}...", asin),
+                    message: format!("Fetching metadata for ID: {}...", id),
                 });
 
-                match client.fetch_book(asin).await {
+                match client.fetch_book(id).await {
                     Ok(book_metadata) => {
                         info!("Successfully fetched metadata for: {}", book_metadata.title);
                         Some(book_metadata)
                     }
                     Err(e) => {
-                        warn!("Failed to fetch metadata for ASIN {}: {}", asin, e);
+                        warn!("Failed to fetch metadata for ID {}: {}", id, e);
                         None
                     }
                 }
@@ -573,12 +583,33 @@ impl Processor {
         let author = metadata.authors.first().map(|s| s.trim()).unwrap_or("Unknown");
         result = result.replace("{author}", author);
 
+        // Replace {authors} with all authors trimmed, whitespace-only filtered, joined by ", "
+        let authors: Vec<&str> =
+            metadata.authors.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let authors_value =
+            if authors.is_empty() { "Unknown".to_string() } else { authors.join(", ") };
+        result = result.replace("{authors}", &authors_value);
+
         // Replace {narrator} with first narrator (trimmed)
         let narrator = metadata.narrators.first().map(|s| s.trim()).unwrap_or("Unknown");
         result = result.replace("{narrator}", narrator);
 
+        // Replace {narrators} with all narrators trimmed, whitespace-only filtered, joined by ", "
+        let narrators: Vec<&str> =
+            metadata.narrators.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let narrators_value =
+            if narrators.is_empty() { "Unknown".to_string() } else { narrators.join(", ") };
+        result = result.replace("{narrators}", &narrators_value);
+
         // Replace {title} (trimmed)
         result = result.replace("{title}", metadata.title.trim());
+
+        // Replace {genre} with first genre, or remove if none (trimmed)
+        if let Some(genre) = &metadata.genres.first().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            result = result.replace("{genre}", genre);
+        } else {
+            result = result.replace("{genre}", "");
+        }
 
         // Replace {subtitle} or remove if none (trimmed)
         if let Some(subtitle) = &metadata.subtitle {
@@ -608,6 +639,9 @@ impl Processor {
             result = result.replace("{year}", "");
         }
 
+        // Replace {metadata_id} (the looked-up ASIN/AudiobookDB id)
+        result = result.replace("{metadata_id}", &metadata.metadata_id);
+
         // Clean up: remove empty path segments and normalize slashes
         result = result
             .split('/')
@@ -619,12 +653,12 @@ impl Processor {
         result
     }
 
-    /// Extract ASIN from audio group (folder name, existing metadata, etc.)
-    fn extract_asin(&self, group: &AudioGroup) -> Option<String> {
-        let re = get_asin_regex();
+    /// Extract metadata ID from audio group (folder name, existing metadata, etc.)
+    fn extract_metadata_id(&self, group: &AudioGroup) -> Option<String> {
+        let re = get_metadata_id_regex();
         if let Some(captures) = re.captures(&group.name) {
-            if let Some(asin) = captures.get(1) {
-                return Some(asin.as_str().to_string());
+            if let Some(capture) = captures.get(1) {
+                return Some(capture.as_str().to_string());
             }
         }
         None
@@ -636,7 +670,7 @@ impl Processor {
     }
 
     /// Get the API client
-    pub fn api_client(&self) -> Option<&AudibleClient> {
+    pub fn api_client(&self) -> Option<&MetadataSource> {
         self.api_client.as_ref()
     }
 
@@ -654,18 +688,37 @@ impl Processor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{MetadataRegion, MetadataSourceKind};
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn create_test_config(temp_dir: &TempDir) -> Config {
+    /// Build a test `Config` with the standard dry-run defaults
+    /// (AudiobookDB source, no API URL override).
+    fn test_config(
+        output: Option<PathBuf>,
+        completed: Option<PathBuf>,
+        dry_run: bool,
+        metadata_id: Option<String>,
+    ) -> Config {
         Config::new(
             vec![],
-            Some(temp_dir.path().join("output")),
-            "https://api.audnex.us".to_string(),
-            Some(temp_dir.path().join("completed")),
+            output,
+            None,
+            MetadataSourceKind::Audiobookdb,
+            MetadataRegion::Us,
+            completed,
             1,
             "info".to_string(),
             "{author}/{title}".to_string(),
+            dry_run,
+            metadata_id,
+        )
+    }
+
+    fn create_test_config(temp_dir: &TempDir) -> Config {
+        test_config(
+            Some(temp_dir.path().join("output")),
+            Some(temp_dir.path().join("completed")),
             false,
             None,
         )
@@ -706,6 +759,96 @@ mod tests {
     }
 
     #[test]
+    fn test_format_path_authors_narrators_all_values() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let processor = Processor::new(config).unwrap();
+
+        let meta = BookMetadata::new("TESTID1234", "Title", "desc")
+            .add_author(" Alice ")
+            .add_author("Bob")
+            .add_narrator("N1")
+            .add_narrator("N2")
+            .add_narrator("N3");
+
+        assert_eq!(
+            processor.format_path("{authors} - {narrators}", &meta),
+            "Alice, Bob - N1, N2, N3"
+        );
+    }
+
+    #[test]
+    fn test_format_path_authors_narrators_empty_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let processor = Processor::new(config).unwrap();
+
+        let meta = BookMetadata::new("TESTID1234", "Title", "desc");
+
+        assert_eq!(processor.format_path("{authors}/{narrators}", &meta), "Unknown/Unknown");
+    }
+
+    #[test]
+    fn test_format_path_authors_narrators_single_backward_compat() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let processor = Processor::new(config).unwrap();
+
+        let meta = BookMetadata::new("TESTID1234", "Title", "desc")
+            .add_author("Solo")
+            .add_narrator("Narr");
+
+        assert_eq!(
+            processor.format_path("{author}/{narrator}/{authors}/{narrators}", &meta),
+            "Solo/Narr/Solo/Narr"
+        );
+    }
+
+    #[test]
+    fn test_format_path_authors_whitespace_only_filtered() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let processor = Processor::new(config).unwrap();
+
+        let meta =
+            BookMetadata::new("TESTID1234", "Title", "desc").add_author("   ").add_author("Dave");
+
+        assert_eq!(processor.format_path("{authors}", &meta), "Dave");
+    }
+
+    #[test]
+    fn test_determine_output_path_authors_single_segment() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(
+            Some(temp_dir.path().join("output")),
+            Some(temp_dir.path().join("completed")),
+            false,
+            None,
+        );
+        let mut config = config;
+        config.path_format = "{authors}/{title}".to_string();
+        let processor = Processor::new(config).unwrap();
+
+        let audio_file_path = create_test_audio_file(&temp_dir, "chapter1.mp3", b"dummy");
+        let audio_file = AudioFile::new(audio_file_path).unwrap();
+
+        let meta = BookMetadata::new("TESTID1234", "Title", "desc")
+            .add_author("A One")
+            .add_author("B Two");
+
+        let output_path = processor
+            .determine_output_path(std::slice::from_ref(&audio_file), Some(&meta))
+            .unwrap();
+
+        // The joined ", " value must survive sanitize_filename::sanitize as one segment
+        assert_eq!(
+            output_path.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new("A One, B Two"))
+        );
+        assert_eq!(output_path.file_name(), Some(std::ffi::OsStr::new("Title.m4b")));
+    }
+
+    #[test]
     fn test_processing_stage_display() {
         assert_eq!(ProcessingStage::Discovery.to_string(), "Discovery");
         assert_eq!(ProcessingStage::Merging.to_string(), "Merging");
@@ -737,17 +880,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_group_dry_run_no_metadata() {
         let temp_dir = TempDir::new().unwrap();
-        let config = Config::new(
-            vec![],
-            Some(temp_dir.path().join("output")),
-            String::new(),
-            None,
-            1,
-            "info".to_string(),
-            "{author}/{title}".to_string(),
-            true,
-            None,
-        );
+        let config = test_config(Some(temp_dir.path().join("output")), None, true, None);
         let processor = Processor::new(config).unwrap();
 
         // Create a test group with a dummy file
@@ -765,29 +898,26 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // Dry-run skips metadata validation/fetching entirely, so an invalid ID
+    // (INVALID_ID) does not cause the group to fail; only the dry-run path is exercised.
     #[tokio::test]
-    async fn test_process_group_dry_run_with_invalid_asin() {
+    async fn test_process_group_dry_run_with_invalid_id() {
         let temp_dir = TempDir::new().unwrap();
-        let config = Config::new(
-            vec![],
+        let config = test_config(
             Some(temp_dir.path().join("output")),
-            String::new(),
             None,
-            1,
-            "info".to_string(),
-            "{author}/{title}".to_string(),
             true,
-            Some("INVALID_ASIN".to_string()),
+            Some("INVALID_ID".to_string()),
         );
         let processor = Processor::new(config).unwrap();
 
-        let test_dir = temp_dir.path().join("Test Book [INVALID_ASIN]");
+        let test_dir = temp_dir.path().join("Test Book [INVALID_ID]");
         std::fs::create_dir(&test_dir).unwrap();
         let _file_path =
-            create_test_audio_file(&temp_dir, "Test Book [INVALID_ASIN]/chapter1.mp3", b"dummy");
+            create_test_audio_file(&temp_dir, "Test Book [INVALID_ID]/chapter1.mp3", b"dummy");
         let audio_file = AudioFile::new(test_dir.join("chapter1.mp3")).unwrap();
         let group = AudioGroup {
-            name: "Test Book [INVALID_ASIN]".to_string(),
+            name: "Test Book [INVALID_ID]".to_string(),
             files: vec![audio_file],
             disc_number: None,
         };
@@ -800,17 +930,7 @@ mod tests {
     async fn test_process_group_dry_run_output_path_resolution() {
         let temp_dir = TempDir::new().unwrap();
         let output_dir = temp_dir.path().join("output");
-        let config = Config::new(
-            vec![],
-            Some(output_dir.clone()),
-            String::new(),
-            None,
-            1,
-            "info".to_string(),
-            "{author}/{title}".to_string(),
-            true,
-            None,
-        );
+        let config = test_config(Some(output_dir.clone()), None, true, None);
         let processor = Processor::new(config).unwrap();
 
         // Create two test groups
@@ -828,6 +948,115 @@ mod tests {
             let result = result.unwrap();
             assert!(result.output_file.starts_with(&output_dir));
             assert_eq!(result.output_file.extension().unwrap(), "m4b");
+        }
+    }
+
+    fn test_metadata_with_genres() -> BookMetadata {
+        BookMetadata::new("B08XYZ1234", "Test Book", "")
+            .add_author("Test Author")
+            .add_genre("Mystery")
+            .add_genre("Thriller")
+    }
+
+    #[test]
+    fn test_format_path_new_tokens_populated() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
+        let meta = test_metadata_with_genres();
+
+        let result = processor.format_path("{author}/{genre}/{metadata_id}/{title}", &meta);
+        assert_eq!(result, "Test Author/Mystery/B08XYZ1234/Test Book");
+    }
+
+    #[test]
+    fn test_format_path_first_genre_with_comma() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
+        let meta = BookMetadata::new("B08XYZ1234", "Test Book", "")
+            .add_genre("Mystery, Thriller & Suspense");
+
+        let result = processor.format_path("{genre}", &meta);
+        assert_eq!(result, "Mystery, Thriller & Suspense");
+    }
+
+    #[test]
+    fn test_format_path_empty_genres_strips_segment() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
+
+        let no_genres = BookMetadata::new("B08XYZ1234", "Test Book", "").add_author("Test Author");
+        let result = processor.format_path("{author}/{genre}/{metadata_id}/{title}", &no_genres);
+        assert_eq!(result, "Test Author/B08XYZ1234/Test Book");
+
+        let whitespace_only = no_genres.clone().add_genre(" ");
+        let result =
+            processor.format_path("{author}/{genre}/{metadata_id}/{title}", &whitespace_only);
+        assert_eq!(result, "Test Author/B08XYZ1234/Test Book");
+    }
+
+    #[test]
+    fn test_format_path_metadata_id_inline() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
+        let meta = BookMetadata::new("B08XYZ1234", "Test Book", "");
+
+        let result = processor.format_path("{metadata_id}-{title}", &meta);
+        assert_eq!(result, "B08XYZ1234-Test Book");
+    }
+
+    #[test]
+    fn test_determine_output_path_all_unset_tokens() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().join("output");
+        let config = Config::new(
+            vec![],
+            Some(output_dir.clone()),
+            None,
+            MetadataSourceKind::Audiobookdb,
+            MetadataRegion::Us,
+            Some(temp_dir.path().join("completed")),
+            1,
+            "info".to_string(),
+            "{genre}/{subtitle}".to_string(),
+            false,
+            None,
+        );
+        let processor = Processor::new(config).unwrap();
+
+        let file_path = create_test_audio_file(&temp_dir, "chapter1.mp3", b"dummy");
+        let audio_file = AudioFile::new(file_path).unwrap();
+        let meta = BookMetadata::new("B08XYZ1234", "Test Book", "");
+
+        let output_path = processor.determine_output_path(&[audio_file], Some(&meta)).unwrap();
+        assert_eq!(output_path, output_dir.join("output.m4b"));
+    }
+
+    #[test]
+    fn test_extract_metadata_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
+
+        // Exactly two shapes are extracted: 10 alphanumeric (ASIN, any case,
+        // mirroring the API clients' validators) and 12 alphanumeric
+        // (AudiobookDB internal id). Other bracketed words are not.
+        let cases = [
+            ("Book [B08XYZ1234]", Some("B08XYZ1234")), // ASIN: 10 uppercase alphanumeric
+            ("Book [b08xyz1234]", Some("b08xyz1234")), // lowercase 10-char: accepted like the clients
+            ("Book [abc123def456]", Some("abc123def456")), // 12-char AudiobookDB internal id
+            // "Unabridged" is 10 ASCII alphanumeric characters, so the
+            // case-insensitive 10-char alternative now extracts it (the API
+            // lookup for it fails locally as an unknown id).
+            ("Book [Unabridged]", Some("Unabridged")), // 10-char alphanumeric word: ASIN-shaped
+            ("Book [Complete2024Set]", None),          // 15-char word
+            ("Book [ABCDEF12345]", None),              // 11 chars: neither shape
+            ("Book [abcdefghijk12]", None),            // 13 chars: neither shape
+            ("Book [B08XYZ123]", None),                // 9 chars
+            ("Book [ABCD_12345]", None),
+            ("Book No Tag", None),
+        ];
+        for (name, expected) in cases {
+            let group = AudioGroup { name: name.to_string(), files: vec![], disc_number: None };
+            assert_eq!(processor.extract_metadata_id(&group).as_deref(), expected, "name {name:?}");
         }
     }
 }
