@@ -2,6 +2,7 @@ use serde_json::Value;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 const MAX_TITLE_LEN: u32 = 10 * 1024;
 
@@ -20,6 +21,20 @@ pub fn read_chapters(
     path: &Path,
     ffprobe_path: Option<&str>,
 ) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+    // The Nero `chpl` list is preferred for its exact start times, but its
+    // entry count is a single byte: a file with both representations can carry
+    // a truncated list while the QuickTime chapter track holds every sample.
+    // When the track is longer, the list was truncated and the track is
+    // authoritative, so read it before anything that prefers the list.
+    if let Ok(tag) = mp4ameta::Tag::read_from_path(path) {
+        if tag.chapter_track().len() > tag.chapter_list().len() {
+            let chapters = chapters_from_track(tag.chapter_track(), tag.duration());
+            if !chapters.is_empty() {
+                return Ok(chapters);
+            }
+        }
+    }
+
     // Try to read chapters using ffprobe first
     if let Ok(chapters) = read_chapters_ffprobe(path, ffprobe_path) {
         if !chapters.is_empty() {
@@ -29,6 +44,33 @@ pub fn read_chapters(
 
     // Fall back to parsing the chpl atom directly
     read_chapters_from_atom(path)
+}
+
+/// Convert a QuickTime chapter track into chapters.
+///
+/// The track stores starts, not durations, so each chapter's duration is the
+/// gap to the next start; the last chapter runs to `media_duration`.
+fn chapters_from_track(track: &[mp4ameta::Chapter], media_duration: Duration) -> Vec<Chapter> {
+    let mut chapters: Vec<Chapter> = track
+        .iter()
+        .map(|chapter| Chapter {
+            title: chapter.title.clone(),
+            start_time: chapter.start.as_millis() as u64,
+            duration: 0,
+        })
+        .collect();
+
+    for index in 0..chapters.len() {
+        if index + 1 < chapters.len() {
+            chapters[index].duration =
+                chapters[index + 1].start_time.saturating_sub(chapters[index].start_time);
+        }
+    }
+    if let Some(last) = chapters.last_mut() {
+        last.duration = (media_duration.as_millis() as u64).saturating_sub(last.start_time);
+    }
+
+    chapters
 }
 
 /// Read chapters using ffprobe.
@@ -306,6 +348,40 @@ fn parse_chpl_atom(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn track(items: &[(&str, u64)]) -> Vec<mp4ameta::Chapter> {
+        items
+            .iter()
+            .map(|(title, start_ms)| {
+                mp4ameta::Chapter::new(Duration::from_millis(*start_ms), *title)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_chapters_from_track_derives_durations() {
+        let chapters = chapters_from_track(
+            &track(&[("Intro", 0), ("One", 2_000), ("Outro", 7_000)]),
+            Duration::from_secs(10),
+        );
+
+        assert_eq!(chapters.len(), 3);
+        assert_eq!(chapters[0].title, "Intro");
+        assert_eq!(chapters[0].start_time, 0);
+        assert_eq!(chapters[0].duration, 2_000);
+        assert_eq!(chapters[1].duration, 5_000);
+        // Last chapter runs to the media duration, not to the last start.
+        assert_eq!(chapters[2].duration, 3_000);
+    }
+
+    #[test]
+    fn test_chapters_from_track_handles_empty_and_short_media() {
+        assert!(chapters_from_track(&[], Duration::from_secs(10)).is_empty());
+
+        // Media shorter than the last start must not underflow.
+        let chapters = chapters_from_track(&track(&[("Late", 5_000)]), Duration::from_secs(1));
+        assert_eq!(chapters[0].duration, 0);
+    }
 
     #[test]
     #[ignore = "This is a manual/local integration test. Run with: cargo test -- --ignored"]

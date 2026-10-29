@@ -337,6 +337,39 @@ fn test_chapter_embed_multibyte_title_does_not_panic() {
 }
 
 #[test]
+fn test_chapter_read_prefers_track_when_chpl_list_is_truncated() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("test.m4b");
+    create_test_m4b(&m4b_path, 30);
+
+    // Reproduce the post-#464 shape: the QuickTime track holds all chapters
+    // while the Nero `chpl` list is capped at the one-byte entry count.
+    let mut tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag");
+    tag.chapter_list_mut().clear();
+    tag.chapter_track_mut().clear();
+    let all: Vec<mp4ameta::Chapter> = (0..257)
+        .map(|i| {
+            mp4ameta::Chapter::new(Duration::from_millis(i as u64 * 100), format!("Chapter {}", i))
+        })
+        .collect();
+    tag.chapter_list_mut().extend(all[..255].iter().cloned());
+    tag.chapter_track_mut().extend(all);
+    tag.write_to_path(&m4b_path).expect("write chapters");
+
+    let read_back =
+        m4b_merge::chapters::read_chapters(&m4b_path, None).expect("Failed to read chapters");
+
+    assert_eq!(read_back.len(), 257, "the full chapter track must win over the truncated list");
+    assert_eq!(read_back[0].title, "Chapter 0");
+    assert_eq!(read_back[256].title, "Chapter 256");
+    assert_eq!(read_back[256].start_time, 25_600);
+}
+
+#[test]
 fn test_chapter_long_duration() {
     if !ffmpeg_available() {
         return;
