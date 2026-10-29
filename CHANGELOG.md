@@ -2,8 +2,30 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
-## [1.0.1](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.1) (2026-08-03)
+## [Unreleased]
 
+### Added
+- Chapter embedding into M4B files using native mp4ameta library
+- Chapters are now embedded directly into the M4B container, not just written to chapters.txt
+- Full chapter metadata round-trip: extraction from source → embedding in output
+- New **AudiobookDB** metadata source (`https://audiobookdb.org`, v1.0.0 API contract),
+  selected by default via `--metadata-source audiobookdb`:
+  - ASIN resolution via `GET /audiobooks/external/audible/{ASIN}`, with a search
+    fallback for unknown identifiers
+  - Cover art from the documented full-resolution `sourceUrl` (768px `large.jpg` fallback)
+  - Series positions from the authoritative `position` object
+  - Retry logic honors the `Retry-After` header on 429s
+
+### Changed
+- Release pipeline: versions are prepared on `develop` and promoted to `main` as a frozen tree; the `Release` workflow publishes tested `main` SHAs without source edits, merge-back, or `latest` writes. release-please configuration and manifest removed.
+- **Breaking:** `--asin` renamed to `--metadata-id` (accepts an ASIN or an AudiobookDB
+  book ID, falling back to search for other identifiers); new `--metadata-source` flag
+  (default `audiobookdb`) selects the metadata source, and new `--api-url` overrides the
+  selected source's default API URL. `--api-url` no longer implies the Audnexus
+  source: it only overrides the URL for the source chosen by `--metadata-source`,
+  and m4b-merge warns when a URL is passed to the AudiobookDB client.
+
+## [1.0.1](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.1) (2026-08-03)
 
 ### Bug Fixes
 
@@ -25,13 +47,6 @@ All notable changes to this project will be documented in this file. See [standa
 * **docker:** disable auto-generated latest tag and skip tagless refs ([d68f93d](https://github.com/djdembeck/m4b-merge/commit/d68f93d97a280fe29702a4f7bb3bac3abbfabeb4))
 * **docker:** disable latest tag in manifest job metadata ([29ee9ee](https://github.com/djdembeck/m4b-merge/commit/29ee9ee13d9073c4d8b5394d06ea2df480f7bdbd))
 * **docker:** point latest tag at multi-arch manifest ([8880992](https://github.com/djdembeck/m4b-merge/commit/888099289ae5995c4749ba3f4b587ee6ee1947e3))
-
-## [Unreleased]
-
-### Added
-- Chapter embedding into M4B files using native mp4ameta library
-- Chapters are now embedded directly into the M4B container, not just written to chapters.txt
-- Full chapter metadata round-trip: extraction from source → embedding in output
 
 ### [0.5.3](https://github.com/djdembeck/m4b-merge/compare/v0.5.2...v0.5.3) (2024-08-07)
 

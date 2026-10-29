@@ -1,6 +1,6 @@
 [package]
 name = "m4b-merge"
-version = "1.0.1"
+version = "2.0.0"
 edition = "2024"
 description = "A CLI tool which outputs consistently sorted, tagged, single m4b files"
 authors = ["djdembeck"]
@@ -14,7 +14,7 @@ clap = { version = "4.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-tokio = { version = "1.13.1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+tokio = { version = "1.13.1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time"] }
 tokio-retry = "0.3"
 anyhow = "1.0"
 thiserror = "2.0"
@@ -27,6 +27,16 @@ tempfile = "=3.27.0"
 walkdir = "2.5"
 natord = "1.0"
 regex = "1.10"
+httpdate = "=1.0.3"
 
 [dev-dependencies]
 tracing-test = "0.2"
+
+# mp4ameta 0.13.0 writes a chapter track's sample table in the movie timescale
+# while leaving the track's own media timescale untouched, so every write
+# rescales chapter times. Pin the upstream fix (PR Saecki/rust-mp4ameta#43) by
+# full commit SHA. Note: cargo audit does not match git-sourced packages, so
+# this patch stops advisory coverage for mp4ameta; replace it with a released
+# version as soon as one contains the fix.
+[patch.crates-io]
+mp4ameta = { git = "https://github.com/djdembeck/mp4ameta", rev = "f0a86397c8f6b82fc72c850761b32760a3b17491" }

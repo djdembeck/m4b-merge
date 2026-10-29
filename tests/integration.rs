@@ -405,3 +405,47 @@ fn test_dry_run_with_audio() {
         .count();
     assert_eq!(m4b_files, 0, "Dry run should not create any output files");
 }
+
+#[test]
+fn test_region_rejects_invalid_value() {
+    let input_dir = TempDir::new().unwrap();
+
+    let output = Command::new(bin_path())
+        .args([
+            "--dry-run",
+            "-i",
+            input_dir.path().to_str().unwrap(),
+            "--metadata-source",
+            "audnexus",
+            "--region",
+            "xx",
+        ])
+        .output()
+        .expect("Failed to run m4b-merge");
+
+    assert!(!output.status.success(), "Invalid --region should be rejected by clap");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid value"), "stderr should report the invalid value");
+    assert!(stderr.contains("xx"), "stderr should name the rejected value");
+}
+
+#[test]
+fn test_region_accepted_with_audnexus() {
+    let input_dir = TempDir::new().unwrap();
+    std::fs::write(input_dir.path().join("test.txt"), "dummy").unwrap();
+
+    let output = Command::new(bin_path())
+        .args([
+            "--dry-run",
+            "-i",
+            input_dir.path().to_str().unwrap(),
+            "--metadata-source",
+            "audnexus",
+            "--region",
+            "de",
+        ])
+        .output()
+        .expect("Failed to run m4b-merge");
+
+    assert!(output.status.success(), "Valid --region should be accepted end-to-end");
+}
