@@ -4,9 +4,6 @@ All notable changes to this project will be documented in this file. See [standa
 
 ## [Unreleased]
 
-### Changed
-- Release pipeline: versions are prepared on `develop` and promoted to `main` as a frozen tree; the `Release` workflow publishes tested `main` SHAs without source edits, merge-back, or `latest` writes. release-please configuration and manifest removed.
-
 ### Added
 - Chapter embedding into M4B files using native mp4ameta library
 - Chapters are now embedded directly into the M4B container, not just written to chapters.txt
@@ -20,6 +17,7 @@ All notable changes to this project will be documented in this file. See [standa
   - Retry logic honors the `Retry-After` header on 429s
 
 ### Changed
+- Release pipeline: versions are prepared on `develop` and promoted to `main` as a frozen tree; the `Release` workflow publishes tested `main` SHAs without source edits, merge-back, or `latest` writes. release-please configuration and manifest removed.
 - **Breaking:** `--asin` renamed to `--metadata-id` (accepts an ASIN or an AudiobookDB
   book ID, falling back to search for other identifiers); new `--metadata-source` flag
   (default `audiobookdb`) selects the metadata source, and new `--api-url` overrides the
