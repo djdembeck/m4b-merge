@@ -32,7 +32,19 @@ docker run --rm \
 
 ### Pre-built Binaries
 
-Download the latest release for your platform from the [releases page](https://github.com/djdembeck/m4b-merge/releases).
+Download the release for your platform from the [releases page](https://github.com/djdembeck/m4b-merge/releases). Select the asset by its exact full name — never by the first asset containing `linux`:
+
+| Asset | Platform | Linkage | Runtime prerequisites |
+|---|---|---|---|
+| `m4b-merge-linux` | Linux x86-64 | static musl | FFmpeg, CA roots, resolver files |
+| `m4b-merge-linux-arm64` | Linux ARM64 | static musl | FFmpeg, CA roots, resolver files |
+| `m4b-merge-macos` | macOS | — | FFmpeg, CA roots, resolver files |
+| `m4b-merge-windows.exe` | Windows | — | FFmpeg, CA roots, resolver files |
+
+From this release forward no GNU-linked Linux asset is produced. For
+v2.0.0 only, `m4b-merge-linux` is the original GNU binary; the
+static-musl x86-64 asset added to that release is
+`m4b-merge-linux-musl`.
 
 ### From Source
 

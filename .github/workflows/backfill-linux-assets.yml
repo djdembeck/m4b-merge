@@ -1,0 +1,452 @@
+# Add-only v2.0.0 historical asset backfill (separately dispatched).
+#
+# Restores the immutable v2.0.0 publication with x86-64 musl as the
+# additive `m4b-merge-linux-musl` asset and the missing ARM64 musl as
+# `m4b-merge-linux-arm64`. The original three assets, tag, and release
+# are never renamed, replaced, deleted, or rewritten: the publisher
+# helper validates every existing asset first and uploads only the
+# missing, correctly labeled files.
+#
+# The binaries are the exact bytes of the validated historical images
+# (digest capture, provenance labels checked against the frozen v2.0.0
+# commit). They are never rebuilt, re-tagged, or stripped. Native parity
+# (GNU baseline vs extracted musl bytes) is advisory evidence: the
+# per-case distributions are bundled as artifacts for review, matching
+# the advisory cargo-audit convention — a noisy host measurement must
+# never block the immutable restoration.
+#
+# Default dispatch (publish=false) performs every local verification and
+# stops before any writes; publish=true is a separate authorization.
+# This workflow never creates a release or tag, never edits release
+# notes, and never builds or pushes images.
+
+name: Backfill Linux Assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Upload the missing v2.0.0 assets (default: verify only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  # Serialize with the main publication so a backfill can never race it.
+  group: release
+  cancel-in-progress: false
+  queue: max
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  BACKFILL_VERSION: v2.0.0
+  BACKFILL_SHA: cbc5c8a45ce7f24c4261d36fbc03d3e3599ccd01
+
+jobs:
+  # From any non-main ref, fail loudly: on non-main every verification
+  # job would skip and the run would end green.
+  guard:
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse non-main dispatch
+        run: |
+          echo "::error::The backfill workflow must run from main"
+          exit 1
+
+  # Current, reviewed helper code verifies the frozen historical facts:
+  # tag -> commit, existing releasened assets, image provenance, and the
+  # two immutable version-tag digests.
+  preflight:
+    needs: [guard]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      amd64-digest: ${{ steps.resolve.outputs.amd64-digest }}
+      arm64-digest: ${{ steps.resolve.outputs.arm64-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify v2.0.0 tag points at the frozen commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ env.BACKFILL_SHA }}
+        run: |
+          set -euo pipefail
+          resolved=$(gh api --hostname github.com \
+            "repos/${GITHUB_REPOSITORY}/commits/v2.0.0" --jq '.sha')
+          if [ "$resolved" != "$SHA" ]; then
+            echo "::error::v2.0.0 resolves to ${resolved}, expected ${SHA}"
+            exit 1
+          fi
+          echo "v2.0.0 -> ${resolved}"
+
+      - name: Verify the existing release carries the original three assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess
+
+
+          def api(*path):
+              return json.loads(subprocess.run(
+                  ["gh", "api", "--hostname", "github.com",
+                   f"repos/{os.environ['GITHUB_REPOSITORY']}/{path}"],
+                  env=os.environ, capture_output=True, check=True).stdout)
+
+
+          release = api("releases/tags/v2.0.0")
+          names = [a["name"] for a in release.get("assets", [])]
+          for expected in ("m4b-merge-linux", "m4b-merge-macos", "m4b-merge-windows.exe"):
+              if names.count(expected) != 1:
+                  raise SystemExit(
+                      f"Original v2.0.0 asset missing or duplicated: {expected}")
+          print("Original v2.0.0 assets present and uniquely named")
+          PY
+
+      - name: Resolve and verify the historical image digests
+        id: resolve
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          SHA: ${{ env.BACKFILL_SHA }}
+          VERSION: ${{ env.BACKFILL_VERSION }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, sys
+
+          sys.path.insert(0, "scripts")
+          from publish_release import image
+
+          name = os.environ["IMAGE"]
+          digests = {}
+          for arch in ("amd64", "arm64"):
+              ref = f"{name}:{os.environ['VERSION']}-{arch}"
+              digest = image(name, ref, os.environ["SHA"],
+                              os.environ["VERSION"], arch)
+              if digest is None:
+                  raise SystemExit(f"Historical image missing: {ref}")
+              digests[arch] = digest
+              print(f"{arch}: {digest}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
+              stream.write(f"amd64-digest={digests['amd64']}\n")
+              stream.write(f"arm64-digest={digests['arm64']}\n")
+          PY
+
+  # Native amd64/arm64 extraction + smoke + parity evidence, identical
+  # protocol to the future-release linux-assets job, but on the frozen
+  # historical version/SHA and the extracted original (unstripped) bytes.
+  linux-assets:
+    needs: [preflight]
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            gnu-target: x86_64-unknown-linux-gnu
+            asset: m4b-merge-linux-musl
+            digest: ${{ needs.preflight.outputs.amd64-digest }}
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            gnu-target: aarch64-unknown-linux-gnu
+            asset: m4b-merge-linux-arm64
+            digest: ${{ needs.preflight.outputs.arm64-digest }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BACKFILL_SHA }}
+          path: frozen-source
+          persist-credentials: false
+
+      - name: Verify frozen source version
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import tomllib
+
+          manifest = tomllib.load(open("frozen-source/Cargo.toml", "rb"))
+          version = str(manifest["package"]["version"])
+          if version != "2.0.0":
+              raise SystemExit(f"Frozen manifest version is {version}, expected 2.0.0")
+          print(f"frozen-source version: {version}")
+          PY
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: 1.96
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: backfill-${{ runner.os }}-cargo-${{ hashFiles('frozen-source/Cargo.lock') }}
+          restore-keys: backfill-${{ runner.os }}-cargo-
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install native verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg binutils build-essential \
+            pkg-config cmake perl ca-certificates
+
+      - name: Extract original image bytes (no strip, no rebuild)
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          python3 scripts/publish_release.py extract \
+            --image "$IMAGE" \
+            --digest "${{ matrix.digest }}" \
+            --sha "$SHA" --version "$VERSION" --arch "$ARCH" \
+            --output "artifacts/${{ matrix.asset }}"
+        env:
+          ARCH: ${{ matrix.arch }}
+          SHA: ${{ env.BACKFILL_SHA }}
+          VERSION: ${{ env.BACKFILL_VERSION }}
+
+      - name: Native smoke (original bytes, unstripped, real merges)
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_linux_asset.py smoke \
+            --binary "artifacts/${{ matrix.asset }}" \
+            --version "$VERSION" --arch "$ARCH"
+        env:
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ env.BACKFILL_VERSION }}
+
+      - name: Container smoke (debian:12-slim, asset read-only)
+        run: |
+          set -euo pipefail
+          PACKAGES="python3 ffmpeg binutils ca-certificates"
+          docker run --rm \
+            -v "$PWD/scripts/verify_linux_asset.py:/verify/linux_asset.py:ro" \
+            -v "$PWD/artifacts/:/verify/artifacts/:ro" \
+            debian:12-slim \
+            /bin/sh -c "apt-get update -y && apt-get install -y $PACKAGES && \
+              python3 /verify/linux_asset.py smoke \
+                --binary /verify/artifacts/$ASSET \
+                --version $VERSION --arch $ARCH"
+        env:
+          ARCH: ${{ matrix.arch }}
+          ASSET: ${{ matrix.asset }}
+          VERSION: ${{ env.BACKFILL_VERSION }}
+
+      - name: Container smoke (alpine:3.24, asset read-only)
+        run: |
+          set -euo pipefail
+          PACKAGES="python3 ffmpeg binutils ca-certificates"
+          docker run --rm \
+            -v "$PWD/scripts/verify_linux_asset.py:/verify/linux_asset.py:ro" \
+            -v "$PWD/artifacts/:/verify/artifacts/:ro" \
+            alpine:3.24 \
+            /bin/sh -c "apk add --no-cache $PACKAGES && \
+              python3 /verify/linux_asset.py smoke \
+                --binary /verify/artifacts/$ASSET \
+                --version $VERSION --arch $ARCH"
+        env:
+          ARCH: ${{ matrix.arch }}
+          ASSET: ${{ matrix.asset }}
+          VERSION: ${{ env.BACKFILL_VERSION }}
+
+      - name: Resolve the GNU parity baseline
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCH: ${{ matrix.arch }}
+          GNU_TARGET: ${{ matrix.gnu-target }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/gnu-baseline-target
+          TAG: ${{ env.BACKFILL_VERSION }}
+        run: |
+          set -euo pipefail
+          if [ "$ARCH" = "amd64" ]; then
+            # The original x86-64 GNU asset is the exact historical
+            # comparator. The pattern must select exactly that file:
+            # an approximate glob would also match the added
+            # m4b-merge-linux-musl asset once publication completes.
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern "m4b-merge-linux" --dir "$RUNNER_TEMP/baseline"
+            [ "$(find "$RUNNER_TEMP/baseline" -type f | wc -l)" -eq 1 ] || {
+              echo "::error::Baseline download matched more than one asset"
+              exit 1
+            }
+            baseline="$RUNNER_TEMP/baseline/m4b-merge-linux"
+            version=$("$baseline" --version)
+            case "$version" in
+              "m4b-merge 2.0.0") : ;;
+              *) echo "::error::Baseline reports ${version}, expected m4b-merge 2.0.0"
+                 exit 1 ;;
+            esac
+            # GNU dynamic executables carry NEEDED entries; the original
+            # asset must still be that binary, not a musl replacement.
+            readelf --wide --dynamic "$baseline" | grep -q NEEDED || {
+              echo "::error::Baseline lost its NEEDED entries; not the original GNU binary"
+              exit 1
+            }
+          else
+            # No historical ARM64 asset: build the frozen source's
+            # validation-only GNU baseline (never published).
+            rustup target add "$GNU_TARGET"
+            cargo build --manifest-path frozen-source/Cargo.toml \
+              --release --locked --target "$GNU_TARGET" --target-dir "$CARGO_TARGET_DIR"
+            baseline="$CARGO_TARGET_DIR/$GNU_TARGET/release/m4b-merge"
+            version=$("$baseline" --version)
+            case "$version" in
+              "m4b-merge 2.0.0") : ;;
+              *) echo "::error::Baseline reports ${version}, expected m4b-merge 2.0.0"
+                 exit 1 ;;
+            esac
+          fi
+          echo "baseline=$baseline" >> "$GITHUB_OUTPUT"
+
+      - name: Native parity benchmark (GNU baseline vs extracted bytes; advisory)
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_linux_asset.py benchmark \
+            --baseline "$BASELINE" \
+            --candidate "artifacts/$ASSET" \
+            --version "$VERSION" --arch "$ARCH" \
+            --report "$RUNNER_TEMP/parity-$ARCH.json"
+        env:
+          BASELINE: ${{ steps.baseline.outputs.baseline }}
+          ARCH: ${{ matrix.arch }}
+          ASSET: ${{ matrix.asset }}
+          VERSION: ${{ env.BACKFILL_VERSION }}
+
+      - name: Upload parity evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-parity-${{ matrix.arch }}
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/parity-${{ matrix.arch }}.json
+
+      - name: Upload verified backfill asset
+        if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.asset }}
+          path: artifacts/${{ matrix.asset }}
+
+  # The only job with remote write access, active only on explicit
+  # publish=true authorization after successful native verification.
+  publish-assets:
+    needs: [preflight, linux-assets]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.publish == true
+    permissions:
+      contents: write
+      packages: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: "Publish gate: tag, release, and original assets still bind"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ env.BACKFILL_SHA }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess
+
+
+          def api(*path):
+              return json.loads(subprocess.run(
+                  ["gh", "api", "--hostname", "github.com",
+                   f"repos/{os.environ['GITHUB_REPOSITORY']}/{path}"],
+                  env=os.environ, capture_output=True, check=True).stdout)
+
+
+          resolved = api("commits/v2.0.0")["sha"]
+          if resolved != os.environ["SHA"]:
+              raise SystemExit(f"v2.0.0 now resolves to {resolved}")
+          release = api("releases/tags/v2.0.0")
+          names = [a["name"] for a in release.get("assets", [])]
+          for expected in ("m4b-merge-linux", "m4b-merge-macos", "m4b-merge-windows.exe"):
+              if names.count(expected) != 1:
+                  raise SystemExit(
+                      f"Original v2.0.0 asset missing or duplicated: {expected}")
+          print("Backfill gate: tag and release unchanged, originals intact")
+          PY
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+          pattern: m4b-merge-*
+
+      - name: Stage the original three release assets unchanged
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for name in m4b-merge-linux m4b-merge-macos m4b-merge-windows.exe; do
+            mkdir -p "artifacts/$name"
+            gh release download "v2.0.0" --repo "$GITHUB_REPOSITORY" \
+              --pattern "$name" --dir "artifacts/$name"
+            [ -f "artifacts/$name/$name" ] || {
+              echo "::error::Original asset $name not staged"
+              exit 1
+            }
+          done
+
+      - name: Add the two missing assets (add-only, labeled, validated)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ env.BACKFILL_SHA }}
+        run: >-
+          python3 scripts/publish_release.py assets
+          --repo "$GITHUB_REPOSITORY" --tag "v2.0.0" --sha "$SHA" --artifacts artifacts
+          --asset m4b-merge-linux --asset m4b-merge-linux-musl
+          --asset m4b-merge-linux-arm64 --asset m4b-merge-macos
+          --asset m4b-merge-windows.exe

@@ -5,23 +5,31 @@
 # workflow never recomputes versions, never edits Cargo files, and never
 # syncs main back to develop. It publishes exactly the commit it runs on:
 #
-#   1. check:            the SHA must belong to main and its version must be
-#                        new (helper check-publication). No tag yet.
-#   2. test / binaries:  full real test suite (ffmpeg installed on Linux)
-#                        and the existing Linux/macOS/Windows binaries, all
+#   1. check:            the SHA must belong to main and its version must
+#                        be new (helper check-publication). No tag yet.
+#   2. test:             full real test suite (ffmpeg installed on Linux)
 #                        from Cargo.lock.
-#   3. docker:           native amd64 + arm64 builds pushed as immutable
+#   3. binaries:         the existing macOS/Windows binaries, each built
+#                        from Cargo.lock and verified against the release
+#                        version.
+#   4. docker:           native amd64 + arm64 builds pushed as immutable
 #                        SHA staging tags (sha-<sha>-<arch>), which may be
 #                        pushed before the tag.
-#   4. tag:              ONLY after test + binaries + docker succeed, the
-#                        helper creates the vX.Y.Z tag and the GitHub
-#                        release (empty notes — the Annalist GitHub App
-#                        fills the body via webhook).
-#   5. manifest:         the SHA staging images are retagged
+#   5. linux-assets:     the exact digest-pinned image bytes are extracted
+#                        on the native amd64/arm64 runners and proven with
+#                        the static-musl smoke, two container smokes, and
+#                        the GNU-vs-musl native parity benchmark (advisory
+#                        evidence, like the advisory cargo audit) — the
+#                        Linux release assets are these verified bytes.
+#   6. tag:              ONLY after test + binaries + docker + linux-assets
+#                        succeed, the helper creates the vX.Y.Z tag and the
+#                        GitHub release (empty notes — the Annalist GitHub
+#                        App fills the body via webhook).
+#   7. manifest:         the SHA staging images are retagged
 #                        vX.Y.Z-amd64/arm64 and assembled into the canonical
 #                        multi-arch vX.Y.Z manifest — every published image
 #                        was built from this SHA.
-#   6. upload:           missing release assets are uploaded (existing
+#   8. upload:           missing release assets are uploaded (existing
 #                        assets are never overwritten).
 #
 # Immutability and retry semantics:
@@ -129,16 +137,16 @@ jobs:
       - run: cargo test --all-features --locked
 
   # ─────────────────────────────────────────────────────────────────
-  # The existing binaries for the tested SHA. The built binary must
-  # report the checked-out release version before it is published.
+  # The existing macOS/Windows binaries for the tested SHA. The built
+  # binary must report the checked-out release version before it is
+  # published. Linux assets are produced by linux-assets from the
+  # verified native image bytes (never built here).
   # ─────────────────────────────────────────────────────────────────
   binaries:
     needs: [check]
     strategy:
       matrix:
         include:
-          - runs-on: ubuntu-latest
-            name: linux
           - runs-on: macos-latest
             name: macos
           - runs-on: windows-latest
@@ -302,14 +310,173 @@ jobs:
         run: python3 scripts/publish_release.py stage --required --image "$IMAGE" --sha "$SHA" --version "$VERSION" --arch arm64
 
   # ─────────────────────────────────────────────────────────────────
-  # The immutable tag — only after test + binaries + docker succeeded.
+  # Linux release assets: extract the exact bytes from the verified
+  # native SHA staging image (digest-pinned, provenance-checked, never
+  # stripped again), then prove them on the native runner with the
+  # static-musl smoke and the GNU-musl parity benchmark (advisory
+  # evidence; per-case distributions are uploaded for review, matching
+  # the advisory cargo-audit convention). A validation-only GNU build
+  # from this same checkout/lockfile is the baseline; it is benchmarked
+  # but never staged as a release asset.
+  # ─────────────────────────────────────────────────────────────────
+  linux-assets:
+    needs: [check, docker-amd64, docker-arm64]
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            gnu-target: x86_64-unknown-linux-gnu
+            asset: m4b-merge-linux
+            digest: ${{ needs.docker-amd64.outputs.digest }}
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            gnu-target: aarch64-unknown-linux-gnu
+            asset: m4b-merge-linux-arm64
+            digest: ${{ needs.docker-arm64.outputs.digest }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      # Job-level env cannot read the workflow env context; build the
+      # reference from github.repository (identical value to the workflow env).
+      IMAGE: ghcr.io/${{ github.repository }}
+      SHA: ${{ github.sha }}
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: 1.96
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install native verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg binutils build-essential \
+            pkg-config cmake perl ca-certificates
+
+      - name: Extract verified asset bytes from the digest-pinned image
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          python3 scripts/publish_release.py extract \
+            --image "$IMAGE" \
+            --digest "${{ matrix.digest }}" \
+            --sha "$SHA" --version "$VERSION" --arch "$ARCH" \
+            --output "artifacts/${{ matrix.asset }}"
+        env:
+          ARCH: ${{ matrix.arch }}
+
+      - name: Native smoke (exact bytes, stripped, real merges)
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_linux_asset.py smoke \
+            --binary "artifacts/${{ matrix.asset }}" \
+            --version "$VERSION" --arch "$ARCH" --expect-stripped
+        env:
+          ARCH: ${{ matrix.arch }}
+
+      - name: Container smoke (debian:12-slim, asset read-only)
+        run: |
+          set -euo pipefail
+          PACKAGES="python3 ffmpeg binutils ca-certificates"
+          docker run --rm \
+            -v "$PWD/scripts/verify_linux_asset.py:/verify/linux_asset.py:ro" \
+            -v "$PWD/artifacts/:/verify/artifacts/:ro" \
+            debian:12-slim \
+            /bin/sh -c "apt-get update -y && apt-get install -y $PACKAGES && \
+              python3 /verify/linux_asset.py smoke \
+                --binary /verify/artifacts/$ASSET \
+                --version $VERSION --arch $ARCH --expect-stripped"
+        env:
+          ARCH: ${{ matrix.arch }}
+          ASSET: ${{ matrix.asset }}
+
+      - name: Container smoke (alpine:3.24, asset read-only)
+        run: |
+          set -euo pipefail
+          PACKAGES="python3 ffmpeg binutils ca-certificates"
+          docker run --rm \
+            -v "$PWD/scripts/verify_linux_asset.py:/verify/linux_asset.py:ro" \
+            -v "$PWD/artifacts/:/verify/artifacts/:ro" \
+            alpine:3.24 \
+            /bin/sh -c "apk add --no-cache $PACKAGES && \
+              python3 /verify/linux_asset.py smoke \
+                --binary /verify/artifacts/$ASSET \
+                --version $VERSION --arch $ARCH --expect-stripped"
+        env:
+          ARCH: ${{ matrix.arch }}
+          ASSET: ${{ matrix.asset }}
+
+      - name: Build validation-only GNU baseline (never published)
+        env:
+          GNU_TARGET: ${{ matrix.gnu-target }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/gnu-baseline-target
+        run: |
+          set -euo pipefail
+          rustup target add "$GNU_TARGET"
+          cargo build --release --locked --target "$GNU_TARGET"
+
+      - name: Native parity benchmark (GNU baseline vs musl asset; advisory)
+        env:
+          GNU_TARGET: ${{ matrix.gnu-target }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/gnu-baseline-target
+          ARCH: ${{ matrix.arch }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_linux_asset.py benchmark \
+            --baseline "$CARGO_TARGET_DIR/$GNU_TARGET/release/m4b-merge" \
+            --candidate "artifacts/$ASSET" \
+            --version "$VERSION" --arch "$ARCH" \
+            --report "$RUNNER_TEMP/parity-$ARCH.json"
+
+      - name: Upload parity evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-parity-${{ matrix.arch }}
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/parity-${{ matrix.arch }}.json
+
+      - name: Upload verified Linux asset
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.asset }}
+          path: artifacts/${{ matrix.asset }}
+
   # The helper refuses to point it at any different SHA. The GitHub
   # release is created empty; Annalist fills the body via webhook.
   # ─────────────────────────────────────────────────────────────────
   tag:
     permissions:
       contents: write
-    needs: [check, test, binaries, docker-amd64, docker-arm64]
+    needs: [check, test, binaries, docker-amd64, docker-arm64, linux-assets]
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
@@ -380,7 +547,7 @@ jobs:
   upload:
     permissions:
       contents: write
-    needs: [tag, binaries]
+    needs: [tag, binaries, linux-assets]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -390,10 +557,17 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
+          # Per-artifact folders are the staging layout the publisher
+          # expects; non-matching artifacts (parity evidence) stay out.
+          pattern: m4b-merge-*
 
       - name: Upload missing release assets (validate before reuse)
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.tag.outputs.tag }}
           SHA: ${{ github.sha }}
-        run: python3 scripts/publish_release.py assets --repo "$GITHUB_REPOSITORY" --tag "$TAG" --sha "$SHA" --artifacts artifacts
+        run: >-
+          python3 scripts/publish_release.py assets
+          --repo "$GITHUB_REPOSITORY" --tag "$TAG" --sha "$SHA" --artifacts artifacts
+          --asset m4b-merge-linux --asset m4b-merge-linux-arm64
+          --asset m4b-merge-macos --asset m4b-merge-windows.exe
