@@ -61,7 +61,7 @@ pub enum AudibleError {
     NotFound(String),
 
     #[error(
-        "Book not available in region '{region}' for metadata_id: {metadata_id} — try --region with the book's Audible market"
+        "Book not found in region '{region}' for metadata_id: {metadata_id} — check the ID, or try --region with the book's Audible market"
     )]
     RegionUnavailable { metadata_id: String, region: MetadataRegion },
 
@@ -174,7 +174,10 @@ impl AudibleClient {
     }
 
     /// Audnexus reports a wrong-region item as 404 + `REGION_UNAVAILABLE`; surface it
-    /// as a distinct error so the user sees the `--region` hint.
+    /// as a distinct error so the user sees the `--region` hint. Audnexus also returns
+    /// that code for an ASIN that exists in no region (e.g. a typo), so the message
+    /// names checking the ID as the other possibility rather than sending every 404
+    /// to `--region`.
     fn not_found_error(id: &str, region: MetadataRegion, body: &str) -> AudibleError {
         if body.contains("REGION_UNAVAILABLE") {
             AudibleError::RegionUnavailable { metadata_id: id.to_string(), region }
@@ -783,6 +786,15 @@ mod tests {
             "message should name the actual region: {message}"
         );
         assert!(message.contains("B00BM5F96W"), "message should name the metadata_id: {message}");
+        assert!(
+            message.contains("not found"),
+            "a REGION_UNAVAILABLE 404 also covers an ASIN that exists in no region, so the \
+             message must not claim the book exists elsewhere: {message}"
+        );
+        assert!(
+            message.contains("check the ID") && message.contains("--region"),
+            "message must name both remedies (check the ID or try --region): {message}"
+        );
         assert!(
             !message.contains("e.g. --region de"),
             "message must not hard-code a region example: {message}"

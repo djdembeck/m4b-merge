@@ -21,6 +21,8 @@ static METADATA_ID_REGEX: OnceLock<regex::Regex> = OnceLock::new();
 /// `AudiobookdbClient::looks_like_asin`) or an AudiobookDB internal id (12
 /// alphanumeric characters). A bracketed word whose content is neither 10 nor
 /// 12 alphanumeric characters (e.g. `[Unabridged 2020]`) yields no lookup.
+/// The pattern cannot tell a descriptive marker from an ID, so callers must
+/// collect every match and try them in order.
 fn get_metadata_id_regex() -> &'static regex::Regex {
     METADATA_ID_REGEX.get_or_init(|| {
         regex::Regex::new(r"\[([A-Za-z0-9]{10}|[A-Za-z0-9]{12})\]")
@@ -326,11 +328,19 @@ impl Processor {
         let metadata = if self.config.dry_run {
             None
         } else if let Some(client) = &self.api_client {
-            let extracted_id = self.extract_metadata_id(group);
+            let candidate_ids = self.extract_metadata_ids(group);
 
-            let id = self.config.metadata_id.as_deref().or(extracted_id.as_deref());
+            // An explicit --metadata-id wins; otherwise try every bracketed
+            // candidate in name order. A descriptive marker such as
+            // `[Unabridged]` is ASIN-shaped, so a failure falls through to the
+            // next token instead of dropping a real ASIN listed after it.
+            let ids: Vec<&str> = match self.config.metadata_id.as_deref() {
+                Some(id) => vec![id],
+                None => candidate_ids.iter().map(String::as_str).collect(),
+            };
 
-            if let Some(id) = id {
+            let mut metadata = None;
+            for (index, id) in ids.iter().enumerate() {
                 progress_handler.on_progress(ProcessingProgress {
                     stage: ProcessingStage::ApiLookup,
                     current_file: Some(input_paths[0].clone()),
@@ -342,16 +352,22 @@ impl Processor {
                 match client.fetch_book(id).await {
                     Ok(book_metadata) => {
                         info!("Successfully fetched metadata for: {}", book_metadata.title);
-                        Some(book_metadata)
+                        metadata = Some(book_metadata);
+                        break;
                     }
                     Err(e) => {
-                        warn!("Failed to fetch metadata for ID {}: {}", id, e);
-                        None
+                        if index + 1 < ids.len() {
+                            debug!(
+                                "Metadata ID '{}' did not resolve ({}); trying next candidate",
+                                id, e
+                            );
+                        } else {
+                            warn!("Failed to fetch metadata for ID {}: {}", id, e);
+                        }
                     }
                 }
-            } else {
-                None
             }
+            metadata
         } else {
             None
         };
@@ -653,15 +669,23 @@ impl Processor {
         result
     }
 
-    /// Extract metadata ID from audio group (folder name, existing metadata, etc.)
-    fn extract_metadata_id(&self, group: &AudioGroup) -> Option<String> {
+    /// Extract metadata ID candidates from the audio group name (folder name),
+    /// in the order they appear. Every bracketed token of an accepted shape is
+    /// returned: the regex cannot distinguish a descriptive marker such as
+    /// `[Unabridged]` (10 alphanumeric characters) from an ASIN, so the caller
+    /// tries them until one resolves.
+    fn extract_metadata_ids(&self, group: &AudioGroup) -> Vec<String> {
         let re = get_metadata_id_regex();
-        if let Some(captures) = re.captures(&group.name) {
+        let mut ids: Vec<String> = Vec::new();
+        for captures in re.captures_iter(&group.name) {
             if let Some(capture) = captures.get(1) {
-                return Some(capture.as_str().to_string());
+                let id = capture.as_str();
+                if !ids.iter().any(|existing| existing == id) {
+                    ids.push(id.to_string());
+                }
             }
         }
-        None
+        ids
     }
 
     /// Get the FFmpeg instance
@@ -1032,31 +1056,39 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_metadata_id() {
+    fn test_extract_metadata_ids() {
         let temp_dir = TempDir::new().unwrap();
         let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
 
         // Exactly two shapes are extracted: 10 alphanumeric (ASIN, any case,
         // mirroring the API clients' validators) and 12 alphanumeric
-        // (AudiobookDB internal id). Other bracketed words are not.
-        let cases = [
-            ("Book [B08XYZ1234]", Some("B08XYZ1234")), // ASIN: 10 uppercase alphanumeric
-            ("Book [b08xyz1234]", Some("b08xyz1234")), // lowercase 10-char: accepted like the clients
-            ("Book [abc123def456]", Some("abc123def456")), // 12-char AudiobookDB internal id
+        // (AudiobookDB internal id). Other bracketed words are not. All
+        // accepted matches are returned in name order, because a descriptive
+        // marker can be ASIN-shaped and must not mask a later real ID.
+        let cases: [(&str, &[&str]); 13] = [
+            ("Book [B08XYZ1234]", &["B08XYZ1234"]), // ASIN: 10 uppercase alphanumeric
+            ("Book [b08xyz1234]", &["b08xyz1234"]), // lowercase 10-char: accepted like the clients
+            ("Book [abc123def456]", &["abc123def456"]), // 12-char AudiobookDB internal id
             // "Unabridged" is 10 ASCII alphanumeric characters, so the
-            // case-insensitive 10-char alternative now extracts it (the API
-            // lookup for it fails locally as an unknown id).
-            ("Book [Unabridged]", Some("Unabridged")), // 10-char alphanumeric word: ASIN-shaped
-            ("Book [Complete2024Set]", None),          // 15-char word
-            ("Book [ABCDEF12345]", None),              // 11 chars: neither shape
-            ("Book [abcdefghijk12]", None),            // 13 chars: neither shape
-            ("Book [B08XYZ123]", None),                // 9 chars
-            ("Book [ABCD_12345]", None),
-            ("Book No Tag", None),
+            // case-insensitive 10-char alternative extracts it as a candidate;
+            // the lookup then falls through to the real ASIN beside it.
+            ("Book [Unabridged]", &["Unabridged"]),
+            ("Book [Unabridged] [B08XYZ1234]", &["Unabridged", "B08XYZ1234"]),
+            ("Book [B08XYZ1234] [Unabridged]", &["B08XYZ1234", "Unabridged"]),
+            ("Book [B08XYZ1234] [b08xyz1234]", &["B08XYZ1234", "b08xyz1234"]),
+            ("Book [B08XYZ1234] [B08XYZ1234]", &["B08XYZ1234"]), // duplicates collapse
+            ("Book [Complete2024Set]", &[]),                     // 15-char word
+            ("Book [ABCDEF12345]", &[]),                         // 11 chars: neither shape
+            ("Book [abcdefghijk12]", &[]),                       // 13 chars: neither shape
+            ("Book [B08XYZ123]", &[]),                           // 9 chars
+            ("Book [ABCD_12345]", &[]),
         ];
         for (name, expected) in cases {
             let group = AudioGroup { name: name.to_string(), files: vec![], disc_number: None };
-            assert_eq!(processor.extract_metadata_id(&group).as_deref(), expected, "name {name:?}");
+            assert_eq!(processor.extract_metadata_ids(&group), expected, "name {name:?}");
         }
+        let group =
+            AudioGroup { name: "Book No Tag".to_string(), files: vec![], disc_number: None };
+        assert!(processor.extract_metadata_ids(&group).is_empty());
     }
 }
