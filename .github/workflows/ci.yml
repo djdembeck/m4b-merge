@@ -1,13 +1,15 @@
 name: CI
 
 on:
+  # No event-level path filters: required checks must report on every PR,
+  # including docs/workflow-only changes (Release policy stays mergeable).
   push:
     branches: [main, develop]
-    paths-ignore: ['*.md', 'docs/**']
   pull_request:
   workflow_dispatch:
 
-permissions: read-all
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
@@ -21,9 +23,19 @@ jobs:
   lint-format:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Run release helper behavior tests
+        run: python3 -m unittest discover -s scripts -p 'test_release.py'
+
+      - name: Run publisher reconciliation behavior tests
+        run: python3 -m unittest discover -s scripts -p 'test_publish_release.py'
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
@@ -44,15 +56,11 @@ jobs:
 
       - run: cargo clippy --all-features -- -D warnings
 
-      - run: command -v cargo-audit || cargo install cargo-audit --locked
-
-      - run: cargo audit --deny warnings
-
   build:
     needs: [lint-format]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -70,13 +78,13 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - run: cargo check --all-features
+      - run: cargo check --locked --all-features
 
   test:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -97,25 +105,110 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - run: cargo test --all-features
+      - run: cargo test --all-features --locked
 
-  docker-amd64:
+  # PRs verify the containerized amd64 build without publishing an image.
+  # Dependency/lockfile changes alter inputs compiled inside the image and can
+  # expose container-specific failures (toolchain, linker, native libs) without
+  # touching the Dockerfile, so this stays a real build, not a shortcut.
+  docker-check:
     needs: [test]
-    if: success()
+    if: success() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      # create-or-update-comment on same-repo PRs needs PR write; explicit
+      # job permissions set everything omitted to none.
       pull-requests: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+      - name: Build Docker image (verification only, no push)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,scope=amd64,mode=max
+          platforms: linux/amd64
+
+      # Post a "Checked, not published" comment on same-repo PRs (create-only, never update)
+      - name: Find existing PR comment
+        if: >-
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          !endsWith(github.event.pull_request.user.login, '[bot]') &&
+          github.event.pull_request.user.login != 'renovate[bot]' &&
+          github.event.pull_request.user.login != 'app/renovate'
+        uses: peter-evans/find-comment@b30e6a3c0ed37e7c023ccd3f1db5c6c0b0c23aad # v4.0.0
+        id: find-comment
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body-includes: Docker build check
+
+      - name: Post Docker build check comment
+        if: >-
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          !endsWith(github.event.pull_request.user.login, '[bot]') &&
+          github.event.pull_request.user.login != 'renovate[bot]' &&
+          github.event.pull_request.user.login != 'app/renovate' &&
+          steps.find-comment.outputs.comment-id == ''
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## 🐳 Docker build check
+
+            The containerized amd64 build succeeded. This job only verifies
+            the build and does not publish. A separate, parallel
+            `docker-amd64` job publishes a test image for human same-repo
+            PRs once it succeeds (bot PRs skip it):
+
+            ```bash
+            docker pull ghcr.io/djdembeck/m4b-merge:pr-${{ github.event.pull_request.number }}
+            ```
+
+            If the `docker-amd64` job failed, the image was not published.
+
+            After merge, the `main` push publishes the `latest` and SHA
+            images on both architectures.
+
+  docker-amd64:
+    # Pushes the -amd64-suffixed images for docker-manifest (main) and the
+    # develop preview (develop pushes). Local (non-PR) pushes start from a
+    # fully cached, clean worktree, so the pre-Public-publish cost is small.
+    needs: [test]
+    # PRs: only non-bot same-repo authors publish. Renovate's dependency PRs
+    # are same-repo (head repo == base) but must NOT publish — docker-check
+    # covers them — so the [bot]-author guard is what keeps dep PRs (and
+    # other bot PRs, e.g. Dependabot) from reaching this job. Human same-repo
+    # PRs and push to main/develop publish.
+    if: >-
+      success() &&
+      ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')) ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !endsWith(github.event.pull_request.user.login, '[bot]') &&
+        github.event.pull_request.user.login != 'renovate[bot]' &&
+        github.event.pull_request.user.login != 'app/renovate'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -125,18 +218,25 @@ jobs:
         id: meta
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # No suffix on PRs or develop (single-arch preview image at canonical
+          # Suffix -amd64 on main pushes so docker-manifest can assemble
+          # multi-arch; no suffix on develop pushes (single-arch preview at
+          # the canonical tag). flavor is CSV — comma-separate options (17bafe6).
           flavor: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'suffix=-amd64,latest=false' || 'latest=false' }}
+          # Semver image tags are published exclusively by the Release
+          # workflow (never by CI), so no type=semver lines here.
           tags: |
             type=ref,event=branch
+            # PR images take the stable pr-{N} tag so pr-cleanup.yml (which
+            # deletes pr-{N} package versions on PR close) collects them.
             type=ref,event=pr
-            type=sha
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,enable=${{ github.event_name != 'pull_request' }}
 
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: Dockerfile
-          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=amd64
@@ -152,15 +252,14 @@ jobs:
     permissions:
       contents: read
       packages: write
-      pull-requests: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -170,10 +269,12 @@ jobs:
         id: meta
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Explicit raw latest is suffixed too; latest=false disables only
+          # automatic latest generation, not explicit raw tags. Keep CSV flavor.
           flavor: suffix=-arm64,latest=false
           tags: |
             type=ref,event=branch
-            type=ref,event=pr
+            type=raw,value=latest
             type=sha
 
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -196,9 +297,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-      pull-requests: write
     steps:
-      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -208,23 +308,32 @@ jobs:
         id: meta
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          flavor: latest=false
+          # Semver image tags are published exclusively by the Release
+          # workflow (never by CI), so no type=semver lines here.
           tags: |
             type=ref,event=branch
-            type=ref,event=pr
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha
 
       - name: Assemble multi-arch manifest
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
-          # TAGS holds full image refs (ghcr.io/.../m4b-merge:<tag>), one per
-          # line. Pass each directly as the manifest target and derive the
-          # per-arch sources by appending the -amd64/-arm64 suffixes.
+          # TAGS holds full image refs (ghcr.io/.../m4b-merge:<tag>). Pass each
+          # directly as the manifest target, but source every manifest from
+          # this run's immutable SHA-specific images. The arch jobs emit their
+          # SHA tag via metadata-action type=sha with no `prefix`/`format` override,
+          # i.e. its documented defaults: prefix "sha-", format "short" (the
+          # first 7 chars of GITHUB_SHA), plus the per-arch flavor suffix
+          # (-amd64/-arm64). main and latest resolve as shared mutable per-arch
+          # tags; pinning to this run's SHA keeps overlapping main pushes from
+          # mixing commits inside one manifest.
+          sha_tag="sha-${GITHUB_SHA::7}"
           echo "$TAGS" | while IFS= read -r ref; do
             [ -z "$ref" ] && continue
             [[ "$ref" != *:* ]] && continue
             docker buildx imagetools create -t "$ref" \
-              "$ref-amd64" \
-              "$ref-arm64"
+              "$IMAGE:$sha_tag-amd64" \
+              "$IMAGE:$sha_tag-arm64"
           done

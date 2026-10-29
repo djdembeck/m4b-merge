@@ -43,7 +43,9 @@ Every change must improve the codebase. Never introduce regressions, technical d
 
 ### Test Requirements
 
-Target 100% coverage; 80%+ for I/O.
+Target 100% coverage on critical paths; 80%+ for I/O. Coverage is a review
+target, not a CI gate — no coverage job runs in CI, so these targets are
+enforced in code review.
 
 ---
 
@@ -79,7 +81,9 @@ Use `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`, `ci`, or `revert
 3. **Tests** — All tests passing, coverage maintained
 4. **Linting** — No warnings, no errors
 5. **Reviews** — At least 1 approval required
-6. **CI Green** — All checks must pass
+6. **CI Green** — All required checks must pass. The advisory vulnerability
+   audit (the standalone `cargo-audit` check in `vulncheck.yml`) reports its
+   own failure without gating the run.
 
 #### PR Templates
 
@@ -91,16 +95,34 @@ Pull request templates belong in `.github/PULL_REQUEST_TEMPLATE.md`.
 
 ### Required Checks
 
-1. **Compile** — `cargo check` / `make check`
-2. **Test** — `cargo test --all-features`
-3. **Coverage** — ≥90% coverage, no new uncovered lines
-4. **Lint** — `cargo clippy --all-features -- -D warnings`
-5. **Format** — `cargo fmt --check`
-6. **Security** — `cargo audit --deny warnings`
+1. **Lint & Format** — `cargo fmt --check`, `cargo clippy --all-features -- -D warnings`,
+   and the release helper behavior tests
+   (`python3 -m unittest discover -s scripts -p 'test_release.py'`) and
+   publisher reconciliation tests
+   (`python3 -m unittest discover -s scripts -p 'test_publish_release.py'`)
+2. **Compile** — `cargo check --locked --all-features`
+3. **Test** — `cargo test --all-features --locked`
+4. **Docker** — amd64 build on PRs; arm64 builds and the multi-arch
+   manifest run on main pushes only and are not PR-required checks
 
-### Failing CI Actions
+On every PR, `cargo audit --deny warnings` runs as the standalone
+**visible advisory** `cargo-audit` job in `vulncheck.yml`, deliberately
+outside the CI required chain — a new advisory must not force a breaking
+release. Human PRs show the failure for review, while
+Renovate-authored dependency PRs tolerate the audit step so that pre-existing
+advisories never deadlock the bot PRs that fix them. Findings are reviewed
+manually and fixed in follow-up PRs; the check must never be added to the
+required-check list.
 
-All CI failures block merge; audit findings require security review.
+### Release Gate
+
+`develop` reaches `main` only through a human-reviewed
+`release/v*-*-*` promotion PR (see the `Releasing` section of
+`CONTRIBUTING.md`). `main` keeps its native strict base-freshness
+protection; there is no automatic sync back to `develop`. Promotion PRs
+send a trusted `Release policy` status from the `Release Policy`
+workflow, which verifies the frozen two-parent merge shape before the
+check can be required.
 
 ---
 
@@ -110,7 +132,7 @@ All CI failures block merge; audit findings require security review.
 
 1. **Verify necessity** — Is there an existing solution?
 2. **Check maintenance** — Last commit date? Open issues?
-3. **Audit for vulnerabilities** — Run `cargo audit`
+3. **Audit for vulnerabilities** — Run `cargo audit` (advisory — not a required check, does not block merges)
 4. **Pin to version** — Use `version = "2.1.0"`, not `*`
 5. **Document rationale** — Why this library?
 

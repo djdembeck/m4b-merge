@@ -5,6 +5,11 @@ FROM rust:1.96-alpine AS builder
 
 WORKDIR /app
 
+# Version stamp — passed by the release workflow as --build-arg VERSION=vX.Y.Z
+# for image metadata labeling only. The binary version itself comes from the
+# frozen source manifests (env!("CARGO_PKG_VERSION") in Cargo.toml).
+ARG VERSION=devel
+
 # Install build dependencies
 RUN apk add --no-cache \
     musl-dev \
@@ -12,41 +17,30 @@ RUN apk add --no-cache \
     cmake \
     perl
 
-# Copy only Cargo files first for better layer caching
+# Copy the frozen source and lockfile; cache mounts below retain dependencies.
 COPY Cargo.toml Cargo.lock ./
+COPY src ./src
 
-# Create stub sources (lib + bin) so cargo can compile *only* the dependencies.
-# The real source is layered on top afterward; cargo then rebuilds just our crates.
-RUN mkdir -p src && \
-    echo "fn main() {}" > src/main.rs
-
-# Pre-build dependencies. BuildKit cache mounts persist the cargo registry and
-# the build target across builds, so unchanged dependencies are never recached
-# or recompiled. Sharing=locked is safe here (single buildx invocation).
+# Build with persistent BuildKit cache mounts so the cargo registry, git
+# checkouts, and compiled artifacts survive across builds; unchanged
+# dependencies are never refetched or recompiled. The git cache mount matters
+# for the pinned mp4ameta patch in Cargo.toml: without it every image build
+# re-clones that repository. sharing=locked is safe here (single buildx
+# invocation).
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
-    cargo build --release --locked
-
-# Replace stubs with the real source code
-RUN rm -rf src
-COPY . .
-
-# Final build: only the project crates recompile. Bump source mtimes after
-# COPY so cargo's fingerprint (mtime-based) invalidates the project crate --
-# the stub build recorded src/*.rs older than what COPY delivered, so without
-# this cargo would skip the rebuild and ship the stub binary. Dependencies are
-# untouched (they live in the cargo registry, not /app/src). Copy the produced
-# binary out of the cache mount into the image layer for the runtime stage.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/app/target,sharing=locked \
-    find src -type f -exec touch {} + && \
     cargo build --release --locked && \
     cp target/release/m4b-merge /usr/local/bin/m4b-merge
 
 # =============================================================================
 # Runtime stage - Minimal Alpine image with FFmpeg
 # =============================================================================
-FROM alpine:3.22 AS runtime
+FROM alpine:3.24 AS runtime
+
+# Accept the version arg for image metadata
+ARG VERSION=devel
+LABEL org.opencontainers.image.version=$VERSION
 
 # Install runtime dependencies
 RUN apk add --no-cache ffmpeg ca-certificates
@@ -58,12 +52,12 @@ RUN addgroup -S appgroup && adduser -S -G appgroup appuser
 RUN mkdir -p /input /output /config && \
     chown -R appuser:appgroup /input /output /config
 
-# Copy the binary from builder (copied out of the cache mount in the builder
-# stage so it persists in the image layer)
+# Copy the binary from the builder stage
 COPY --from=builder /usr/local/bin/m4b-merge /usr/local/bin/m4b-merge
 
 # Set environment variables
 ENV HOME=/home/appuser
+ENV APP_VERSION=$VERSION
 
 # Switch to non-root user
 USER appuser
