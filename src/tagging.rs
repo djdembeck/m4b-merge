@@ -79,21 +79,26 @@ fn truncate_chapter_title(title: &str) -> String {
     title[..end].to_string()
 }
 
+/// The prefix of `chapters` that a Nero `chpl` atom can represent.
+///
+/// The atom stores its entry count in a single byte, so a longer list wraps the
+/// count and readers see an empty or truncated chapter list. The QuickTime
+/// chapter track has no such limit, so callers writing that representation must
+/// use the full list rather than this prefix.
+fn chpl_chapters(chapters: &[mp4ameta::Chapter]) -> &[mp4ameta::Chapter] {
+    &chapters[..chapters.len().min(CHAPTER_LIST_MAX_CHAPTERS)]
+}
+
 /// Convert metadata chapters to mp4ameta chapters
 ///
 /// Sorts chapters by start_time and converts each to mp4ameta::Chapter.
-/// Titles are truncated to the chpl atom limit (255 bytes) on a char boundary,
-/// and the list is capped to the chapter count a chpl atom can represent.
+/// Titles are truncated to the chpl atom limit (255 bytes) on a char boundary.
 /// The mp4ameta crate handles duration calculation internally based on chapter start times.
 fn convert_chapters_for_embedding(chapters: &[crate::metadata::Chapter]) -> Vec<mp4ameta::Chapter> {
     let mut metadata_chapters = chapters.to_vec();
 
     // Sort by start_time
     metadata_chapters.sort_by_key(|c| c.start_time);
-
-    // A chpl atom stores its entry count in a single byte; extra entries would
-    // wrap the count and corrupt the atom, so keep only what is representable.
-    metadata_chapters.truncate(CHAPTER_LIST_MAX_CHAPTERS);
 
     let mut result = Vec::with_capacity(metadata_chapters.len());
 
@@ -450,7 +455,7 @@ impl Tagger {
 
         if chapters_vec.len() > CHAPTER_LIST_MAX_CHAPTERS {
             warn!(
-                "Chapter list is limited to {} entries; dropping {} chapter(s) from: {}",
+                "Nero chapter list is limited to {} entries; omitting {} chapter(s) from: {}",
                 CHAPTER_LIST_MAX_CHAPTERS,
                 chapters_vec.len() - CHAPTER_LIST_MAX_CHAPTERS,
                 path.display()
@@ -466,9 +471,11 @@ impl Tagger {
         // Clear existing chapters
         tag.chapter_list_mut().clear();
 
-        // Convert to mp4ameta chapters and add to tag
+        // Convert to mp4ameta chapters and write the chpl representation. The
+        // chpl atom cannot represent more than 255 entries; other chapter
+        // representations (the QuickTime chapter track) use the full list.
         let mp4_chapters = convert_chapters_for_embedding(&chapters_vec);
-        tag.chapter_list_mut().extend(mp4_chapters);
+        tag.chapter_list_mut().extend_from_slice(chpl_chapters(&mp4_chapters));
 
         // Write back to file
         tag.write_to_path(path)
@@ -1213,7 +1220,25 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_chapters_for_embedding_caps_chapter_count() {
+    fn test_convert_chapters_for_embedding_keeps_all_entries() {
+        // Conversion is representation-agnostic; only the chpl write site caps.
+        let chapters: Vec<Chapter> = (0..CHAPTER_LIST_MAX_CHAPTERS + 1)
+            .map(|i| {
+                Chapter::new(
+                    format!("Ch{}", i),
+                    Duration::from_secs(i as u64 * 60),
+                    Duration::from_secs(60),
+                )
+            })
+            .collect();
+
+        let mp4_chapters = convert_chapters_for_embedding(&chapters);
+        assert_eq!(mp4_chapters.len(), CHAPTER_LIST_MAX_CHAPTERS + 1);
+        assert_eq!(mp4_chapters.last().unwrap().title, "Ch255");
+    }
+
+    #[test]
+    fn test_chpl_chapters_caps_at_representable_count() {
         // A 256-entry chapter list would wrap the chpl entry count byte.
         let chapters: Vec<Chapter> = (0..CHAPTER_LIST_MAX_CHAPTERS + 1)
             .map(|i| {
@@ -1226,8 +1251,13 @@ mod tests {
             .collect();
 
         let mp4_chapters = convert_chapters_for_embedding(&chapters);
-        assert_eq!(mp4_chapters.len(), CHAPTER_LIST_MAX_CHAPTERS);
-        assert_eq!(mp4_chapters.last().unwrap().title, "Ch254");
+        let chpl = chpl_chapters(&mp4_chapters);
+        assert_eq!(chpl.len(), CHAPTER_LIST_MAX_CHAPTERS);
+        assert_eq!(chpl.last().unwrap().title, "Ch254");
+
+        // Lists that already fit are returned unchanged.
+        assert_eq!(chpl_chapters(&mp4_chapters[..3]).len(), 3);
+        assert!(chpl_chapters(&[]).is_empty());
     }
 
     #[test]
