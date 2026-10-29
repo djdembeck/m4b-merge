@@ -325,7 +325,7 @@ impl Processor {
 
         // Stage 2: API Lookup (optional - only if metadata ID is provided or can be inferred)
         // Skipped in dry-run mode to avoid unnecessary network calls
-        let metadata = if self.config.dry_run {
+        let mut metadata = if self.config.dry_run {
             None
         } else if let Some(client) = &self.api_client {
             let candidate_ids = self.extract_metadata_ids(group);
@@ -372,39 +372,6 @@ impl Processor {
             None
         };
 
-        // Extract chapters from input file if API didn't provide them
-        let metadata = if let Some(mut meta) = metadata {
-            if meta.chapters.is_empty() && !group.files.is_empty() {
-                // Try to read chapters from the first input file
-                match crate::chapters::read_chapters(
-                    &group.files[0].path,
-                    self.ffmpeg.ffprobe_path().to_str(),
-                ) {
-                    Ok(file_chapters) if !file_chapters.is_empty() => {
-                        info!("Extracted {} chapters from input file", file_chapters.len());
-                        // Convert file chapters to metadata chapters
-                        meta.chapters = file_chapters
-                            .into_iter()
-                            .map(|ch| {
-                                crate::metadata::Chapter::new(
-                                    ch.title,
-                                    std::time::Duration::from_millis(ch.start_time),
-                                    std::time::Duration::from_millis(ch.duration),
-                                )
-                            })
-                            .collect();
-                    }
-                    Ok(_) => {} // No chapters found
-                    Err(e) => {
-                        warn!("Failed to extract chapters from input file: {}", e);
-                    }
-                }
-            }
-            Some(meta)
-        } else {
-            None
-        };
-
         // Determine output path (after API lookup so we have metadata for path formatting)
         let output_path = self.determine_output_path(&group.files, metadata.as_ref())?;
         debug!("Output path: {}", output_path.display());
@@ -439,6 +406,20 @@ impl Processor {
                 files_moved: false,
             });
         }
+
+        // Resolve chapters: provider chapters when present, otherwise chapters read
+        // from the inputs, and finally one generated chapter per input track for
+        // chapterless groups so the merged output always carries chapter markers.
+        let chapters = if let Some(meta) = metadata.as_ref().filter(|m| !m.chapters.is_empty()) {
+            meta.chapters.clone()
+        } else {
+            let resolved = self.input_chapters(group);
+            // Keep provider metadata in sync so chapters.txt matches the embedding.
+            if let Some(meta) = metadata.as_mut() {
+                meta.chapters.clone_from(&resolved);
+            }
+            resolved
+        };
 
         // Stage 3: Merge
         progress_handler.on_progress(ProcessingProgress {
@@ -477,26 +458,30 @@ impl Processor {
                     }
                 }
 
-                // Embed chapters into M4B file
-                if !meta.chapters.is_empty() {
-                    if let Err(e) = self.tagger.embed_chapters(&merged_path, &meta.chapters) {
-                        warn!("Failed to embed chapters: {}", e);
-                    } else {
-                        info!("Successfully embedded {} chapters", meta.chapters.len());
-                    }
-                }
-
-                // Write chapters.txt next to the output file
-                let chapters_txt_path = merged_path.with_extension("chapters.txt");
-                if let Err(e) = self.tagger.write_chapters_txt(&chapters_txt_path, meta) {
-                    warn!("Failed to write chapters.txt: {}", e);
-                }
-
                 true
             }
         } else {
             false
         };
+
+        // Embed chapters into the M4B file. These are provider chapters, chapters
+        // read from the inputs, or chapters generated from the input tracks, so
+        // they are applied even when no provider metadata was available.
+        if !chapters.is_empty() {
+            if let Err(e) = self.tagger.embed_chapters(&merged_path, &chapters) {
+                warn!("Failed to embed chapters: {}", e);
+            } else {
+                info!("Successfully embedded {} chapters", chapters.len());
+            }
+        }
+
+        // Write chapters.txt next to the output file
+        if let Some(meta) = &metadata {
+            let chapters_txt_path = merged_path.with_extension("chapters.txt");
+            if let Err(e) = self.tagger.write_chapters_txt(&chapters_txt_path, meta) {
+                warn!("Failed to write chapters.txt: {}", e);
+            }
+        }
 
         // Stage 5: Move source files
         let files_moved = if let Some(completed_dir) = &self.config.completed_directory {
@@ -543,6 +528,70 @@ impl Processor {
             }
         };
         Ok(groups)
+    }
+
+    /// Resolve chapters for a group from its input files.
+    ///
+    /// Prefers chapters embedded in the first input, which keeps a single M4B's
+    /// own chapters. When the group carries no chapters at all — the usual case
+    /// for split MP3s — a chapter is generated per input track, matching the old
+    /// m4b-tool `ChaptersFromFileTracks` behavior, so the merged M4B still has
+    /// chapter markers. Reading chapters from every input is tracked separately.
+    fn input_chapters(&self, group: &AudioGroup) -> Vec<crate::metadata::Chapter> {
+        if let Some(first) = group.files.first() {
+            match crate::chapters::read_chapters(&first.path, self.ffmpeg.ffprobe_path().to_str()) {
+                Ok(file_chapters) if !file_chapters.is_empty() => {
+                    info!("Read {} chapters from input file", file_chapters.len());
+                    return file_chapters
+                        .into_iter()
+                        .map(|ch| {
+                            crate::metadata::Chapter::new(
+                                ch.title,
+                                std::time::Duration::from_millis(ch.start_time),
+                                std::time::Duration::from_millis(ch.duration),
+                            )
+                        })
+                        .collect();
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    debug!("No chapters read from {}: {}", first.path.display(), e);
+                }
+            }
+        }
+
+        // Every track duration is needed: a missing one would shift all later
+        // chapter start times, so skip generation instead of emitting wrong times.
+        let mut durations = Vec::with_capacity(group.files.len());
+        for file in &group.files {
+            match self.ffmpeg.get_duration(&file.path) {
+                Ok(duration) => durations.push(duration.as_millis() as u64),
+                Err(e) => {
+                    warn!(
+                        "Cannot generate chapters, failed to read duration of {}: {}",
+                        file.path.display(),
+                        e
+                    );
+                    return Vec::new();
+                }
+            }
+        }
+
+        let generated = crate::chapters::generate_chapters_from_durations(&durations);
+        if !generated.is_empty() {
+            info!("Generated {} chapters from {} input tracks", generated.len(), durations.len());
+        }
+
+        generated
+            .into_iter()
+            .map(|ch| {
+                crate::metadata::Chapter::new(
+                    ch.title,
+                    std::time::Duration::from_millis(ch.start_time),
+                    std::time::Duration::from_millis(ch.duration),
+                )
+            })
+            .collect()
     }
 
     /// Determine output path for a group of files
