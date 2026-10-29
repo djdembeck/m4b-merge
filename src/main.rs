@@ -177,7 +177,7 @@ async fn main() {
     if args.region != MetadataRegion::Us && args.metadata_source == MetadataSourceKind::Audiobookdb
     {
         warn!(
-            "--region only applies to the audnexus metadata source; it is ignored for audiobookdb lookups"
+            "--region only applies to the audnexus metadata source; it is ignored for AudiobookDB lookups"
         );
     }
 

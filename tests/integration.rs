@@ -578,6 +578,9 @@ fn test_region_option_reaches_audnexus_request() {
 
 #[test]
 fn test_non_us_region_warns_for_audiobookdb() {
+    if !ffmpeg_available() {
+        return;
+    }
     // A group named after the id: discovery infers the metadata ID from
     // `[B08XYZ1234]` in the group name, so the lookup targets the mock
     // (a 404 → IdNotFound → localized metadata failure, no retry).
@@ -602,16 +605,19 @@ fn test_non_us_region_warns_for_audiobookdb() {
         output
     };
 
-    // --region de with the default (audiobookdb) source: the CLI warns that the
-    // region is ignored for audiobookdb lookups. Tracing writes to stdout.
+    // --region de with the default (AudiobookDB) source: the CLI warns that
+    // the region is ignored for AudiobookDB lookups. Tracing writes to stdout.
     let de = run("de");
     let de_stdout = String::from_utf8_lossy(&de.stdout);
     assert!(
         de.status.success(),
         "a localized metadata failure must not fail the merge, stdout: {de_stdout}"
     );
+    // Case-insensitive: the assertion targets the warning's content, not the
+    // product-name casing.
+    let de_stdout_lower = de_stdout.to_lowercase();
     assert!(
-        de_stdout.contains("audiobookdb") && de_stdout.contains("region"),
+        de_stdout_lower.contains("audiobookdb") && de_stdout_lower.contains("region"),
         "the warning should name audiobookdb and region, stdout: {de_stdout}"
     );
 

@@ -16,8 +16,6 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import yaml
-
 import release
 
 
@@ -912,11 +910,58 @@ class ReleaseWorkflowGuards(unittest.TestCase):
 
     @classmethod
     def ref_guard_expression(cls):
-        workflow = yaml.safe_load(cls.WORKFLOW.read_text())
-        guard = workflow["jobs"]["ref-guard"]["if"]
-        if not isinstance(guard, str):
-            raise AssertionError(f"ref-guard if: is not a plain string: {guard!r}")
-        return guard
+        # Read the guard as text so the suite needs no YAML parser: the
+        # ref-guard job's if: is a single-line scalar in the committed
+        # workflow, and the checks below keep that assumption loud instead
+        # of letting it slip (a block scalar or a non-if first key fails
+        # the test).
+        #
+        # The search is scoped to the top-level `jobs:` mapping, mirrored
+        # from a YAML `jobs.ref-guard` lookup: the job must be a direct
+        # child of `jobs:` (indent 1-3 under the indent-0 key), and the
+        # block ends at the next top-level key, so a `ref-guard:` block
+        # relocated outside `jobs:` cannot satisfy the guard.
+        lines = cls.WORKFLOW.read_text().splitlines()
+        jobs_start = None
+        for i, line in enumerate(lines):
+            if line == "jobs:":
+                jobs_start = i
+                break
+        if jobs_start is None:
+            raise AssertionError("jobs: mapping not found in release.yml")
+        jobs_end = len(lines)
+        for j in range(jobs_start + 1, len(lines)):
+            line = lines[j]
+            # A top-level key is unindented and not a comment.
+            if line and not line[0].isspace() and not line.lstrip().startswith("#"):
+                jobs_end = j
+                break
+        for i in range(jobs_start + 1, jobs_end):
+            line = lines[i]
+            stripped = line.strip()
+            if stripped != "ref-guard:":
+                continue
+            # Direct child of the indent-0 `jobs:` mapping (any indent 1-3).
+            indent = len(line) - len(line.lstrip(" "))
+            if not 1 <= indent < 4:
+                continue
+            follows = [follow.strip() for follow in lines[i + 1:jobs_end]
+                       if follow.strip()]
+            if not follows:
+                raise AssertionError("jobs.ref-guard has no body")
+            stripped = follows[0]
+            match = re.match(r"^if:(.*)$", stripped)
+            if match is None:
+                raise AssertionError(
+                    "ref-guard job's first key is not its if: guard: "
+                    f"{stripped!r}")
+            expression = match.group(1).strip()
+            if not expression or expression in ("|", ">", "|-", ">-"):
+                raise AssertionError(
+                    "ref-guard if: must be a single-line scalar: "
+                    f"{stripped!r}")
+            return expression
+        raise AssertionError("jobs.ref-guard job not found in release.yml")
 
     @classmethod
     def evaluate_ref_guard(cls, event_name, ref):
