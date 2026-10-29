@@ -9,6 +9,7 @@ import copy
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -895,6 +896,104 @@ class ReleaseBehavior(unittest.TestCase):
                 (["tag", "--sha", final], "v1.1.0\n")):
             with self.subTest(argv=argv[0]):
                 self.assertEqual(dispatch(argv), expect)
+
+
+class ReleaseWorkflowGuards(unittest.TestCase):
+    """Guard conditions committed in .github/workflows/release.yml."""
+
+    WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "release.yml"
+    # The ref-guard job uses a plain `github.<context> op 'literal'` clause
+    # joined by `&&`; the evaluator below is exactly that shape, so a guard
+    # whose syntax outgrows it fails the test loudly instead of being
+    # evaluated silently.
+    CLAUSE = re.compile(r"^github\.(\w+) (==|!=) '([^']*)'$")
+
+    @classmethod
+    def ref_guard_expression(cls):
+        # Read the guard as text so the suite needs no YAML parser: the
+        # ref-guard job's if: is a single-line scalar in the committed
+        # workflow, and the checks below keep that assumption loud instead
+        # of letting it slip (a block scalar or a non-if first key fails
+        # the test).
+        #
+        # The search is scoped to the top-level `jobs:` mapping, mirrored
+        # from a YAML `jobs.ref-guard` lookup: the job must be a direct
+        # child of `jobs:` (indent 1-3 under the indent-0 key), and the
+        # block ends at the next top-level key, so a `ref-guard:` block
+        # relocated outside `jobs:` cannot satisfy the guard.
+        lines = cls.WORKFLOW.read_text().splitlines()
+        jobs_start = None
+        for i, line in enumerate(lines):
+            if line == "jobs:":
+                jobs_start = i
+                break
+        if jobs_start is None:
+            raise AssertionError("jobs: mapping not found in release.yml")
+        jobs_end = len(lines)
+        for j in range(jobs_start + 1, len(lines)):
+            line = lines[j]
+            # A top-level key is unindented and not a comment.
+            if line and not line[0].isspace() and not line.lstrip().startswith("#"):
+                jobs_end = j
+                break
+        for i in range(jobs_start + 1, jobs_end):
+            line = lines[i]
+            stripped = line.strip()
+            if stripped != "ref-guard:":
+                continue
+            # Direct child of the indent-0 `jobs:` mapping (any indent 1-3).
+            indent = len(line) - len(line.lstrip(" "))
+            if not 1 <= indent < 4:
+                continue
+            follows = [follow.strip() for follow in lines[i + 1:jobs_end]
+                       if follow.strip()]
+            if not follows:
+                raise AssertionError("jobs.ref-guard has no body")
+            stripped = follows[0]
+            match = re.match(r"^if:(.*)$", stripped)
+            if match is None:
+                raise AssertionError(
+                    "ref-guard job's first key is not its if: guard: "
+                    f"{stripped!r}")
+            expression = match.group(1).strip()
+            if not expression or expression in ("|", ">", "|-", ">-"):
+                raise AssertionError(
+                    "ref-guard if: must be a single-line scalar: "
+                    f"{stripped!r}")
+            return expression
+        raise AssertionError("jobs.ref-guard job not found in release.yml")
+
+    @classmethod
+    def evaluate_ref_guard(cls, event_name, ref):
+        expression = cls.ref_guard_expression()
+        for clause in (part.strip() for part in expression.split("&&")):
+            match = cls.CLAUSE.match(clause)
+            if match is None:
+                raise AssertionError(f"ref-guard clause not in the asserted shape: {clause!r}")
+            context, operator, literal = match.groups()
+            value = {"event_name": event_name, "ref": ref}[context]
+            if (operator == "==" and value != literal) or (operator == "!=" and value == literal):
+                return False
+        return True
+
+    def test_release_workflow_ref_guard_rejects_non_main_dispatch(self):
+        expression = self.ref_guard_expression()
+        # The guard trips only on a manual dispatch from a ref that is not
+        # main; a main dispatch must run the guarded refusal path off.
+        clauses = [part.strip() for part in expression.split("&&")]
+        self.assertIn("github.event_name == 'workflow_dispatch'", clauses)
+        self.assertIn("github.ref != 'refs/heads/main'", clauses)
+        # Non-main dispatch: the guard evaluates true, so the job refuses the
+        # run.
+        with self.subTest(ref="non-main"):
+            self.assertTrue(
+                self.evaluate_ref_guard("workflow_dispatch", "refs/heads/release/v2.0.0-20260101"))
+        with self.subTest(ref="main"):
+            self.assertFalse(
+                self.evaluate_ref_guard("workflow_dispatch", "refs/heads/main"))
+        # A push run (the normal publication path) is never dispatch-guarded.
+        with self.subTest(event="push"):
+            self.assertFalse(self.evaluate_ref_guard("push", "refs/heads/v2.0.0"))
 
 
 if __name__ == "__main__":

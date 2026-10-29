@@ -1,10 +1,10 @@
 //! AudiobookDB client (public audiobookdb.org v1.0.0 API).
 //!
 //! Resolution flow: Audible ASINs are resolved via `GET /audiobooks/external/audible/{asin}`,
-//! internal AudiobookDB IDs via `GET /books/{id}`, and any other identifier falls back to
-//! `POST /search` (only a hit whose `id` exactly matches the input is used; otherwise
-//! the lookup errors). Chapter data comes from `GET /releases/{id}` (the matched release when the
-//! ASIN endpoint links one, otherwise the book's first release).
+//! internal AudiobookDB IDs via `GET /books/{id}`; any identifier that is not found on
+//! its endpoint errors with `IdNotFound`. Chapter data comes from `GET /releases/{id}`
+//! (the matched release when the ASIN endpoint links one, otherwise the book's first
+//! release).
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use std::time::{Duration, SystemTime};
@@ -87,7 +87,7 @@ impl AudiobookdbClient {
     }
 
     /// Map a non-200 response to an `AudiobookdbError`. `not_found_id` gives the 404
-    /// a meaningful id (the book/release id, or the bare word "request" for `post_json`).
+    /// a meaningful id (the book/release id).
     fn http_error(status: StatusCode, body: String, not_found_id: &str) -> AudiobookdbError {
         match status {
             StatusCode::NOT_FOUND => AudiobookdbError::NotFound(not_found_id.to_string()),
@@ -133,6 +133,9 @@ impl AudiobookdbClient {
     /// Execute one HTTP attempt: send the request, parse a 200 body into `T`, and map
     /// anything else to an error. The 429 `Retry-After` delay (when the server
     /// provided one) is returned alongside the error so the retry loop can honor it.
+    ///
+    /// A malformed 200 body is a `Serialization` error, not a `Network` error:
+    /// retrying it would repeat the same failure for every attempt slot.
     async fn attempt<T: for<'de> Deserialize<'de>>(
         &self,
         request: reqwest::RequestBuilder,
@@ -147,7 +150,11 @@ impl AudiobookdbClient {
         let retry_after =
             (status == StatusCode::TOO_MANY_REQUESTS).then(|| Self::retry_after(&resp)).flatten();
         if status == StatusCode::OK {
-            let value = resp.json().await.map_err(|e| (AudiobookdbError::Network(e), None))?;
+            // Read the body first: a transport failure stays `Network`, while a
+            // malformed payload is a deterministic `Serialization` failure.
+            let body = resp.bytes().await.map_err(|e| (AudiobookdbError::Network(e), None))?;
+            let value = serde_json::from_slice(&body)
+                .map_err(|e| (AudiobookdbError::Serialization(e), None))?;
             return Ok(value);
         }
         let body = resp.text().await.unwrap_or_default();
@@ -196,22 +203,6 @@ impl AudiobookdbClient {
         .await
     }
 
-    /// POST a JSON body to `url` and deserialize the 200 body into `T`.
-    async fn post_json<T: for<'de> Deserialize<'de>>(
-        &self,
-        url: &str,
-        body: &serde_json::Value,
-    ) -> Result<T, AudiobookdbError> {
-        self.with_retries(|| async {
-            self.attempt(
-                self.client.post(url).header("Accept", "application/json").json(body),
-                "request",
-            )
-            .await
-        })
-        .await
-    }
-
     /// Resolve an Audible ASIN via the external lookup endpoint. Returns the full
     /// book; `matchedReleaseId` (when present) links the ASIN to a specific release.
     async fn resolve_external(&self, asin: &str) -> Result<AudiobookdbBook, AudiobookdbError> {
@@ -232,15 +223,6 @@ impl AudiobookdbClient {
         self.get_json::<AudiobookdbRelease>(&url, id).await
     }
 
-    /// Search the books collection. The v1 API returns a bare JSON array (no
-    /// envelope, no pagination); anonymous responses omit `external` fields, so hits
-    /// are only used to recover an internal book id.
-    async fn search_books(&self, query: &str) -> Result<Vec<SearchDocumentBook>, AudiobookdbError> {
-        let url = format!("{}/search", self.base_url);
-        let body = serde_json::json!({ "q": query, "type": "books" });
-        self.post_json::<Vec<SearchDocumentBook>>(&url, &body).await
-    }
-
     /// Pick the first endpoint for `id`: ASIN-shaped identifiers go through the
     /// external lookup, everything else through the internal book endpoint.
     fn resolve_endpoint(id: &str) -> BookEndpoint {
@@ -248,22 +230,6 @@ impl AudiobookdbClient {
             BookEndpoint::ExternalAsin
         } else {
             BookEndpoint::InternalBook
-        }
-    }
-
-    /// Decide the fallback after the initial lookup 404s: an ASIN-shaped id is
-    /// retried as an internal id, a searchable id falls back to search, and an
-    /// id shorter than the API's 3-character search minimum is a dead end.
-    fn not_found_fallback(id: &str, initial: BookEndpoint) -> NotFoundFallback {
-        match initial {
-            BookEndpoint::ExternalAsin => NotFoundFallback::InternalBook,
-            BookEndpoint::InternalBook => {
-                if id.len() < 3 {
-                    NotFoundFallback::GiveUp
-                } else {
-                    NotFoundFallback::Search
-                }
-            }
         }
     }
 
@@ -276,53 +242,37 @@ impl AudiobookdbClient {
             .or_else(|| book.releases.first().map(|r| r.id.clone()))
     }
 
-    /// Pick the search hit for a lookup id: an exact `id` match only. Returns
-    /// `None` when no hit matches exactly — silently taking an unrelated hit would
-    /// attach a different book's metadata to the input.
-    fn select_search_hit<'a>(
-        id: &str,
-        hits: &'a [SearchDocumentBook],
-    ) -> Option<&'a SearchDocumentBook> {
-        hits.iter().find(|h| h.id == id)
-    }
-
     /// Look up book metadata by identifier.
     ///
     /// ASIN-shaped identifiers (10 alphanumeric characters) are resolved via
     /// `GET /audiobooks/external/audible/{asin}`; if that 404s, the identifier is
-    /// retried as an internal ID. Other identifiers use `GET /books/{id}` first and
-    /// fall back to `POST /search` when the book is not found directly — only a
-    /// search hit whose `id` exactly matches the input is used, otherwise the
-    /// lookup errors with `IdNotFound`.
+    /// retried as an internal ID via `GET /books/{id}`. Other identifiers use
+    /// `GET /books/{id}` directly. Any identifier not found on its endpoint is an
+    /// `IdNotFound` error — the client does not fall back to `POST /search`, so
+    /// an id is only resolved through the catalog endpoints.
     pub async fn fetch_book(&self, book_id: &str) -> Result<BookMetadata, AudiobookdbError> {
         let endpoint = Self::resolve_endpoint(book_id);
-        let first = match endpoint {
-            BookEndpoint::ExternalAsin => self.resolve_external(book_id).await,
-            BookEndpoint::InternalBook => self.get_book(book_id).await,
-        };
-
-        let book = match first {
-            Ok(b) => b,
-            Err(AudiobookdbError::NotFound(_)) => match Self::not_found_fallback(book_id, endpoint)
-            {
-                NotFoundFallback::InternalBook => {
-                    // ASIN not in the catalog; the 10-char id might be an internal ID.
-                    self.get_book(book_id).await?
-                }
-                NotFoundFallback::Search => {
-                    let hits = self.search_books(book_id).await?;
-                    // Exact match only: an id no hit carries is an error, not a
-                    // silent fallback to an unrelated book.
-                    let hit = Self::select_search_hit(book_id, &hits)
-                        .ok_or_else(|| AudiobookdbError::IdNotFound(book_id.to_string()))?;
-                    self.get_book(&hit.id).await?
-                }
-                NotFoundFallback::GiveUp => {
-                    // Shorter-than-3-char identifiers cannot be searched (API minimum).
+        let book = match endpoint {
+            BookEndpoint::ExternalAsin => match self.resolve_external(book_id).await {
+                Ok(b) => b,
+                // ASIN not in the catalog; the 10-char id might be an internal ID.
+                Err(AudiobookdbError::NotFound(_)) => match self.get_book(book_id).await {
+                    Ok(b) => b,
+                    Err(AudiobookdbError::NotFound(_)) => {
+                        return Err(AudiobookdbError::IdNotFound(book_id.to_string()));
+                    }
+                    Err(e) => return Err(e),
+                },
+                Err(e) => return Err(e),
+            },
+            BookEndpoint::InternalBook => match self.get_book(book_id).await {
+                Ok(b) => b,
+                // No search fallback: an id absent from the catalog is an error.
+                Err(AudiobookdbError::NotFound(_)) => {
                     return Err(AudiobookdbError::IdNotFound(book_id.to_string()));
                 }
+                Err(e) => return Err(e),
             },
-            Err(e) => return Err(e),
         };
 
         // Fetch release data for chapter information. The matched release
@@ -339,8 +289,10 @@ impl AudiobookdbClient {
     /// Map a book (and optional release) to metadata: authors/narrators from `people`,
     /// year from `copyright` (falling back to `originallyPublishedAt`), subtitle from
     /// `subtitle` (falling back to `disambiguation`), series position from
-    /// `position.value`/`label`, cover from `coverImage`/`images`, chapters from the
-    /// release's `chapterDetail` (sorted by ordinal, negative offsets skipped).
+    /// `position.value`/`label`, cover from the release's `coverImage`/`images` when
+    /// the release ships one (falling back to the book's `coverImage`/`images`),
+    /// chapters from the release's `chapterDetail` (sorted by ordinal, negative
+    /// offsets skipped).
     ///
     /// `caller_id` is the identifier the caller supplied; when the resolved book
     /// carries its own canonical id it wins for `metadata_id` (e.g. an ASIN that
@@ -389,9 +341,16 @@ impl AudiobookdbClient {
 
         let genres: Vec<String> = book.genres.iter().map(|g| g.title.clone()).collect();
 
-        // Full-resolution original (`sourceUrl`) is preferred for embedded covers;
-        // fall back to the documented 768px derivative when only the base key exists.
-        let cover_url = book.cover_image.as_ref().or_else(|| book.images.first()).map(cover_url_of);
+        // The release's own edition cover wins (the ASIN's matched release may
+        // ship a cover specific to that edition); the book's `coverImage`/
+        // `images` are the fallback. Full-resolution original (`sourceUrl`) is
+        // preferred for embedded covers; fall back to the documented 768px
+        // derivative when only the base key exists.
+        let cover_url = release_data
+            .and_then(|r| r.cover_image.as_ref().or_else(|| r.images.first()))
+            .or(book.cover_image.as_ref())
+            .or(book.images.first())
+            .map(cover_url_of);
 
         let subtitle = book
             .subtitle
@@ -454,17 +413,6 @@ enum BookEndpoint {
     InternalBook,
 }
 
-/// What to do when the initial lookup 404s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NotFoundFallback {
-    /// Retry the id as an internal book id.
-    InternalBook,
-    /// Search for it and use an exact-`id` hit, if any.
-    Search,
-    /// Give up with `IdNotFound` (id too short to search).
-    GiveUp,
-}
-
 /// Cover URL for an image: the full-resolution original when available, otherwise
 /// the documented 768px derivative of the storage key.
 fn cover_url_of(img: &AudiobookdbImage) -> String {
@@ -472,11 +420,6 @@ fn cover_url_of(img: &AudiobookdbImage) -> String {
         .clone()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("{}/large.jpg", img.url))
-}
-
-#[derive(Debug, Deserialize, Clone, PartialEq)]
-struct SearchDocumentBook {
-    id: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -523,6 +466,11 @@ struct AudiobookdbRelease {
     chapter_detail: Option<AudiobookdbChapterDetail>,
     #[serde(default)]
     people: Vec<AudiobookdbPersonRelation>,
+    /// The release's own edition cover (present on some records only).
+    #[serde(rename = "coverImage", default)]
+    cover_image: Option<AudiobookdbImage>,
+    #[serde(default)]
+    images: Vec<AudiobookdbImage>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -591,6 +539,7 @@ struct AudiobookdbSeriesRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::time::Instant;
 
     fn json(s: &str) -> serde_json::Value {
@@ -1059,19 +1008,6 @@ mod tests {
     }
 
     #[test]
-    fn test_search_documents_deserialize() {
-        let hits: Vec<SearchDocumentBook> = serde_json::from_value(json(
-            r#"[
-                {"id": "abc123def456", "title": "Dune"},
-                {"id": "def456abc789", "title": "Dune Messiah", "genres": ["Science Fiction"]}
-            ]"#,
-        ))
-        .unwrap();
-        assert_eq!(hits[0].id, "abc123def456");
-        assert_eq!(hits[1].id, "def456abc789");
-    }
-
-    #[test]
     fn test_resolve_endpoint_table() {
         let cases = [
             // ASIN-shaped (10 ASCII alphanumeric, any prefix/case) → external lookup.
@@ -1086,48 +1022,6 @@ mod tests {
         for (id, expected) in cases {
             assert_eq!(AudiobookdbClient::resolve_endpoint(id), expected, "id {id:?}");
         }
-    }
-
-    #[test]
-    fn test_not_found_fallback_table() {
-        let external = BookEndpoint::ExternalAsin;
-        let internal = BookEndpoint::InternalBook;
-        let cases = [
-            // ASIN 404 on the external endpoint → retry as internal id.
-            ("B08XYZ1234", external, NotFoundFallback::InternalBook),
-            ("1234567890", external, NotFoundFallback::InternalBook),
-            // Searchable ids (>= 3 chars) 404 on the book endpoint → search.
-            ("abc123def456", internal, NotFoundFallback::Search),
-            ("dune", internal, NotFoundFallback::Search),
-            // Below the API's 3-char search minimum → give up.
-            ("ab", internal, NotFoundFallback::GiveUp),
-            ("", internal, NotFoundFallback::GiveUp),
-        ];
-        for (id, endpoint, expected) in cases {
-            assert_eq!(
-                AudiobookdbClient::not_found_fallback(id, endpoint),
-                expected,
-                "id {id:?} after {endpoint:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_select_search_hit_exact_match_only() {
-        let hits: Vec<SearchDocumentBook> = vec![
-            SearchDocumentBook { id: "def456abc789".into() },
-            SearchDocumentBook { id: "abc123def456".into() },
-        ];
-        // Exact id match wins regardless of position.
-        assert_eq!(
-            AudiobookdbClient::select_search_hit("abc123def456", &hits).map(|h| h.id.as_str()),
-            Some("abc123def456")
-        );
-        // No exact match: no lenient first-hit fallback (F5).
-        assert_eq!(AudiobookdbClient::select_search_hit("dune", &hits), None);
-        // Empty hit list: none.
-        let empty: Vec<SearchDocumentBook> = vec![];
-        assert_eq!(AudiobookdbClient::select_search_hit("abc123def456", &empty), None);
     }
 
     #[test]
@@ -1164,5 +1058,297 @@ mod tests {
         let bare: AudiobookdbBook =
             serde_json::from_value(json(r#"{"id": "b2", "title": "T"}"#)).unwrap();
         assert_eq!(AudiobookdbClient::release_id_for(&bare, None), None);
+    }
+
+    #[test]
+    fn test_serialization_error_is_not_transient_and_surfaces_actionably() {
+        // A malformed 200 body is a deterministic Serialization failure: never
+        // retried by the retry loop.
+        let err = AudiobookdbError::Serialization(
+            serde_json::from_slice::<i32>(b"not json").unwrap_err(),
+        );
+        assert!(!AudiobookdbClient::is_transient_error(&err));
+        let message = err.to_string();
+        assert!(
+            message.starts_with("serialization error:"),
+            "message should name the failure: {message}"
+        );
+
+        // An API 403 rejection is likewise a deterministic, non-transient error:
+        // the backoff loop never re-sends it.
+        assert!(
+            !AudiobookdbClient::is_transient_error(&AudiobookdbError::ApiError {
+                status: 403,
+                message: "Forbidden".to_string(),
+            }),
+            "a 403 API rejection is not transient"
+        );
+    }
+
+    /// Scripted loopback endpoint for the `fetch_book` flow tests: every
+    /// request path (query string included) is recorded, and each path serves
+    /// the fixed response programmed into `responses`. The client sends plain
+    /// requests only, so one connection per request and a read-to-header are
+    /// enough.
+    async fn mock_book_api(
+        responses: std::collections::HashMap<String, (u16, String)>,
+    ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let requests: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let spawned_requests = requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 8192 {
+                    let Ok(n) = socket.read(&mut chunk).await else { break };
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let head = String::from_utf8_lossy(&buf).into_owned();
+                let path = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or_default();
+                spawned_requests.lock().unwrap().push(path.to_string());
+                let (status, body) = responses.get(path).cloned().unwrap_or((404, String::new()));
+                let status_line = match status {
+                    404 => "404 Not Found",
+                    _ => "200 OK",
+                };
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (format!("http://127.0.0.1:{}", addr.port()), requests)
+    }
+
+    #[tokio::test]
+    async fn test_fetch_book_resolves_end_to_end_over_loopback() {
+        let book = r#"{
+            "id": "int123def456",
+            "title": "T",
+            "coverImage": {"url": "img/base", "sourceUrl": "https://cdn.example/cover.jpg"},
+            "people": [
+                {"role": {"name": "author"}, "person": {"name": "Author A"}},
+                {"role": {"name": "narrator"}, "person": {"name": "Narrator N"}}
+            ],
+            "releases": [{"id": "rel123abc456"}]
+        }"#;
+        let asin_book: String = r#"{
+            "id": "int123def456",
+            "title": "T",
+            "matchedReleaseId": "rel123abc456",
+            "coverImage": {"url": "img/base", "sourceUrl": "https://cdn.example/cover.jpg"},
+            "people": [{"role": {"name": "author"}, "person": {"name": "Author A"}}]
+        }"#
+        .to_string();
+        let release = r#"{
+            "id": "rel123abc456",
+            "chapterDetail": {"chapters": [
+                {"ordinal": 1, "title": "One", "startOffsetMs": 0, "lengthMs": 1000}
+            ]},
+            "people": [{"role": {"name": "narrator"}, "person": {"name": "Narrator N"}}]
+        }"#;
+        let responses: std::collections::HashMap<String, (u16, String)> = [
+            ("/audiobooks/external/audible/B08XYZ1234".to_string(), (404, String::new())),
+            (
+                // The fallback retries the *same* id on the internal endpoint.
+                "/books/B08XYZ1234?include=people,releases,series,genres,images".to_string(),
+                (200, book.to_string()),
+            ),
+            ("/releases/rel123abc456".to_string(), (200, release.to_string())),
+            // (a) The ASIN 404s externally and resolves through the internal
+            // book endpoint: the request order pins the ASIN→internal
+            // fallback transition.
+            ("/audiobooks/external/audible/B08XYZ1235".to_string(), (200, asin_book.clone())),
+            // (c) The external 200 path links the matched release.
+        ]
+        .into_iter()
+        .collect();
+        let (base, requests): (String, Arc<std::sync::Mutex<Vec<String>>>) =
+            mock_book_api(responses).await;
+        let client = AudiobookdbClient::with_base_url(&base).expect("client should build");
+
+        // (a) ASIN-shaped id, external 404, internal 200: resolves, and the
+        // external request happens before the internal one.
+        let meta = client
+            .fetch_book("B08XYZ1234")
+            .await
+            .expect("the ASIN resolves via the internal book endpoint");
+        assert_eq!(
+            requests.lock().unwrap().clone(),
+            vec![
+                "/audiobooks/external/audible/B08XYZ1234",
+                "/books/B08XYZ1234?include=people,releases,series,genres,images",
+                "/releases/rel123abc456",
+            ],
+            "ASIN 404 must fall back to the internal book endpoint"
+        );
+        assert_eq!(meta.metadata_id, "int123def456");
+        assert_eq!(meta.chapters.len(), 1);
+
+        // (b) A 12-char (non-ASIN) id that the book endpoint does not know is
+        // an IdNotFound carrying the id — and the request list proves `/search`
+        // was never touched.
+        let err = client
+            .fetch_book("def456abc789")
+            .await
+            .expect_err("unknown ids must not resolve via search");
+        assert!(
+            matches!(&err, AudiobookdbError::IdNotFound(id) if id.as_str() == "def456abc789"),
+            "expected IdNotFound(def456abc789), got {err:?}"
+        );
+        assert_eq!(
+            requests.lock().unwrap().clone(),
+            vec![
+                "/audiobooks/external/audible/B08XYZ1234",
+                "/books/B08XYZ1234?include=people,releases,series,genres,images",
+                "/releases/rel123abc456",
+                "/books/def456abc789?include=people,releases,series,genres,images",
+            ],
+            "a non-ASIN id may only hit the internal book endpoint"
+        );
+
+        // (c) ASIN 200 happy path: the external hit's matched release is
+        // fetched for chapters and map_book succeeds.
+        let meta = client.fetch_book("B08XYZ1235").await.expect("the ASIN 200 resolves directly");
+        assert_eq!(meta.metadata_id, "int123def456");
+        assert_eq!(meta.chapters.len(), 1, "matched release chapters are mapped");
+        assert_eq!(meta.authors, vec!["Author A".to_string()]);
+        assert_eq!(meta.narrators, vec!["Narrator N".to_string()]);
+        assert_eq!(
+            meta.cover_url.as_deref(),
+            Some("https://cdn.example/cover.jpg"),
+            "no release cover → the book's cover wins"
+        );
+        assert_eq!(
+            requests.lock().unwrap().clone(),
+            vec![
+                "/audiobooks/external/audible/B08XYZ1234",
+                "/books/B08XYZ1234?include=people,releases,series,genres,images",
+                "/releases/rel123abc456",
+                "/books/def456abc789?include=people,releases,series,genres,images",
+                "/audiobooks/external/audible/B08XYZ1235",
+                "/releases/rel123abc456",
+            ],
+            "ASIN 200 must resolve without touching the book endpoint again"
+        );
+    }
+
+    #[test]
+    fn test_release_cover_wins_over_book_cover() {
+        // A release that ships its own edition cover wins over the book's.
+        let book: AudiobookdbBook = serde_json::from_value(json(
+            r#"{
+                "id": "abc123def456",
+                "title": "T",
+                "coverImage": {"url": "img/base", "sourceUrl": "https://cdn.example/book-cover.jpg"}
+            }"#,
+        ))
+        .unwrap();
+        let release: AudiobookdbRelease = serde_json::from_value(json(
+            r#"{
+                "id": "rel123abc456",
+                "coverImage": {"url": "img/release", "sourceUrl": "https://cdn.example/edition-cover.jpg"}
+            }"#,
+        )).unwrap();
+        assert_eq!(
+            AudiobookdbClient::map_book("abc123def456", &book, Some(&release)).cover_url.as_deref(),
+            Some("https://cdn.example/edition-cover.jpg")
+        );
+    }
+
+    #[test]
+    fn test_release_images_used_when_release_has_no_cover_image() {
+        // A release with only `images` (no `coverImage`) uses its first image.
+        let book: AudiobookdbBook = serde_json::from_value(json(
+            r#"{
+                "id": "abc123def456",
+                "title": "T",
+                "coverImage": {"url": "img/base", "sourceUrl": "https://cdn.example/book-cover.jpg"}
+            }"#,
+        ))
+        .unwrap();
+        let release: AudiobookdbRelease = serde_json::from_value(json(
+            r#"{
+                "id": "rel123abc456",
+                "images": [{"url": "img/release-base"}]
+            }"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            AudiobookdbClient::map_book("abc123def456", &book, Some(&release)).cover_url.as_deref(),
+            Some("img/release-base/large.jpg")
+        );
+    }
+
+    #[test]
+    fn test_book_cover_unchanged_when_release_has_no_images() {
+        // A release without image fields leaves the book cover selected.
+        let book: AudiobookdbBook = serde_json::from_value(json(
+            r#"{
+                "id": "abc123def456",
+                "title": "T",
+                "coverImage": {"url": "img/base", "sourceUrl": "https://cdn.example/book-cover.jpg"}
+            }"#,
+        ))
+        .unwrap();
+        let release: AudiobookdbRelease =
+            serde_json::from_value(json(r#"{"id": "rel123abc456"}"#)).unwrap();
+        assert_eq!(
+            AudiobookdbClient::map_book("abc123def456", &book, Some(&release)).cover_url.as_deref(),
+            Some("https://cdn.example/book-cover.jpg")
+        );
+    }
+
+    #[test]
+    fn test_cover_none_when_nor_book_nor_release_has_images() {
+        let book: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"id": "abc123def456", "title": "T"}"#)).unwrap();
+        let release: AudiobookdbRelease =
+            serde_json::from_value(json(r#"{"id": "rel123abc456"}"#)).unwrap();
+        assert_eq!(
+            AudiobookdbClient::map_book("abc123def456", &book, Some(&release)).cover_url,
+            None
+        );
+        assert_eq!(AudiobookdbClient::map_book("abc123def456", &book, None).cover_url, None);
+    }
+
+    #[test]
+    fn test_release_image_fields_deserialize_with_defaults() {
+        // Real-world shape: the release endpoint has `images` (no `coverImage`).
+        let release: AudiobookdbRelease = serde_json::from_value(json(
+            r#"{
+                "id": "rizpFOqCGkHz",
+                "title": "R",
+                "images": [{"url": "https://cdn.example/key", "sourceUrl": "https://cdn.example/key/source.jpg:book"}]
+            }"#,
+        ))
+        .unwrap();
+        assert!(release.cover_image.is_none());
+        assert_eq!(release.images.len(), 1);
+        assert_eq!(release.images[0].url, "https://cdn.example/key");
+
+        // And the book-shape `coverImage` key also parses.
+        let with_cover: AudiobookdbRelease =
+            serde_json::from_value(json(r#"{"id": "r2", "coverImage": {"url": "img/c"}}"#))
+                .unwrap();
+        assert_eq!(with_cover.cover_image.as_ref().unwrap().url, "img/c");
+        assert!(with_cover.images.is_empty());
     }
 }

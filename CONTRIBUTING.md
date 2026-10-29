@@ -262,9 +262,12 @@ publishes that exact commit:
   those digests, never a later mutable-tag lookup. Mismatches and registry
   authentication/transport errors fail without overwriting existing images.
 - Release assets (including `m4b-merge-windows.exe`) are never overwritten.
-  Missing assets are uploaded on re-run; existing assets are reused only
-  when their provenance label and digest match. Malformed labels and
-  conflicting bindings/digests fail before any upload (see
+  Missing assets are uploaded on re-run; an existing asset is reused only
+  via one of two paths: a labeled asset must have a provenance label bound
+  to this publication (same SHA and tag) whose digest also matches, and an
+  unlabeled legacy asset is reused only when its content digest matches the
+  freshly built artifact. Malformed labels and conflicting
+  bindings/digests fail before any upload (see
   `scripts/publish_release.py`).
 - `latest` is never rolled back: only CI writes it, on main pushes.
   Re-running the workflow for an older main commit passes only when its

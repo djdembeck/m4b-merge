@@ -15,11 +15,16 @@ use crate::tagging::{Tagger, TaggingError};
 /// Static metadata ID regex compiled once at startup
 static METADATA_ID_REGEX: OnceLock<regex::Regex> = OnceLock::new();
 
-/// Returns the metadata ID regex. Matches mixed-case alphanumeric IDs of 10+ characters
-/// to support both Audible ASINs (10 chars) and longer AudiobookDB internal IDs.
+/// Returns the metadata ID regex. Matches exactly the two ID shapes the API
+/// clients accept: an Audible ASIN (10 alphanumeric characters; the 10-char
+/// alternative is case-insensitive to match `AudibleClient::validate_id` and
+/// `AudiobookdbClient::looks_like_asin`) or an AudiobookDB internal id (12
+/// alphanumeric characters). A bracketed word whose content is neither 10 nor
+/// 12 alphanumeric characters (e.g. `[Unabridged 2020]`) yields no lookup.
 fn get_metadata_id_regex() -> &'static regex::Regex {
     METADATA_ID_REGEX.get_or_init(|| {
-        regex::Regex::new(r"\[([A-Za-z0-9]{10,})\]").expect("Invalid metadata ID regex pattern")
+        regex::Regex::new(r"\[([A-Za-z0-9]{10}|[A-Za-z0-9]{12})\]")
+            .expect("Invalid metadata ID regex pattern")
     })
 }
 
@@ -1031,12 +1036,21 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
 
-        // 10+ mixed-case alphanumeric characters inside brackets are extracted;
-        // shorter IDs and IDs with non-alphanumeric characters are not.
+        // Exactly two shapes are extracted: 10 alphanumeric (ASIN, any case,
+        // mirroring the API clients' validators) and 12 alphanumeric
+        // (AudiobookDB internal id). Other bracketed words are not.
         let cases = [
-            ("Book [B08XYZ1234]", Some("B08XYZ1234")),
-            ("Book [abc123def456]", Some("abc123def456")),
-            ("Book [B08XYZ123]", None),
+            ("Book [B08XYZ1234]", Some("B08XYZ1234")), // ASIN: 10 uppercase alphanumeric
+            ("Book [b08xyz1234]", Some("b08xyz1234")), // lowercase 10-char: accepted like the clients
+            ("Book [abc123def456]", Some("abc123def456")), // 12-char AudiobookDB internal id
+            // "Unabridged" is 10 ASCII alphanumeric characters, so the
+            // case-insensitive 10-char alternative now extracts it (the API
+            // lookup for it fails locally as an unknown id).
+            ("Book [Unabridged]", Some("Unabridged")), // 10-char alphanumeric word: ASIN-shaped
+            ("Book [Complete2024Set]", None),          // 15-char word
+            ("Book [ABCDEF12345]", None),              // 11 chars: neither shape
+            ("Book [abcdefghijk12]", None),            // 13 chars: neither shape
+            ("Book [B08XYZ123]", None),                // 9 chars
             ("Book [ABCD_12345]", None),
             ("Book No Tag", None),
         ];
