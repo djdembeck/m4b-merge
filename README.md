@@ -111,7 +111,7 @@ The output path is generated using the `-p` / `--path-format` template.
 | `{genre}`      | First genre                     |
 | `{metadata_id}` | Looked-up metadata ID (ASIN or AudiobookDB book ID) |
 
-A token whose value is missing or empty does not contribute a path segment (empty segments are stripped). The only exceptions are `{author}` and `{narrator}`, which substitute `Unknown` when no person is known.
+A token whose value is missing or empty does not contribute a path segment (empty segments are stripped). The only exceptions are `{author}`, `{authors}`, `{narrator}`, and `{narrators}`, which substitute `Unknown` when no person is known.
 
 **Default:** `{author}/{title}`
 

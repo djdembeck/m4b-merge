@@ -114,9 +114,10 @@ impl Tagger {
 
     /// Build the cover-download HTTP client.
     ///
-    /// Redirects are disabled: `download_image` validates the URL for SSRF before
-    /// requesting it, and a redirect to an internal address would bypass that check.
-    /// `download_image` treats any 3xx response as an error.
+    /// Redirects are disabled: `download_image` validates the URL and its
+    /// resolved addresses for SSRF before requesting it, and a redirect to an
+    /// internal address would bypass that check. `download_image` treats any
+    /// 3xx response as an error.
     fn build_http_client() -> reqwest::Client {
         reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -129,12 +130,15 @@ impl Tagger {
         if !path.exists() { Err(TaggingError::FileNotFound(path.to_path_buf())) } else { Ok(()) }
     }
 
-    /// Validate a cover URL before downloading (SSRF guard).
+    /// Fast text-level pre-check for a cover URL before downloading (SSRF guard).
     ///
-    /// Only `https` URLs are accepted. Hostnames that are loopback, private,
-    /// link-local, or unspecified address literals (e.g. `127.0.0.1`, `10.x`,
+    /// Only `https` URLs are accepted. Address literals that are loopback,
+    /// private, link-local, CGN, or reserved (e.g. `127.0.0.1`, `10.x`,
     /// `192.168.x`, `169.254.169.254`, `::1`) are rejected, as is `localhost`.
-    /// Public CDN hostnames and public IP literals pass.
+    /// Public CDN hostnames and public IP literals pass; hostnames go on to be
+    /// resolved and their *resolved addresses* are validated by
+    /// [`download_image`](Self::download_image), since a name that looks public
+    /// may still point at an internal network.
     fn validate_cover_url(url: &str) -> Result<()> {
         let parsed = reqwest::Url::parse(url)
             .map_err(|e| TaggingError::CoverDownload(format!("Invalid cover URL '{url}': {e}")))?;
@@ -155,7 +159,9 @@ impl Tagger {
         let rejected = match std::net::IpAddr::from_str(host) {
             // IP literal: block loopback/private/link-local/reserved ranges.
             Ok(addr) => Self::is_restricted_ip(addr),
-            // Hostname: block only the loopback alias; public CDNs pass.
+            // Hostname: block the loopback alias here; `localhost` resolves to
+            // loopback addresses anyway, which `download_image`'s resolved
+            // address check also catches.
             Err(_) => host.eq_ignore_ascii_case("localhost"),
         };
         if rejected {
@@ -173,6 +179,7 @@ impl Tagger {
             std::net::IpAddr::V4(v4) => {
                 let (a, b) = (v4.octets()[0], v4.octets()[1]);
                 v4.is_unspecified()
+                    || a == 0 // 0.0.0.0/8
                     || a == 127 // 127.0.0.0/8 loopback
                     || (a == 10) // 10.0.0.0/8
                     || (a == 172 && (16..=31).contains(&b)) // 172.16.0.0/12
@@ -196,6 +203,23 @@ impl Tagger {
         }
     }
 
+    /// Reject a set of resolved addresses if ANY of them is restricted
+    /// ([`is_restricted_ip`]: loopback/private/link-local/multicast/reserved).
+    ///
+    /// A hostname may list one public and one internal A record; the request
+    /// could land on either, so every address is judged, not just the first.
+    fn validate_addresses(addrs: impl IntoIterator<Item = std::net::SocketAddr>) -> Result<()> {
+        for addr in addrs {
+            if Self::is_restricted_ip(addr.ip()) {
+                return Err(TaggingError::CoverDownload(format!(
+                    "Cover URL resolves to a loopback/private/link-local address ({addr}); \
+                     refusing to fetch it"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Create a new Tagger with custom overwrite behavior
     pub fn with_overwrite_behavior(mut self, behavior: OverwriteBehavior) -> Self {
         self.overwrite_behavior = behavior;
@@ -204,9 +228,10 @@ impl Tagger {
 
     /// Create a new Tagger with a custom HTTP client.
     ///
-    /// `download_image` validates the URL before requesting it and treats any
-    /// 3xx response as an error, but that only catches clients that return the
-    /// 3xx itself: a redirect-following client (reqwest's default policy)
+    /// `download_image` validates the URL and its resolved addresses before
+    /// requesting it and treats any 3xx response as an error, but that only
+    /// catches clients that return the 3xx itself: a redirect-following client
+    /// (reqwest's default policy)
     /// follows the hop internally and surfaces a plain 200 from an internal
     /// address. The no-redirect-bypass guarantee therefore holds only for
     /// clients that do not follow redirects, as `Tagger::new()`'s built-in
@@ -436,13 +461,38 @@ impl Tagger {
         Ok(())
     }
 
-    /// Download image from URL
+    /// Download image from URL.
+    ///
+    /// SSRF guard: `validate_cover_url` fast-rejects non-https schemes and
+    /// restricted address literals textually, then the host is resolved and
+    /// every resolved address is checked against [`is_restricted_ip`] via
+    /// [`validate_addresses`] before the request goes out (a public-looking
+    /// name may point at an internal network). The residual limit is TOCTOU:
+    /// DNS may re-resolve to a restricted address between our lookup and the
+    /// connect, and the client's own resolver decides which address is used.
+    /// Redirects are disabled (`Policy::none()`), so a 3xx cannot bounce the
+    /// download to an unchecked internal host; `download_image` treats any 3xx
+    /// as an error.
     async fn download_image(&self, url: &str) -> Result<Vec<u8>> {
         const MAX_SIZE: usize = 5 * 1024 * 1024; // 5 MB
 
-        // Reject URLs that could reach loopback/private/link-local/reserved
-        // addresses (SSRF) before any request goes out.
+        // Textual pre-check (scheme, literal IP, localhost) before any I/O.
         Self::validate_cover_url(url)?;
+
+        // Resolve the host and reject if ANY resolved address is restricted.
+        let parsed = reqwest::Url::parse(url)
+            .map_err(|e| TaggingError::CoverDownload(format!("Invalid cover URL '{url}': {e}")))?;
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| TaggingError::CoverDownload(format!("Cover URL '{url}' has no host")))?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+        let addrs = tokio::net::lookup_host((host.as_str(), port)).await.map_err(|e| {
+            TaggingError::CoverDownload(format!("Cover URL '{url}' does not resolve: {e}"))
+        })?;
+        Self::validate_addresses(addrs)?;
 
         let response = self
             .http_client
@@ -757,8 +807,9 @@ mod tests {
 
     #[test]
     fn test_validate_cover_url_table() {
-        // (url, should pass). https + public host passes; anything that is not
-        // https, or that resolves to a non-public destination, is rejected.
+        // (url, should pass). Textual pre-check only: https + host that is not
+        // a restricted address literal or localhost passes; resolved-address
+        // validation happens in `download_image` and is tested separately.
         let cases = [
             ("https://images.example.com/covers/book.jpg", true),
             ("https://93.184.216.34/cover.jpg", true), // public IP literal
@@ -773,12 +824,50 @@ mod tests {
             ("https://::1/cover.jpg", false),
             ("https://[::1]/cover.jpg", false),
             ("https://0.0.0.0/cover.jpg", false),
+            ("https://0.9.9.9/cover.jpg", false), // 0.0.0.0/8
             ("not a url", false),
         ];
         for (url, expected) in cases {
             let passed = Tagger::validate_cover_url(url).is_ok();
             assert_eq!(passed, expected, "url {url:?}");
         }
+    }
+
+    #[test]
+    fn test_validate_addresses_rejects_restricted_members() {
+        use std::net::SocketAddr;
+        use std::net::SocketAddrV4;
+        use std::net::SocketAddrV6;
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
+        // All-public set passes.
+        let pub_only: [SocketAddr; 2] = [
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(93, 184, 216, 34), 443)),
+            SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1),
+                443,
+                0,
+                0,
+            )),
+        ];
+        assert!(Tagger::validate_addresses(pub_only).is_ok());
+
+        // A single restricted v4 address in a mixed set is rejected.
+        let mixed: [SocketAddr; 2] =
+            [pub_only[0], SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 443))];
+        assert!(Tagger::validate_addresses(mixed).is_err());
+
+        // Restricted v6 (link-local) is rejected too.
+        let v6ll: [SocketAddr; 1] = [SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+            443,
+            0,
+            0,
+        ))];
+        assert!(Tagger::validate_addresses(v6ll).is_err());
+
+        // Empty set passes (nothing to judge).
+        assert!(Tagger::validate_addresses(std::iter::empty::<SocketAddr>()).is_ok());
     }
 
     #[test]
