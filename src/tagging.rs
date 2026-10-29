@@ -24,6 +24,9 @@ pub enum TaggingError {
     #[error("Invalid file format: {0}")]
     InvalidFormat(String),
 
+    #[error("Cover conversion error: {0}")]
+    CoverConversion(String),
+
     #[error("File not found: {0}")]
     FileNotFound(PathBuf),
 
@@ -360,15 +363,21 @@ impl Tagger {
         // Detect image format
         let format = detect_image_format(image_data)?;
 
+        // `covr` atoms only carry JPEG/PNG/BMP; transcode anything else before
+        // embedding instead of dropping the cover.
+        let (img_fmt, data) = match format {
+            ImageFormat::Jpeg => (mp4ameta::ImgFmt::Jpeg, image_data.to_vec()),
+            ImageFormat::Png => (mp4ameta::ImgFmt::Png, image_data.to_vec()),
+            ImageFormat::Webp | ImageFormat::Gif => {
+                debug!("Converting {format:?} cover to JPEG before embedding");
+                (mp4ameta::ImgFmt::Jpeg, convert_cover_to_jpeg(image_data)?)
+            }
+        };
+
         // Read existing tag or create new one
         let mut tag = mp4ameta::Tag::read_from_path(path).unwrap_or_default();
 
-        // Set artwork based on format
-        let img_fmt = match format {
-            ImageFormat::Jpeg => mp4ameta::ImgFmt::Jpeg,
-            ImageFormat::Png => mp4ameta::ImgFmt::Png,
-        };
-        let artwork = mp4ameta::Img::new(img_fmt, image_data.to_vec());
+        let artwork = mp4ameta::Img::new(img_fmt, data);
         tag.set_artwork(artwork);
 
         // Write the tag back to file
@@ -689,11 +698,16 @@ impl Default for Tagger {
     }
 }
 
-/// Image format enumeration
+/// Image format enumeration.
+///
+/// `Jpeg` and `Png` are stored as-is; `Webp` and `Gif` are not valid `covr`
+/// payloads and are transcoded to JPEG before embedding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImageFormat {
     Jpeg,
     Png,
+    Webp,
+    Gif,
 }
 
 /// Detect image format from magic bytes
@@ -720,7 +734,75 @@ fn detect_image_format(data: &[u8]) -> Result<ImageFormat> {
         return Ok(ImageFormat::Png);
     }
 
+    // GIF magic bytes: "GIF87a" or "GIF89a"
+    if data.len() >= 6 && &data[0..3] == b"GIF" && (&data[3..6] == b"87a" || &data[3..6] == b"89a")
+    {
+        return Ok(ImageFormat::Gif);
+    }
+
+    // WebP magic bytes: "RIFF" .... "WEBP" (chunk size between the two tags)
+    if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        return Ok(ImageFormat::Webp);
+    }
+
     Err(TaggingError::InvalidFormat("Unknown image format".to_string()))
+}
+
+/// Transcode an arbitrary raster image (WebP, GIF, ...) to JPEG via FFmpeg.
+///
+/// MP4 `covr` atoms only carry JPEG, PNG, or BMP data, so container formats
+/// that cover providers also serve must be converted before embedding. The
+/// pre-rewrite pipeline got this for free by writing the download to disk and
+/// handing it to m4b-tool, which shells out to FFmpeg; FFmpeg is already a
+/// required runtime dependency here, so conversion stays local.
+///
+/// Animated GIF and WebP inputs contribute their first frame only.
+fn convert_cover_to_jpeg(image_data: &[u8]) -> Result<Vec<u8>> {
+    let ffmpeg = crate::audio::ffmpeg::FFmpeg::discover().map_err(|e| {
+        TaggingError::CoverConversion(format!(
+            "FFmpeg is required to convert this cover image: {e}"
+        ))
+    })?;
+
+    let temp_dir = tempfile::TempDir::new().map_err(|e| {
+        TaggingError::CoverConversion(format!("Failed to create temp dir for cover: {e}"))
+    })?;
+    let input_path = temp_dir.path().join("cover_input");
+    let output_path = temp_dir.path().join("cover_output.jpg");
+
+    std::fs::write(&input_path, image_data).map_err(|e| {
+        TaggingError::CoverConversion(format!("Failed to write temp cover file: {e}"))
+    })?;
+
+    // `-frames:v 1` keeps animated inputs to a single still frame. No scaling
+    // filter is applied, so the source dimensions are preserved.
+    let output = std::process::Command::new(ffmpeg.ffmpeg_path())
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&input_path)
+        .args(["-frames:v", "1", "-c:v", "mjpeg", "-q:v", "2", "-f", "image2", "-y"])
+        .arg(&output_path)
+        .output()
+        .map_err(|e| TaggingError::CoverConversion(format!("Failed to run FFmpeg: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TaggingError::CoverConversion(format!(
+            "FFmpeg failed to convert cover image: {}",
+            stderr.trim()
+        )));
+    }
+
+    let jpeg = std::fs::read(&output_path).map_err(|e| {
+        TaggingError::CoverConversion(format!("Failed to read converted cover: {e}"))
+    })?;
+
+    if jpeg.is_empty() {
+        return Err(TaggingError::CoverConversion(
+            "FFmpeg produced an empty cover image".to_string(),
+        ));
+    }
+
+    Ok(jpeg)
 }
 
 /// Format a Duration as HH:MM:SS.mmm
@@ -805,6 +887,112 @@ mod tests {
     fn test_detect_image_format_too_short() {
         let short_data = vec![0xFF, 0xD8];
         assert!(detect_image_format(&short_data).is_err());
+    }
+
+    #[test]
+    fn test_detect_image_format_gif87a() {
+        let gif_data = b"GIF87a\x01\x00\x01\x00".to_vec();
+        assert_eq!(detect_image_format(&gif_data).unwrap(), ImageFormat::Gif);
+    }
+
+    #[test]
+    fn test_detect_image_format_gif89a() {
+        let gif_data = b"GIF89a\x01\x00\x01\x00".to_vec();
+        assert_eq!(detect_image_format(&gif_data).unwrap(), ImageFormat::Gif);
+    }
+
+    #[test]
+    fn test_detect_image_format_webp() {
+        // "RIFF" <size> "WEBP"
+        let mut webp_data = b"RIFF".to_vec();
+        webp_data.extend_from_slice(&[0x24, 0x00, 0x00, 0x00]);
+        webp_data.extend_from_slice(b"WEBPVP8 ");
+        assert_eq!(detect_image_format(&webp_data).unwrap(), ImageFormat::Webp);
+    }
+
+    #[test]
+    fn test_detect_image_format_riff_not_webp() {
+        // A RIFF container that is not WebP (e.g. WAV) must stay unknown.
+        let mut riff_data = b"RIFF".to_vec();
+        riff_data.extend_from_slice(&[0x24, 0x00, 0x00, 0x00]);
+        riff_data.extend_from_slice(b"WAVEfmt ");
+        assert!(detect_image_format(&riff_data).is_err());
+    }
+
+    /// Generate a PNG test image with FFmpeg, then transcode it to `format`.
+    fn generate_image(dir: &TempDir, format: &str) -> Vec<u8> {
+        use std::process::Command;
+
+        let png_path = dir.path().join("source.png");
+        let out_path = dir.path().join(format!("cover.{format}"));
+
+        let status = Command::new("ffmpeg")
+            .args(["-f", "lavfi", "-i", "testsrc=size=64x64:duration=1", "-frames:v", "1", "-y"])
+            .arg(&png_path)
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            _ => panic!("FFmpeg required for tests"),
+        }
+
+        let status = Command::new("ffmpeg")
+            .arg("-i")
+            .arg(&png_path)
+            .args(["-frames:v", "1", "-y"])
+            .arg(&out_path)
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            _ => panic!("FFmpeg required for tests"),
+        }
+
+        std::fs::read(&out_path).unwrap()
+    }
+
+    #[test]
+    fn test_convert_cover_to_jpeg_produces_jpeg() {
+        let temp_dir = TempDir::new().unwrap();
+        let webp = generate_image(&temp_dir, "webp");
+
+        let jpeg = convert_cover_to_jpeg(&webp).unwrap();
+        assert_eq!(&jpeg[0..3], &[0xFF, 0xD8, 0xFF], "expected JPEG magic bytes");
+        assert_eq!(detect_image_format(&jpeg).unwrap(), ImageFormat::Jpeg);
+    }
+
+    #[test]
+    fn test_convert_cover_to_jpeg_rejects_non_image() {
+        let result = convert_cover_to_jpeg(b"this is not an image");
+        assert!(matches!(result, Err(TaggingError::CoverConversion(_))));
+    }
+
+    #[test]
+    fn test_embed_cover_webp_converted_to_jpeg() {
+        let temp_dir = TempDir::new().unwrap();
+        let m4b_path = create_minimal_m4b(&temp_dir);
+        let webp = generate_image(&temp_dir, "webp");
+
+        let tagger = Tagger::new();
+        tagger.embed_cover_data(&m4b_path, &webp).expect("embed webp cover");
+
+        let tag = mp4ameta::Tag::read_from_path(&m4b_path).unwrap();
+        let artwork = tag.artwork().expect("cover should be embedded");
+        assert_eq!(artwork.fmt, mp4ameta::ImgFmt::Jpeg);
+        assert_eq!(&artwork.data[0..3], &[0xFF, 0xD8, 0xFF], "stored data must be JPEG");
+    }
+
+    #[test]
+    fn test_embed_cover_gif_converted_to_jpeg() {
+        let temp_dir = TempDir::new().unwrap();
+        let m4b_path = create_minimal_m4b(&temp_dir);
+        let gif = generate_image(&temp_dir, "gif");
+
+        let tagger = Tagger::new();
+        tagger.embed_cover_data(&m4b_path, &gif).expect("embed gif cover");
+
+        let tag = mp4ameta::Tag::read_from_path(&m4b_path).unwrap();
+        let artwork = tag.artwork().expect("cover should be embedded");
+        assert_eq!(artwork.fmt, mp4ameta::ImgFmt::Jpeg);
+        assert_eq!(&artwork.data[0..3], &[0xFF, 0xD8, 0xFF], "stored data must be JPEG");
     }
 
     #[test]
