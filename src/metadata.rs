@@ -148,6 +148,14 @@ impl BookMetadata {
 
         Some(max_end_time)
     }
+
+    /// Get chapters whose start time is at or beyond `file_duration`.
+    ///
+    /// Such a chapter cannot be represented in the chapter track. Callers
+    /// should report them instead of silently truncating the chapter list.
+    pub fn out_of_range_chapters(&self, file_duration: Duration) -> Vec<&Chapter> {
+        self.chapters.iter().filter(|chapter| chapter.start_time >= file_duration).collect()
+    }
 }
 
 /// Trait for types that can be converted to metadata
@@ -243,5 +251,44 @@ mod tests {
 
         let empty_metadata = BookMetadata::new("A1", "Title", "Desc");
         assert_eq!(empty_metadata.total_duration(), None);
+    }
+
+    #[test]
+    fn test_out_of_range_chapters() {
+        let metadata = BookMetadata::new("A1", "Title", "Desc")
+            .add_chapter(Chapter::new("Intro", Duration::ZERO, Duration::from_secs(60)))
+            .add_chapter(Chapter::new("Body", Duration::from_secs(60), Duration::from_secs(60)))
+            .add_chapter(Chapter::new(
+                "End Credits",
+                Duration::from_secs(180),
+                Duration::from_secs(30),
+            ));
+
+        let out_of_range = metadata.out_of_range_chapters(Duration::from_secs(120));
+
+        assert_eq!(out_of_range.len(), 1);
+        assert_eq!(out_of_range[0].title, "End Credits");
+        // The metadata is left intact for the caller to report or abort with.
+        assert_eq!(metadata.chapters.len(), 3);
+    }
+
+    #[test]
+    fn test_out_of_range_chapters_boundaries() {
+        // A chapter starting exactly at the file duration has no playable
+        // range, so it is out of range.
+        let metadata = BookMetadata::new("A1", "Title", "Desc").add_chapter(Chapter::new(
+            "Last",
+            Duration::from_secs(120),
+            Duration::from_secs(10),
+        ));
+        assert_eq!(metadata.out_of_range_chapters(Duration::from_secs(120)).len(), 1);
+
+        // A chapter starting one millisecond before the end is in range.
+        let metadata = BookMetadata::new("A1", "Title", "Desc").add_chapter(Chapter::new(
+            "Last",
+            Duration::from_millis(119_999),
+            Duration::from_secs(10),
+        ));
+        assert!(metadata.out_of_range_chapters(Duration::from_secs(120)).is_empty());
     }
 }

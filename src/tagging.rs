@@ -931,7 +931,7 @@ fn convert_cover_to_jpeg(image_data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Format a Duration as HH:MM:SS.mmm
-fn format_duration(duration: Duration) -> String {
+pub(crate) fn format_duration(duration: Duration) -> String {
     let total_millis = duration.as_millis();
     let hours = total_millis / 3_600_000;
     let minutes = (total_millis % 3_600_000) / 60_000;
