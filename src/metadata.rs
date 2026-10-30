@@ -114,11 +114,16 @@ impl BookMetadata {
         self
     }
 
-    /// Get the full display title (title + subtitle if available)
+    /// Get the full display title (`title - subtitle` when a non-blank
+    /// subtitle is available).
+    ///
+    /// The `" - "` separator is the documented title separator: it matches what
+    /// the pre-Rust pipeline wrote to `©nam`, so libraries that group books by
+    /// title keep working across the rewrite.
     pub fn full_title(&self) -> String {
-        match &self.subtitle {
-            Some(subtitle) => format!("{}: {}", self.title, subtitle),
-            None => self.title.clone(),
+        match self.subtitle.as_deref().map(str::trim) {
+            Some(subtitle) if !subtitle.is_empty() => format!("{} - {}", self.title, subtitle),
+            _ => self.title.clone(),
         }
     }
 
@@ -211,10 +216,13 @@ mod tests {
     fn test_full_title() {
         let metadata_with_subtitle =
             BookMetadata::new("A1", "Title", "Desc").with_subtitle("The Sequel");
-        assert_eq!(metadata_with_subtitle.full_title(), "Title: The Sequel");
+        assert_eq!(metadata_with_subtitle.full_title(), "Title - The Sequel");
 
         let metadata_no_subtitle = BookMetadata::new("A1", "Title", "Desc");
         assert_eq!(metadata_no_subtitle.full_title(), "Title");
+
+        let metadata_blank_subtitle = BookMetadata::new("A1", "Title", "Desc").with_subtitle("   ");
+        assert_eq!(metadata_blank_subtitle.full_title(), "Title");
     }
 
     #[test]
