@@ -5,10 +5,9 @@ FROM rust:1.96-alpine AS builder
 
 WORKDIR /app
 
-# Version stamp — passed by the release workflow as --build-arg VERSION=vX.Y.Z
-# for image metadata labeling only. The binary version itself comes from the
-# frozen source manifests (env!("CARGO_PKG_VERSION") in Cargo.toml).
-ARG VERSION=devel
+# Release identity is compiled into both CLI and API user-agent.
+ARG VERSION
+ARG GIT_COMMIT
 
 # Install build dependencies (binutils provides strip for the single
 # builder-side stripping of the shipped binary)
@@ -22,6 +21,7 @@ RUN apk add --no-cache \
 # Copy the frozen source and lockfile; cache mounts below retain dependencies.
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY build.rs ./build.rs
 
 # Build with persistent BuildKit cache mounts so the cargo registry, git
 # checkouts, and compiled artifacts survive across builds; unchanged
@@ -32,7 +32,7 @@ COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
-    cargo build --release --locked && \
+    M4B_MERGE_VERSION="$VERSION" M4B_MERGE_SOURCE="$GIT_COMMIT" cargo build --release --locked && \
     cp target/release/m4b-merge /usr/local/bin/m4b-merge && \
     strip --strip-all /usr/local/bin/m4b-merge
 
@@ -42,8 +42,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM alpine:3.24 AS runtime
 
 # Accept the version arg for image metadata
-ARG VERSION=devel
-LABEL org.opencontainers.image.version=$VERSION
+ARG VERSION=dev
+ARG GIT_COMMIT=unknown
+LABEL org.opencontainers.image.version=$VERSION \
+      org.opencontainers.image.revision=$GIT_COMMIT
 
 # Install runtime dependencies
 RUN apk add --no-cache ffmpeg ca-certificates

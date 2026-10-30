@@ -1,50 +1,7 @@
-# Publish-only release pipeline for the promoted main SHA (no-sync model).
-#
-# Versions are prepared on develop (scripts/release.py prepare) and promoted
-# to main with a release/v*-*-* PR merging the frozen develop tree. This
-# workflow never recomputes versions, never edits Cargo files, and never
-# syncs main back to develop. It publishes exactly the commit it runs on:
-#
-#   1. check:            the SHA must belong to main and its version must
-#                        be new (helper check-publication). No tag yet.
-#   2. test:             full real test suite (ffmpeg installed on Linux)
-#                        from Cargo.lock.
-#   3. binaries:         the existing macOS/Windows binaries, each built
-#                        from Cargo.lock and verified against the release
-#                        version.
-#   4. docker:           native amd64 + arm64 builds pushed as immutable
-#                        SHA staging tags (sha-<sha>-<arch>), which may be
-#                        pushed before the tag.
-#   5. linux-assets:     the exact digest-pinned image bytes are extracted
-#                        on the native amd64/arm64 runners and proven with
-#                        the static-musl smoke, two container smokes, and
-#                        the GNU-vs-musl native parity benchmark — its
-#                        measurement noise and inconclusive bounds are
-#                        advisory, but a functional merge/probe failure
-#                        fails this job and blocks the tag. The Linux
-#                        release assets are these verified bytes.
-#   6. tag:              ONLY after test + binaries + docker + linux-assets
-#                        succeed, the helper creates the vX.Y.Z tag and the
-#                        GitHub release (empty notes — the Annalist GitHub
-#                        App fills the body via webhook).
-#   7. manifest:         the SHA staging images are retagged
-#                        vX.Y.Z-amd64/arm64 and assembled into the canonical
-#                        multi-arch vX.Y.Z manifest — every published image
-#                        was built from this SHA.
-#   8. upload:           missing release assets are uploaded (existing
-#                        assets are never overwritten).
-#
-# Immutability and retry semantics:
-#   - The tag is created only by the helper: never for a different commit —
-#     no fallback to an older version, no rollback of latest.
-#   - An interrupted publish is resumed by re-running this workflow: the tag
-#     (if it already points at this SHA) is reused, the release is reused,
-#     missing assets are filled in, and missing image parts are added.
-#     SHA staging images from earlier partial runs are kept and reused.
-#
-# Requires no repo secrets — GITHUB_TOKEN is provided automatically.
-# There is deliberately no tag push trigger: tag creation happens inside
-# this pipeline, and a competing tag-triggered build would race it.
+# One normal develop -> main promotion selects and reserves a release identity.
+# The same frozen source/version builds every binary and image. No source writes,
+# preparation/candidate branches, or merge-back. Draft assets complete before
+# publication; Annalist GitHub App fills notes on the published release.
 
 name: Release
 
@@ -52,6 +9,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Explicit vX.Y.Z; empty selects from reachable reservations"
+        required: false
+        default: ""
+      bump:
+        description: "auto, patch, minor, or major"
+        required: false
+        default: auto
 
 permissions:
   contents: read
@@ -67,10 +33,7 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # Manual dispatch exists only to resume an interrupted publication from
-  # main. From any other ref every real job would skip and the run would
-  # end green — fail loudly so a wrong-ref dispatch can never look like a
-  # completed retry.
+  # Wrong-ref dispatch fails before any write-scoped job starts.
   ref-guard:
     if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -81,10 +44,11 @@ jobs:
           exit 1
 
   # ─────────────────────────────────────────────────────────────────
-  # Validate the promoted SHA. All version knowledge comes from the
-  # frozen source manifests; the helper prints the bare vX.Y.Z.
+  # Reserve the frozen source before any external artifact publication.
   # ─────────────────────────────────────────────────────────────────
   check:
+    permissions:
+      contents: write
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
@@ -92,31 +56,44 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          persist-credentials: true
           fetch-depth: 0
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 
-      - name: Check publication (SHA on main, version new, tag absent or identical)
+      - name: Reserve the exact-source release identity
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ github.sha }}
+          VERSION_INPUT: ${{ inputs.version }}
+          BUMP_INPUT: ${{ inputs.bump }}
+          RELEASE_EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          VERSION=$(python3 scripts/release.py check-publication --sha "${{ github.sha }}")
+          args=(--sha "$SOURCE" --bump "${BUMP_INPUT:-auto}")
+          if [[ -n "$VERSION_INPUT" ]]; then args+=(--version "$VERSION_INPUT"); fi
+          if [[ "$RELEASE_EVENT" == push ]]; then args+=(--automatic); fi
+          VERSION=$(python3 scripts/release.py reserve "${args[@]}")
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Publishing ${VERSION} for ${GITHUB_SHA}"
+          echo "Reserved ${VERSION:-no version (superseded automatic candidate)} for ${SOURCE}"
 
   # ─────────────────────────────────────────────────────────────────
   # Real test suite against the promoted SHA.
   # ─────────────────────────────────────────────────────────────────
   test:
     needs: [check]
+    if: needs.check.outputs.version != ''
+    env:
+      M4B_MERGE_VERSION: ${{ needs.check.outputs.version }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -146,6 +123,9 @@ jobs:
   # ─────────────────────────────────────────────────────────────────
   binaries:
     needs: [check]
+    if: needs.check.outputs.version != ''
+    env:
+      M4B_MERGE_VERSION: ${{ needs.check.outputs.version }}
     strategy:
       matrix:
         include:
@@ -157,6 +137,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -209,6 +190,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────
   docker-amd64:
     needs: [check]
+    if: needs.check.outputs.version != ''
     outputs:
       digest: ${{ steps.capture.outputs.digest }}
     env:
@@ -224,6 +206,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -250,7 +233,9 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.check.outputs.version }}
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}-amd64
-          build-args: VERSION=${{ needs.check.outputs.version }}
+          build-args: |
+            VERSION=${{ needs.check.outputs.version }}
+            GIT_COMMIT=${{ github.sha }}
           cache-from: type=gha,scope=release-amd64
           cache-to: type=gha,scope=release-amd64,mode=max
           platforms: linux/amd64
@@ -261,6 +246,7 @@ jobs:
 
   docker-arm64:
     needs: [check]
+    if: needs.check.outputs.version != ''
     outputs:
       digest: ${{ steps.capture.outputs.digest }}
     env:
@@ -276,6 +262,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -302,7 +289,9 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.check.outputs.version }}
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}-arm64
-          build-args: VERSION=${{ needs.check.outputs.version }}
+          build-args: |
+            VERSION=${{ needs.check.outputs.version }}
+            GIT_COMMIT=${{ github.sha }}
           cache-from: type=gha,scope=release-arm64
           cache-to: type=gha,scope=release-arm64,mode=max
           platforms: linux/arm64
@@ -477,8 +466,7 @@ jobs:
           name: ${{ matrix.asset }}
           path: artifacts/${{ matrix.asset }}
 
-  # The helper refuses to point it at any different SHA. The GitHub
-  # release is created empty; Annalist fills the body via webhook.
+  # Create a draft after verification; publish it only after all outputs finish.
   # ─────────────────────────────────────────────────────────────────
   tag:
     permissions:
@@ -490,29 +478,24 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
           fetch-depth: 0
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 
-      - name: Create immutable tag
+      - name: Reuse reserved identity and create a draft release
         id: tag
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.version }}
+          SOURCE: ${{ github.sha }}
         run: |
           set -euo pipefail
-          TAG=$(python3 scripts/release.py tag --sha "${{ github.sha }}")
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub release (reuse if present)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          set -euo pipefail
-          gh release view "${TAG}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "${TAG}" --repo "$GITHUB_REPOSITORY" --title "Release ${TAG}" --notes ""
+          python3 scripts/release.py release --tag "$TAG" --source "$SOURCE"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
   # ─────────────────────────────────────────────────────────────────
   # Publish the multi-arch image. The SHA staging images were built
@@ -528,6 +511,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -559,6 +543,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -578,3 +563,20 @@ jobs:
           --repo "$GITHUB_REPOSITORY" --tag "$TAG" --sha "$SHA" --artifacts artifacts
           --asset m4b-merge-linux --asset m4b-merge-linux-arm64
           --asset m4b-merge-macos --asset m4b-merge-windows.exe
+
+  publish:
+    needs: [check, tag, manifest, upload]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Publish the complete immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.version }}
+          SOURCE: ${{ github.sha }}
+        run: python3 scripts/release.py release --tag "$TAG" --source "$SOURCE" --publish

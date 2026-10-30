@@ -118,13 +118,7 @@ required-check list.
 
 ### Release Gate
 
-`develop` reaches `main` only through a human-reviewed
-`release/v*-*-*` promotion PR (see the `Releasing` section of
-`CONTRIBUTING.md`). `main` keeps its native strict base-freshness
-protection; there is no automatic sync back to `develop`. Promotion PRs
-send a trusted `Release policy` status from the `Release Policy`
-workflow, which verifies the frozen two-parent merge shape before the
-check can be required.
+`develop` reaches `main` through one ordinary same-repository promotion PR, not a version-preparation or candidate branch. The base-owned `Promotion guard` validates develop source and merge-tree state without executing PR code. Main freshness stays unchanged until isolated platform proof and a separately authorized policy apply; develop uses non-strict freshness with required CI. The publisher reserves an immutable version and builds actual CLI/user-agent outputs from that source, without Cargo version commits or merge-back.
 
 ---
 

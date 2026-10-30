@@ -20,13 +20,14 @@ The tool automates metadata lookup by ASIN or AudiobookDB book ID through [Audio
 
 ### Docker (Fastest Path)
 
-Run without installation using the GHCR image.
+Choose a published `vX.Y.Z` tag or digest from the [release you intend to run](https://github.com/djdembeck/m4b-merge/releases), and set `IMAGE` to its full GHCR reference. The release workflow does not maintain a rolling `latest` alias.
 
 ```bash
+: "${IMAGE:?Set IMAGE to a published GHCR version tag or digest}"
 docker run --rm \
   -v /path/to/input:/input \
   -v /path/to/output:/output \
-  ghcr.io/djdembeck/m4b-merge:latest \
+  "$IMAGE" \
   -i /input/book_folder/ -o /output
 ```
 
@@ -105,6 +106,23 @@ Check FFmpeg installation and version.
 ```bash
 m4b-merge --check-ffmpeg
 ```
+
+## Embedded Tags
+
+| Atom    | Source                                                        |
+|---------|---------------------------------------------------------------|
+| `©nam`  | Title; subtitle appended as `title - subtitle` when present   |
+| `©ART`  | All authors, joined by `, `                                   |
+| `©aART` | Same as `©ART` (album artist)                                 |
+| `©alb`  | Base title only (never the subtitle)                           |
+| `©gen`  | All genres, joined by `/` (single `©gen` value)                |
+| `©day`  | Release year                                                  |
+| `©cmt`  | Description                                                   |
+| `©wrt`  | All narrators, joined by `, `                                 |
+| `©grp`  | `Series: <name> #<position>`                                  |
+
+A tag with no corresponding metadata is removed, so retagging from a different
+source cannot leave stale values behind.
 
 ## Path Format Variables
 
