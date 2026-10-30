@@ -18,7 +18,7 @@ All notable changes to this project will be documented in this file. See [standa
   - Retry logic honors the `Retry-After` header on 429s
 
 ### Fixed
-- Chapterless input groups (split MP3/M4A without embedded chapters and without provider chapters) now get one generated chapter per input track, titled `Chapter 01`, `Chapter 02`, … and embedded in the merged M4B. Chapters are embedded even when no provider metadata was available, matching the pre-rewrite `ChaptersFromFileTracks` behaviour.
+- Chapterless input groups (split MP3/M4A without embedded chapters and without provider chapters) now get one generated chapter per input track, titled `Chapter 01`, `Chapter 02`, … and embedded in the merged M4B, matching the pre-rewrite `ChaptersFromFileTracks` behaviour. Chapters and the `chapters.txt` sidecar are written even when no provider metadata was available.
 
 ### Changed
 - Release pipeline: versions are prepared on `develop` and promoted to `main` as a frozen tree; the `Release` workflow publishes tested `main` SHAs without source edits, merge-back, or `latest` writes. release-please configuration and manifest removed.

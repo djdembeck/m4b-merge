@@ -475,10 +475,22 @@ impl Processor {
             }
         }
 
-        // Write chapters.txt next to the output file
+        // Write chapters.txt next to the output file. Generated chapters have no
+        // provider metadata to source headers from, so fall back to the output
+        // stem as the album name.
+        let chapters_txt_path = merged_path.with_extension("chapters.txt");
         if let Some(meta) = &metadata {
-            let chapters_txt_path = merged_path.with_extension("chapters.txt");
             if let Err(e) = self.tagger.write_chapters_txt(&chapters_txt_path, meta) {
+                warn!("Failed to write chapters.txt: {}", e);
+            }
+        } else if !chapters.is_empty() {
+            let album = merged_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if let Err(e) =
+                self.tagger.write_chapters_txt_with(&chapters_txt_path, &album, None, &chapters)
+            {
                 warn!("Failed to write chapters.txt: {}", e);
             }
         }

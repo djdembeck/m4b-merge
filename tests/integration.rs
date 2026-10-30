@@ -329,6 +329,16 @@ fn test_multiple_mp3_merge() {
     assert_eq!(chapters[0], "Chapter 01");
     assert_eq!(chapters[1], "Chapter 02");
     assert_eq!(chapters[2], "Chapter 03");
+
+    // The chapters.txt sidecar is exported even without provider metadata.
+    let sidecar = output_files[0].path().with_extension("chapters.txt");
+    assert!(sidecar.exists(), "chapters.txt should be written next to the output");
+    let sidecar_content = std::fs::read_to_string(&sidecar).unwrap();
+    assert!(sidecar_content.contains("## album: audiobook"), "{}", sidecar_content);
+    assert!(sidecar_content.contains("## total-duration: 00:00:09.0"), "{}", sidecar_content);
+    assert!(sidecar_content.contains("00:00:00.000 Chapter 01"), "{}", sidecar_content);
+    assert!(sidecar_content.contains("Chapter 02"), "{}", sidecar_content);
+    assert!(sidecar_content.contains("Chapter 03"), "{}", sidecar_content);
 }
 
 #[test]
