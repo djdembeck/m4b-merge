@@ -12,6 +12,32 @@ pub struct Chapter {
     pub duration: u64,
 }
 
+/// Generate one chapter per input track, laid end to end.
+///
+/// This mirrors m4b-tool's `ChaptersFromFileTracks` followed by the numbering in
+/// the pre-rewrite `m4b_helper.py`: the merged output is the concatenation of the
+/// tracks in order, so each track becomes a `Chapter NN` chapter whose start time
+/// is the sum of the preceding track durations.
+///
+/// `durations` are track durations in milliseconds. Zero-length tracks cannot
+/// produce a chapter and are skipped; the running offset only advances by the
+/// durations that are kept, so start times always describe the merged timeline.
+pub fn generate_chapters_from_durations(durations: &[u64]) -> Vec<Chapter> {
+    let mut chapters: Vec<Chapter> = Vec::with_capacity(durations.len());
+    let mut offset: u64 = 0;
+
+    for duration in durations.iter().copied().filter(|d| *d > 0) {
+        chapters.push(Chapter {
+            title: format!("Chapter {:02}", chapters.len() + 1),
+            start_time: offset,
+            duration,
+        });
+        offset = offset.saturating_add(duration);
+    }
+
+    chapters
+}
+
 /// Read chapters from an M4B file.
 ///
 /// Tries ffprobe first, then falls back to chpl atom parsing.
@@ -347,5 +373,47 @@ mod tests {
                 chapter.duration
             );
         }
+    }
+
+    #[test]
+    fn test_generate_chapters_from_durations() {
+        let chapters = generate_chapters_from_durations(&[5_000, 7_500, 1_000]);
+
+        assert_eq!(chapters.len(), 3);
+        assert_eq!(chapters[0].title, "Chapter 01");
+        assert_eq!(chapters[0].start_time, 0);
+        assert_eq!(chapters[0].duration, 5_000);
+        assert_eq!(chapters[1].start_time, 5_000);
+        assert_eq!(chapters[1].duration, 7_500);
+        assert_eq!(chapters[2].start_time, 12_500);
+        assert_eq!(chapters[2].duration, 1_000);
+    }
+
+    #[test]
+    fn test_generate_chapters_single_track() {
+        let chapters = generate_chapters_from_durations(&[42_000]);
+
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].title, "Chapter 01");
+        assert_eq!(chapters[0].start_time, 0);
+        assert_eq!(chapters[0].duration, 42_000);
+    }
+
+    #[test]
+    fn test_generate_chapters_empty_input() {
+        assert!(generate_chapters_from_durations(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_generate_chapters_skips_zero_length_tracks() {
+        // A zero-length track cannot produce a chapter; the offset only advances
+        // by durations that are kept, so later chapters stay on the merged timeline.
+        let chapters = generate_chapters_from_durations(&[0, 3_000, 0, 2_000]);
+
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0].start_time, 0);
+        assert_eq!(chapters[0].duration, 3_000);
+        assert_eq!(chapters[1].title, "Chapter 02");
+        assert_eq!(chapters[1].start_time, 3_000);
     }
 }
