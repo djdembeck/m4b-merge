@@ -60,9 +60,10 @@ jobs:
 
   # Current, reviewed helper code verifies the frozen historical facts:
   # tag -> commit, existing releasened assets, image provenance, and the
-  # two immutable version-tag digests.
+  # two immutable version-tag digests. guard is deliberately not a
+  # dependency: on main it is skipped, and needs propagates a skip to
+  # every dependent job no matter what their own if says.
   preflight:
-    needs: [guard]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
@@ -216,8 +217,10 @@ jobs:
             ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
-          key: backfill-${{ runner.os }}-cargo-${{ hashFiles('frozen-source/Cargo.lock') }}
-          restore-keys: backfill-${{ runner.os }}-cargo-
+          # Arch-scoped: ~/.cargo/bin holds arch-specific rust shims; the
+          # frozen lock hash shades the key against the live checkouts.
+          key: backfill-${{ runner.os }}-${{ matrix.arch }}-cargo-${{ hashFiles('frozen-source/Cargo.lock') }}
+          restore-keys: backfill-${{ runner.os }}-${{ matrix.arch }}-cargo-
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 

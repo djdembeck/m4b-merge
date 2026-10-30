@@ -122,8 +122,11 @@ def check_elf(binary, arch, expect_stripped):
 
     if expect_stripped:
         lines = readelf("--wide", "--sections").splitlines()
-        names = {line.split()[1] for line in lines
-                 if re.match(r"\s*\[\d+\]", line) and len(line.split()) >= 2}
+        # readelf pads single-digit section indices ("  [ 1] .interp"),
+        # so split the name out of the well-formed index cell only.
+        names = {m.group(1) for m in
+                 (re.match(r"\s*\[\s*\d+\]\s+(\S+)", line) for line in lines)
+                 if m}
         if ".symtab" in names:
             fail(f"Expected stripped binary, found .symtab section")
 
@@ -343,9 +346,8 @@ def run_benchmark(baseline, candidate, version, arch, report_path):
         temp_dir = Path(temp)
         seed_dir = temp_dir / "seeds"
         seed_dir.mkdir()
-        # Fixture generation once, outside every timed region. Each timed
-        # run merges about 2-8 minutes of audio, keeping the 8-case matrix
-        # inside roughly 15 minutes of CI time.
+        # Fixture generation once, outside every timed region. Each case
+        # merges 128 (AAC copy) or 8 minutes (MP3 transcode) of audio.
         generate_media(seed_dir, "seed.m4a", "aac", 30)
         generate_media(seed_dir, "seed.mp3", "libmp3lame", 30)
         try:
@@ -357,7 +359,13 @@ def run_benchmark(baseline, candidate, version, arch, report_path):
                     case["upper95_log_ratio"] = bound
                     case["passed"] = bound <= 0.0
                     cases.append(case)
-        except Exception as exc:  # keep the report, fail closed after it
+        except VerifierFailure:
+            # A functional merge/probe failure is a hard publication
+            # failure; only measurement uncertainty is advisory.
+            raise
+        except ValueError as exc:
+            # A valid measurement that the bound cannot resolve is
+            # inconclusive: keep the report, mark the run failed.
             error = str(exc)
             cases.append({"case": "inconclusive", "error": error})
 

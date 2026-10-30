@@ -232,14 +232,21 @@ publishes that exact commit:
 - Verifies it is publishable (SHA is on `main`, version is new, and no
   conflicting tag exists) via `check-publication`.
 - Runs the **real test suite** (with `ffmpeg` installed on Linux) and
-  builds the existing Linux, macOS, and Windows binaries **from the exact
-  SHA that will be tagged**, and the Docker images natively (amd64 on an
-  x86 runner, arm64 on an ARM runner) — **no QEMU cross-build**. Per-arch
-  images are pushed as immutable `sha-<sha>-<arch>` staging tags first.
-- Only after test + binaries + Docker all succeed does the helper create
-  the `vX.Y.Z` tag (via `scripts/release.py tag --sha`) and the minimal
-  GitHub Release; the Annalist GitHub App fills the release body via
-  webhook.
+  builds the macOS and Windows binaries **from the exact SHA that will
+  be tagged**, and the Docker images natively (amd64 on an x86 runner,
+  arm64 on an ARM runner) — **no QEMU cross-build**. Per-arch images are
+  pushed as immutable `sha-<sha>-<arch>` staging tags first.
+- The Linux release assets are the **exact bytes extracted** from those
+  verified per-arch staging images (the binary is stripped once in the
+  image builder); they are proven on the native runners with a static
+  musl smoke, two container smokes, and an **advisory** GNU-vs-musl
+  parity benchmark whose per-case report is uploaded as evidence (same
+  convention as the advisory `cargo-audit` check) — it never gates
+  publication, which remains ruled by the natively passing checks above.
+- Only after test + binaries + Docker + Linux asset verification all
+  succeed does the helper create the `vX.Y.Z` tag (via
+  `scripts/release.py tag --sha`) and the minimal GitHub Release; the
+  Annalist GitHub App fills the release body via webhook.
 - The multi-arch `vX.Y.Z` image is assembled **only after** the per-arch
   images from the same SHA exist. The `Release` workflow **never** writes
   `latest`; CI owns it and re-points it on `main` pushes once the test job
