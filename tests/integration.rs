@@ -577,21 +577,68 @@ fn test_region_option_reaches_audnexus_request() {
 }
 
 #[test]
+fn test_descriptive_marker_does_not_mask_real_metadata_id() {
+    if !ffmpeg_available() {
+        return;
+    }
+    // "Unabridged" is 10 alphanumeric characters, so it is ASIN-shaped. A
+    // group named `Book [Unabridged] [B08XYZ1234]` must fall through to the
+    // real ASIN instead of looking up the marker and merging without metadata.
+    let temp_dir = TempDir::new().unwrap();
+    let group_dir = temp_dir.path().join("Book [Unabridged] [B08XYZ1234]");
+    std::fs::create_dir_all(&group_dir).unwrap();
+    generate_test_mp3(&group_dir.join("chapter1.mp3"), 2);
+
+    // Both candidates 404 (a localized metadata failure, no retry), so the
+    // recorded URIs prove the lookup order and the merge still completes.
+    let (base, server) = audnexus_mock("HTTP/1.1 404 Not Found", "not found");
+
+    let output = Command::new(bin_path())
+        .args([
+            "-i",
+            group_dir.to_str().unwrap(),
+            "-o",
+            temp_dir.path().to_str().unwrap(),
+            "--metadata-source",
+            "audnexus",
+            "--api-url",
+            &base,
+        ])
+        .output()
+        .expect("Failed to run m4b-merge");
+
+    let uris = server.join().expect("mock server join");
+    assert_eq!(
+        uris,
+        vec!["/books/Unabridged?region=us".to_string(), "/books/B08XYZ1234?region=us".to_string()],
+        "the descriptive marker must not mask the real ASIN"
+    );
+    assert!(
+        output.status.success(),
+        "a localized metadata failure must not fail the merge, stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
 fn test_non_us_region_warns_for_audiobookdb() {
     if !ffmpeg_available() {
         return;
     }
-    // A group named after the id: discovery infers the metadata ID from
-    // `[B08XYZ1234]` in the group name, so the lookup targets the mock
-    // (a 404 → IdNotFound → localized metadata failure, no retry).
+    // The id lives in the group directory name, so discovery extracts it and
+    // the lookup actually reaches the mock (a 404 → IdNotFound → localized
+    // metadata failure, no retry). The request list is asserted so the test
+    // cannot pass while the mock receives nothing.
     let run = |region: &str| {
         let (base, server) = audnexus_mock("HTTP/1.1 404 Not Found", "not found");
         let dir = TempDir::new().unwrap();
-        generate_test_mp3(&dir.path().join("book [B08XYZ1234].mp3"), 2);
+        let group_dir = dir.path().join("book [B08XYZ1234]");
+        std::fs::create_dir_all(&group_dir).unwrap();
+        generate_test_mp3(&group_dir.join("chapter1.mp3"), 2);
         let output = Command::new(bin_path())
             .args([
                 "-i",
-                dir.path().to_str().unwrap(),
+                group_dir.to_str().unwrap(),
                 "-o",
                 dir.path().to_str().unwrap(),
                 "--api-url",
@@ -601,7 +648,12 @@ fn test_non_us_region_warns_for_audiobookdb() {
             ])
             .output()
             .expect("Failed to run m4b-merge");
-        let _ = server.join();
+        let uris = server.join().expect("mock server join");
+        assert!(!uris.is_empty(), "no request reached the audnexus mock");
+        assert!(
+            uris.iter().all(|uri| uri.contains("B08XYZ1234")),
+            "every lookup must target the group's metadata id, got: {uris:?}"
+        );
         output
     };
 
