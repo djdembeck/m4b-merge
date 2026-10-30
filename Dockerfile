@@ -9,12 +9,14 @@ WORKDIR /app
 ARG VERSION
 ARG GIT_COMMIT
 
-# Install build dependencies
+# Install build dependencies (binutils provides strip for the single
+# builder-side stripping of the shipped binary)
 RUN apk add --no-cache \
     musl-dev \
     pkgconfig \
     cmake \
-    perl
+    perl \
+    binutils
 
 # Copy the frozen source and lockfile; cache mounts below retain dependencies.
 COPY Cargo.toml Cargo.lock ./
@@ -31,7 +33,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
     M4B_MERGE_VERSION="$VERSION" M4B_MERGE_SOURCE="$GIT_COMMIT" cargo build --release --locked && \
-    cp target/release/m4b-merge /usr/local/bin/m4b-merge
+    cp target/release/m4b-merge /usr/local/bin/m4b-merge && \
+    strip --strip-all /usr/local/bin/m4b-merge
 
 # =============================================================================
 # Runtime stage - Minimal Alpine image with FFmpeg

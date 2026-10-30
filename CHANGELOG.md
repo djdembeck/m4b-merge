@@ -17,6 +17,19 @@ All notable changes to this project will be documented in this file. See [standa
   - Retry logic honors the `Retry-After` header on 429s
 
 ### Changed
+- **Breaking (Linux):** release Linux assets are now static-musl binaries.
+  From the release following v2.0.0, `m4b-merge-linux` is x86-64 static
+  musl and `m4b-merge-linux-arm64` is ARM64 static musl; no GNU-linked
+  Linux asset is produced. For v2.0.0 specifically, `m4b-merge-linux`
+  remains the original GNU binary and the assets added to that release
+  are the x86-64 `m4b-merge-linux-musl` and the ARM64
+  `m4b-merge-linux-arm64`. Select release assets by exact full name.
+- Linux release assets are now the exact bytes extracted from the
+  digest-pinned GHCR image, stripped once in the builder and proven
+  natively before publication; the GNU-vs-musl parity benchmark posts
+  its per-case report as evidence — measurement noise and inconclusive
+  bounds are advisory, but a functional merge/probe failure fails the
+  job and blocks the tag, and on that path the report is never written.
 - Release pipeline: versions are prepared on `develop` and promoted to `main` as a frozen tree; the `Release` workflow publishes tested `main` SHAs without source edits, merge-back, or `latest` writes. release-please configuration and manifest removed.
 - **Breaking:** `--asin` renamed to `--metadata-id` (accepts an ASIN or an AudiobookDB
   book ID); new `--metadata-source` flag
