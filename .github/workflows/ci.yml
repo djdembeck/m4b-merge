@@ -229,13 +229,13 @@ jobs:
             # PR images take the stable pr-{N} tag so pr-cleanup.yml (which
             # deletes pr-{N} package versions on PR close) collects them.
             type=ref,event=pr
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,enable=${{ github.event_name != 'pull_request' }}
 
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: Dockerfile
+          build-args: GIT_COMMIT=${{ github.sha }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -274,13 +274,13 @@ jobs:
           flavor: suffix=-arm64,latest=false
           tags: |
             type=ref,event=branch
-            type=raw,value=latest
             type=sha
 
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: Dockerfile
+          build-args: GIT_COMMIT=${{ github.sha }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -312,7 +312,6 @@ jobs:
           # workflow (never by CI), so no type=semver lines here.
           tags: |
             type=ref,event=branch
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha
 
       - name: Assemble multi-arch manifest

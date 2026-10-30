@@ -140,140 +140,25 @@ Updating, improving and correcting the documentation
 
 ## Releasing
 
-m4b-merge publishes from a **frozen snapshot of `develop`** that is manually
-promoted to `main`. There is no CI-driven merge from `develop` and no
-automatic version bump on push — versions are bumped explicitly on
-`develop` by `release.py prepare`. The `Release` publisher only runs
-against the newer version a promotion just promoted to `main`; it never
-republishes, retags, or rolls back anything older, and it never syncs
-`main` back to `develop`.
+Merge ordinary checked squash PRs into `develop`, then promote with one normal `develop` → `main` merge-commit PR. The Release workflow reserves one version for the exact resulting main SHA; it never edits Cargo metadata, creates preparation/candidate branches, or merges main back.
 
-Releases use the operator script `scripts/release.py` (Python 3.11+, stdlib
-only; it uses your local `gh`/`git` for the same remote it does in CI).
+Automatic release is the default. For a deliberate release, open **Actions → Release → Run workflow**, select main, and leave version/bump empty for automatic selection. Optional version (`vX.Y.Z`) and bump (`auto`, `patch`, `minor`, `major`) use the same publishing body. A dispatch from another branch fails before any publishing job runs. Manual-only installations remove the push trigger statically; they do not change per-release YAML.
 
-### 1. Prepare a version on `develop`
+### Version identity and outputs
 
-After your changes are merged to `develop` and CI is green:
+The highest valid SemVer reservation reachable from the frozen source supplies the automatic baseline; unfinished numbers remain reserved. An existing exact-source reservation wins on retry, even after newer releases. Different-source collisions, ambiguous reservations, and conflicting artifacts fail; tags never move. A new unreserved automatic candidate older than a newer reserved source coalesces without publication; explicit manual requests are not silently dropped.
 
-```bash
-python3 scripts/release.py prepare --dry-run --bump auto   # actions preview
-python3 scripts/release.py prepare --bump auto
-```
+The selected version is compiled into the CLI and AudiobookDB user-agent through `M4B_MERGE_VERSION`. Native package metadata in Cargo.toml/Cargo.lock is independent. Untagged source builds say `dev-<source SHA>`; archives without git say `dev`, not a stale package release. Docker consumes VERSION and GIT_COMMIT for both the real binary and OCI metadata.
 
-Use `--bump minor` / `--bump major` / `--version 1.2.3` instead of
-`--bump auto` for an explicit version. The preview reads the remote state
-but creates nothing. `prepare` then opens a pull request to `develop` that bumps the `Cargo.toml` /
-`Cargo.lock` package version on a short-lived
-`release-prep/vVERSION-<source>` branch. **Merge it** and wait for CI —
-the promotion in the next step freezes the commit `develop` points at.
+Publication preserves Linux/macOS/Windows assets and native amd64/arm64 images. It tests the version-stamped source, validates existing image source/version/architecture and immutable digests, and uploads only missing assets after checking their content/provenance. Registry/authentication failures are not absence. A draft release holds partial assets; it becomes published only after binaries, image manifest, and asset upload finish. Annalist's existing GitHub App fills notes at publication; deploy the shared previous-published-ancestor notes fix before cutover so failed reservations do not hide changes.
 
-### 2. Freeze the promotion candidate
+Use immutable `ghcr.io/djdembeck/m4b-merge:vX.Y.Z` (or its captured digest) for named releases. CI owns branch/PR/SHA previews only; no mutable production latest alias is published or rolled backward by a retry.
 
-```bash
-python3 scripts/release.py candidate --dry-run   # actions preview
-python3 scripts/release.py candidate
-```
+### Protection and concurrency
 
-Both print a JSON result whose `head` (the new candidate SHA) and `base`
-(the current `main` SHA the candidate is merged against) are the
-`<CANDIDATE_SHA>` / `<CURRENT_MAIN_SHA>` values used in the next step's
-`verify` command.
+Develop does not require rebasing onto its current base after unrelated PRs merge; meaningful CI and conflict detection remain enforced. Main protection is unchanged by this PR. The base-owned Promotion guard validates direct same-repository develop → main heads, source ancestry, and merge-tree equality without executing PR-owned code. The guard cannot report on its introducing PR: GitHub runs the base-owned workflow and helper, so both must reach the default/base branch before a trusted `Promotion guard` result can exist. Only then bind that exact required context to its producer and prove successive promotions, new-head invalidation, and wrong-head/direct-push rejection in isolated platform fixtures before any separately authorized main-freshness relaxation. This promotion-only model has no independent main-only hotfix lane.
 
-The command builds `release/vVERSION-<source>-<main-base>` against current
-`main` and merges the *frozen snapshot of `develop`* with `--no-ff`, so the
-promoted tree is byte-identical to `develop` at that SHA. On conflict (e.g.
-a `main` hotfix that `develop` has not picked up), it fails hard: forward-port
-`main` into `develop` (merge it and resolve there) so the frozen tree already
-contains those changes, then re-run. `--resolved-commit OID` only reuses an
-existing merge whose first parent is current `main`, whose second parent is
-the frozen `develop` commit, and whose tree already equals that `develop`
-tree — it re-checks exactly two parents, an untagged version newer than every
-release tag reachable from `main`, and version agreement with the frozen tree
-— so `main`-only changes never survive promotion.
-
-### 3. Merge the promotion PR (human review)
-
-The promotion is gated by human review, the `Release policy` status check
-when required, and `main`'s native strict-base freshness protection.
-
-- One-time bootstrap, in time order:
-  - **Before the first promotion** — verify the candidate manually from a
-    full clone; the trusted `Release policy` status protects `main` only
-    once the workflow and helper are merged there.
-  - **Always** — keep `main`'s native "strict base freshness" branch
-    protection enabled — never relax it so an out-of-date promotion can
-    merge.
-  - **After the first promotion** — make the `Release policy` check
-    **required** on `main`.
-- Before merging, verify the candidate's first parent, exact frozen `develop`
-  tree, and fresh version against the current `main` SHA:
-
-  ```bash
-  python3 scripts/release.py verify --head <CANDIDATE_SHA> --base <CURRENT_MAIN_SHA>
-  ```
-
-- After the merge, do not run candidate verification against the final merge
-  commit. Confirm publication eligibility against the final `main` SHA instead:
-
-  ```bash
-  python3 scripts/release.py check-publication --sha <FINAL_MAIN_SHA>
-  ```
-
-  The `Release policy` status ran on the promotion PR's head commit,
-  before the merge; the `Release` workflow's `check-publication` gate
-  re-runs the version and tag checks on the final `main` SHA.
-
-
-### 4. Publish
-
-Pushing the promotion merge to `main` starts the `Release` workflow, which
-publishes that exact commit:
-
-- Verifies it is publishable (SHA is on `main`, version is new, and no
-  conflicting tag exists) via `check-publication`.
-- Runs the **real test suite** (with `ffmpeg` installed on Linux) and
-  builds the existing Linux, macOS, and Windows binaries **from the exact
-  SHA that will be tagged**, and the Docker images natively (amd64 on an
-  x86 runner, arm64 on an ARM runner) — **no QEMU cross-build**. Per-arch
-  images are pushed as immutable `sha-<sha>-<arch>` staging tags first.
-- Only after test + binaries + Docker all succeed does the helper create
-  the `vX.Y.Z` tag (via `scripts/release.py tag --sha`) and the minimal
-  GitHub Release; the Annalist GitHub App fills the release body via
-  webhook.
-- The multi-arch `vX.Y.Z` image is assembled **only after** the per-arch
-  images from the same SHA exist. The `Release` workflow **never** writes
-  `latest`; CI owns it and re-points it on `main` pushes once the test job
-  and both native per-arch Docker builds succeed.
-
-### Retry / immutability semantics
-
-- A tag that already exists **and** points at the same SHA is accepted
-  (same-SHA reuse, for retry after an interrupted run).
-- A tag that exists at a **different** SHA fails `check-publication`
-  hard — you cannot "republish" an older version or move a tag.
-- Publish runs are resumable: re-running the `Release` workflow on the
-  same commit reuses the existing tag/release and only adds missing outputs.
-- Runs are serialized across commits with GitHub Actions `queue: max`:
-  up to 100 runs may queue, and extra runs are cancelled once the queue
-  is full. Manual dispatch is main-only.
-- Staging images are reused only after their Linux architecture, OCI version
-  and revision labels match the prepared version and tested SHA. Version tags
-  must match the captured immutable image digests; multi-arch assembly uses
-  those digests, never a later mutable-tag lookup. Mismatches and registry
-  authentication/transport errors fail without overwriting existing images.
-- Release assets (including `m4b-merge-windows.exe`) are never overwritten.
-  Missing assets are uploaded on re-run; an existing asset is reused only
-  via one of two paths: a labeled asset must have a provenance label bound
-  to this publication (same SHA and tag) whose digest also matches, and an
-  unlabeled legacy asset is reused only when its content digest matches the
-  freshly built artifact. Malformed labels and conflicting
-  bindings/digests fail before any upload (see
-  `scripts/publish_release.py`).
-- `latest` is never rolled back: only CI writes it, on main pushes.
-  Re-running the workflow for an older main commit passes only when its
-  `vX.Y.Z` tag already points at that same SHA, or when its untagged
-  version is still newer than every release tag reachable from main;
-  `check-publication` rejects everything else.
+Release runs share one non-cancelling GitHub concurrency group with `queue: max` (up to 100 pending, no unlimited/FIFO promise). Native create-only tag reservation remains the collision boundary. GitHub documents that queue key; actionlint v1.7.12 does not yet recognize it ([upstream issue](https://github.com/rhysd/actionlint/issues/657)), so its exact queue-key syntax diagnostic is a known tooling limitation, not permission to remove retention or ignore unrelated lint findings.
 
 ## Styleguides
 ### Commit Messages
