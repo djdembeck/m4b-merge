@@ -16,6 +16,8 @@ class LocalGitHub(release.Repository):
         self.remote = remote
         self.pulls = []
         self.statuses = []
+        self.releases = {}
+        self.release_commands = []
 
     def repository(self):
         return "example/m4b-merge"
@@ -36,7 +38,27 @@ class LocalGitHub(release.Repository):
         if path.startswith("statuses/"):
             self.statuses.append(fields)
             return fields
+        if path.startswith("releases/tags/"):
+            record = self.releases.get(path.removeprefix("releases/tags/"))
+            if record is None:
+                raise release.ReleaseError("HTTP 404: Not Found (no release for tag)")
+            return copy.deepcopy(record)
         raise AssertionError((endpoint, method, fields))
+
+    def run(self, *args, ok=(0,)):
+        if len(args) >= 4 and args[0] == "gh" and args[1] == "release" and args[2] in ("create", "edit"):
+            tag, record = args[3], self.releases.get(args[3])
+            if args[2] == "create":
+                if record is not None:
+                    raise release.ReleaseError(f"gh release create: release {tag} already exists")
+                self.release_commands.append("create")
+                self.releases[tag] = {"tag_name": tag, "draft": "--draft" in args}
+                return ""
+            self.release_commands.append("edit")
+            if "--draft=false" in args:
+                record["draft"] = False
+            return ""
+        return super().run(*args, ok=ok)
 
 
 class ReleaseBehavior(unittest.TestCase):
@@ -138,6 +160,31 @@ class ReleaseBehavior(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "does not point at the frozen source"):
             self.repo.release("v1.0.0", self.source, publish=True)
         self.assertEqual(self.repo.remote_git("rev-parse", "refs/tags/v1.0.0"), initial)
+
+    def test_release_draft_publish_cycle_is_idempotent(self):
+        initial = self.git("rev-parse", "v1.0.0")
+        self.repo.release("v1.0.0", initial)
+        self.assertEqual(self.repo.release_commands, ["create"])
+        draft = self.repo.releases["v1.0.0"]
+        self.assertTrue(draft["draft"])
+        self.repo.release("v1.0.0", initial)
+        self.assertEqual(self.repo.release_commands, ["create"])
+        self.assertIs(self.repo.releases["v1.0.0"], draft)
+        self.repo.release("v1.0.0", initial, publish=True)
+        self.assertEqual(self.repo.release_commands, ["create", "edit"])
+        self.assertFalse(self.repo.releases["v1.0.0"]["draft"])
+        self.repo.release("v1.0.0", initial, publish=True)
+        self.assertEqual(self.repo.release_commands, ["create", "edit"])
+        self.assertEqual(len(self.repo.releases), 1)
+        self.assertEqual(self.repo.remote_git("rev-parse", "refs/tags/v1.0.0"), initial)
+
+    def test_publish_without_existing_draft_is_refused(self):
+        self.git("tag", "v1.1.0", self.source)
+        self.git("push", "origin", "v1.1.0")
+        self.repo.fetch()
+        with self.assertRaisesRegex(release.ReleaseError, "Cannot finalize a missing draft release"):
+            self.repo.release("v1.1.0", self.source, publish=True)
+        self.assertEqual(self.repo.releases, {})
 
     def test_unreserved_automatic_candidate_is_coalesced_but_manual_is_not(self):
         old = self.source
