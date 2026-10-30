@@ -482,6 +482,7 @@ class RunBenchmarkTests(unittest.TestCase):
 
         spec = {
             "run_checked": Mock(side_effect=fake_run_checked),
+            "require_native": Mock(),
             "generate_media": Mock(return_value=Path("seed")),
             "build_fixtures": Mock(
                 return_value=[(workload, 30.0 * 256)]),
@@ -496,8 +497,10 @@ class RunBenchmarkTests(unittest.TestCase):
             for name, replacement in spec.items():
                 stack.enter_context(
                     patch.object(verifier, name, replacement))
-            return verifier.run_benchmark(self.baseline, self.candidate,
-                                          "v2.0.0", "amd64", self.report)
+            result = verifier.run_benchmark(self.baseline, self.candidate,
+                                            "v2.0.0", "amd64", self.report)
+        spec["require_native"].assert_called_once_with("amd64")
+        return result
 
     def test_inconclusive_bound_keeps_report_and_returns_zero(self):
         result = self.run_case(
@@ -570,6 +573,12 @@ class NativeGateTests(unittest.TestCase):
                     verifier.VerifierFailure,
                     r"Native gate requires x86_64 host, got aarch64"):
                 verifier.require_native("amd64")
+
+    def test_matching_native_host_passes(self):
+        with patch.object(verifier, "platform") as platform:
+            platform.system.return_value = "Linux"
+            platform.machine.return_value = "x86_64"
+            self.assertIsNone(verifier.require_native("amd64"))
 
     def test_directory_is_not_regular(self):
         with tempfile.TemporaryDirectory(prefix="m4b-gate-") as temp:
