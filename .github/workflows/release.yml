@@ -18,9 +18,11 @@
 #   5. linux-assets:     the exact digest-pinned image bytes are extracted
 #                        on the native amd64/arm64 runners and proven with
 #                        the static-musl smoke, two container smokes, and
-#                        the GNU-vs-musl native parity benchmark (advisory
-#                        evidence, like the advisory cargo audit) — the
-#                        Linux release assets are these verified bytes.
+#                        the GNU-vs-musl native parity benchmark — its
+#                        measurement noise and inconclusive bounds are
+#                        advisory, but a functional merge/probe failure
+#                        fails this job and blocks the tag. The Linux
+#                        release assets are these verified bytes.
 #   6. tag:              ONLY after test + binaries + docker + linux-assets
 #                        succeed, the helper creates the vX.Y.Z tag and the
 #                        GitHub release (empty notes — the Annalist GitHub
@@ -313,11 +315,13 @@ jobs:
   # Linux release assets: extract the exact bytes from the verified
   # native SHA staging image (digest-pinned, provenance-checked, never
   # stripped again), then prove them on the native runner with the
-  # static-musl smoke and the GNU-musl parity benchmark (advisory
-  # evidence; per-case distributions are uploaded for review, matching
-  # the advisory cargo-audit convention). A validation-only GNU build
-  # from this same checkout/lockfile is the baseline; it is benchmarked
-  # but never staged as a release asset.
+  # static-musl smoke and the GNU-musl parity benchmark: measurement
+  # noise and inconclusive bounds are advisory (per-case distributions
+  # are uploaded for review), but a functional merge/probe failure
+  # fails this job and blocks the tag, on which path the report is
+  # never written. A validation-only GNU build from this same
+  # checkout/lockfile is the baseline; it is benchmarked but never
+  # staged as a release asset.
   # ─────────────────────────────────────────────────────────────────
   linux-assets:
     needs: [check, docker-amd64, docker-arm64]
@@ -445,7 +449,7 @@ jobs:
           rustup target add "$GNU_TARGET"
           cargo build --release --locked --target "$GNU_TARGET"
 
-      - name: Native parity benchmark (GNU baseline vs musl asset; advisory)
+      - name: Native parity benchmark (GNU baseline vs musl asset; functional failures block the tag)
         env:
           GNU_TARGET: ${{ matrix.gnu-target }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/gnu-baseline-target

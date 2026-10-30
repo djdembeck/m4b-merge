@@ -280,6 +280,57 @@ sys.exit(response.get('code', 0))
                                             "--asset", "m4b-merge-windows.exe"]):
                 publisher.main()
 
+    def test_cli_dispatches_stage_and_manifest(self):
+        import sys
+
+        def stage(args):
+            self.assertEqual(args.image, IMAGE)
+            self.assertEqual(args.sha, SHA)
+            self.assertEqual(args.version, VERSION)
+            self.assertEqual(args.arch, "amd64")
+            self.assertFalse(args.required)
+
+        def manifest(args):
+            self.assertEqual(args.image, IMAGE)
+            self.assertEqual(args.sha, SHA)
+            self.assertEqual(args.version, VERSION)
+            self.assertEqual(args.amd64, AMD)
+            self.assertEqual(args.arm64, ARM)
+
+        with patch.object(publisher, "stage", stage), \
+             patch.object(publisher, "manifest", manifest):
+            with patch.object(sys, "argv", ["publish_release.py", "stage",
+                                            "--image", IMAGE, "--sha", SHA,
+                                            "--version", VERSION,
+                                            "--arch", "amd64"]):
+                publisher.main()
+            with patch.object(sys, "argv", ["publish_release.py", "manifest",
+                                            "--image", IMAGE, "--sha", SHA,
+                                            "--version", VERSION,
+                                            "--amd64", AMD, "--arm64", ARM]):
+                publisher.main()
+
+    def test_cli_dispatches_extract(self):
+        import sys
+
+        def extract(args):
+            self.assertEqual(args.image, IMAGE)
+            self.assertEqual(args.digest, AMD)
+            self.assertEqual(args.sha, SHA)
+            self.assertEqual(args.version, VERSION)
+            self.assertEqual(args.arch, "arm64")
+            self.assertEqual(args.output, "artifacts/m4b-merge-linux-arm64")
+
+        with patch.object(publisher, "extract", extract):
+            with patch.object(sys, "argv", ["publish_release.py", "extract",
+                                            "--image", IMAGE,
+                                            "--digest", AMD,
+                                            "--sha", SHA,
+                                            "--version", VERSION,
+                                            "--arch", "arm64",
+                                            "--output", "artifacts/m4b-merge-linux-arm64"]):
+                publisher.main()
+
     def test_cli_rejects_invented_asset_name(self):
         import sys
         with patch.object(sys, "argv", ["publish_release.py", "assets",
@@ -449,6 +500,70 @@ sys.exit(response.get('code', 0))
             publisher.extract(self.extract_args(output))
         self.assertFalse(output.exists())
         self.assertIn(["docker", "rm", "cid-2"], self.called())
+
+    def extract_post_cp(self, cid, mode=None, size=1):
+        # Emulate a docker cp that writes the target, then (optionally)
+        # restates the post-copy file shape the publisher must validate.
+        command = ["docker", "cp", f"{cid}:/usr/local/bin/m4b-merge",
+                   str(self.root / "out" / "m4b-merge-linux-musl")]
+        self.response(command, "")
+        # The post-copy restatement runs inside the cp block, after
+        # docker cp has written the target.
+        restater = (
+            f"    target.write_bytes(b'x' * {size})\n"
+            if size else "") + (
+            f"    target.chmod(0o{mode:03o})\n" if mode is not None else "")
+        self.generic_adapter(restater)
+        self.state.write_text(json.dumps(self.responses))
+
+    def generic_adapter(self, cp_body):
+        adapter = self.root / "docker"
+        adapter.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, sys
+command = [pathlib.Path(sys.argv[0]).name, *sys.argv[1:]]
+with open(os.environ['PUBLISH_CALLS'], 'a') as stream:
+    stream.write(json.dumps(command) + '\\n')
+responses = json.loads(pathlib.Path(os.environ['PUBLISH_RESPONSES']).read_text())
+response = responses.get(json.dumps(command))
+if response is None:
+    sys.stderr.write('Unexpected adapter command: ' + repr(command))
+    sys.exit(99)
+if len(command) == 4 and command[1] == 'cp':
+    target = pathlib.Path(sys.argv[3])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(response.get('stdout', ''))
+""" + cp_body + """
+if command[1] != 'cp':
+    sys.stdout.write(response.get('stdout', ''))
+sys.stderr.write(response.get('stderr', ''))
+sys.exit(response.get('code', 0))
+""")
+        adapter.chmod(0o755)
+
+    def test_extract_non_executable_target_fails_and_removes_container(self):
+        # Post-copy validation: the copied bytes lack the exec bit, so
+        # the publish refuses the asset even though docker cp succeeded.
+        output = self.root / "out" / "m4b-merge-linux-musl"
+        self.create_container("cid-3")
+        self.extract_post_cp("cid-3", mode=0o644)
+        self.response(["docker", "rm", "cid-3"])
+        with self.assertRaisesRegex(
+                ValueError, "not a regular executable file"):
+            publisher.extract(self.extract_args(output))
+        self.assertFalse(output.exists())
+        self.assertIn(["docker", "rm", "cid-3"], self.called())
+
+    def test_extract_empty_target_fails_and_removes_container(self):
+        # An empty copy must also be rejected after the copy.
+        output = self.root / "out" / "m4b-merge-linux-musl"
+        self.create_container("cid-4")
+        self.extract_post_cp("cid-4", size=0)
+        self.response(["docker", "rm", "cid-4"])
+        with self.assertRaisesRegex(
+                ValueError, "not a regular executable file"):
+            publisher.extract(self.extract_args(output))
+        self.assertFalse(output.exists())
+        self.assertIn(["docker", "rm", "cid-4"], self.called())
 
 
 if __name__ == "__main__":

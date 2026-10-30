@@ -38,13 +38,14 @@ Download the release for your platform from the [releases page](https://github.c
 |---|---|---|---|
 | `m4b-merge-linux` | Linux x86-64 | static musl | FFmpeg, CA roots, resolver files |
 | `m4b-merge-linux-arm64` | Linux ARM64 | static musl | FFmpeg, CA roots, resolver files |
-| `m4b-merge-macos` | macOS | — | FFmpeg, CA roots, resolver files |
-| `m4b-merge-windows.exe` | Windows | — | FFmpeg, CA roots, resolver files |
+| `m4b-merge-macos` | macOS | — | FFmpeg (CA roots and name resolution come from the platform) |
+| `m4b-merge-windows.exe` | Windows | — | FFmpeg (CA roots and name resolution come from the platform) |
 
 From this release forward no GNU-linked Linux asset is produced. For
-v2.0.0 only, `m4b-merge-linux` is the original GNU binary; the
-static-musl x86-64 asset added to that release is
-`m4b-merge-linux-musl`.
+v2.0.0 only, `m4b-merge-linux` is the original GNU binary; the assets
+added to that release are the static-musl x86-64 asset
+`m4b-merge-linux-musl` and the ARM64 asset
+`m4b-merge-linux-arm64`.
 
 ### From Source
 

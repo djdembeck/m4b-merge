@@ -17,6 +17,13 @@ repos:
         pass_filenames: false
         always_run: true
 
+      - id: linux-asset-gate-tests
+        name: Linux asset gate behavior tests
+        entry: python3 -m unittest discover -s scripts -p 'test_verify_linux_asset.py'
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: cargo-fmt
         name: cargo fmt
         entry: cargo fmt --check

@@ -6,10 +6,12 @@ endpoint. Every smoke failure is a hard failure with the command and
 captured output; nothing there is skipped or downgraded.
 
 Benchmark: paired parity between a GNU baseline and a musl candidate.
-The gate is advisory — the report (hashes, ffmpeg build, per-case
-distributions, one-sided 95% bounds) is written and the exit code stays
-zero, matching the repository's advisory cargo-audit convention: a
-noisy host measurement must never block an immutable publication.
+Measurement uncertainty is advisory — an inconclusive bound keeps the
+report (hashes, ffmpeg build, per-case distributions, one-sided 95%
+bounds) and the exit code stays zero, so a noisy host measurement must
+never block an immutable publication. A functional merge/probe failure
+is not: it exits 1 (VerifierFailure re-raise) and blocks the tag — and
+on that path the report is never written.
 
 This script uploads nothing.
 """
@@ -35,6 +37,10 @@ MACHINES = {"amd64": "x86_64", "arm64": "aarch64"}
 PAIRS = 20
 # One-sided 95% Student-t critical value, df=19.
 T_UPPER_95 = 1.729132811521367
+# Benchmark fixture workload: 30s seeds, copied per workload.
+AAC_COPIES = 256
+MP3_COPIES = 16
+SEED_SECONDS = 30
 
 
 class VerifierFailure(Exception):
@@ -282,19 +288,22 @@ def build_fixtures(value_dir):
     mp3_dir = value_dir / "mp3-transcode"
     aac_dir.mkdir(parents=True)
     mp3_dir.mkdir(parents=True)
-    for index in range(256):
+    for index in range(AAC_COPIES):
         shutil.copy2(value_dir / "seed.m4a", aac_dir / f"{index:04d}.m4a")
-    for index in range(16):
+    for index in range(MP3_COPIES):
         shutil.copy2(value_dir / "seed.mp3", mp3_dir / f"{index:04d}.mp3")
-    return [(aac_dir, 256 * 30.0), (mp3_dir, 16 * 30.0)]
+    return [(aac_dir, AAC_COPIES * SEED_SECONDS),
+            (mp3_dir, MP3_COPIES * SEED_SECONDS)]
 
 
 def benchmark_case(workload, expected_duration, temp_dir, baseline, candidate):
     for num_cpus in (1, 4):
         label = f"{workload.name}-cpus{num_cpus}"
-        # One untimed warmup of each variant per case.
-        for variant in (baseline, candidate):
-            warmup = temp_dir / f"warmup-{label}" / variant.name
+        # One untimed warmup of each variant per case, keyed on the role:
+        # baseline and candidate may share a basename and clobber each
+        # other's warmup output.
+        for role, variant in (("baseline", baseline), ("candidate", candidate)):
+            warmup = temp_dir / f"warmup-{label}" / role
             warmup.mkdir(parents=True)
             merge(variant, workload, warmup, num_cpus)
             verify_output(warmup, expected_duration, 1.0)
@@ -348,26 +357,29 @@ def run_benchmark(baseline, candidate, version, arch, report_path):
         seed_dir.mkdir()
         # Fixture generation once, outside every timed region. Each case
         # merges 128 (AAC copy) or 8 minutes (MP3 transcode) of audio.
-        generate_media(seed_dir, "seed.m4a", "aac", 30)
-        generate_media(seed_dir, "seed.mp3", "libmp3lame", 30)
-        try:
-            for workload, expected_duration in build_fixtures(seed_dir):
-                for case in benchmark_case(workload, expected_duration,
-                                           temp_dir, baseline, candidate):
+        generate_media(seed_dir, "seed.m4a", "aac", SEED_SECONDS)
+        generate_media(seed_dir, "seed.mp3", "libmp3lame", SEED_SECONDS)
+        for workload, expected_duration in build_fixtures(seed_dir):
+            for case in benchmark_case(workload, expected_duration,
+                                       temp_dir, baseline, candidate):
+                try:
                     bound = parity_upper_bound(case["baseline"],
                                                case["candidate"])
-                    case["upper95_log_ratio"] = bound
-                    case["passed"] = bound <= 0.0
-                    cases.append(case)
-        except VerifierFailure:
-            # A functional merge/probe failure is a hard publication
-            # failure; only measurement uncertainty is advisory.
-            raise
-        except ValueError as exc:
-            # A valid measurement that the bound cannot resolve is
-            # inconclusive: keep the report, mark the run failed.
-            error = str(exc)
-            cases.append({"case": "inconclusive", "error": error})
+                except ValueError as exc:
+                    # Inconclusive: the measurements are real but the
+                    # bound cannot resolve the comparison — keep the
+                    # report, mark the run failed, and exit 0. Only the
+                    # bound computation runs inside this try, so a
+                    # functional merge/probe failure (VerifierFailure,
+                    # or a probe ValueError from ffprobe output) can
+                    # never be swallowed here; it propagates as the
+                    # intended hard stop and no report is written.
+                    error = str(exc)
+                    cases.append({"case": "inconclusive", "error": error})
+                    continue
+                case["upper95_log_ratio"] = bound
+                case["passed"] = bound <= 0.0
+                cases.append(case)
 
     passed = bool(not error and len(cases) == 4 and all(c.get("passed")
                                                        for c in cases))

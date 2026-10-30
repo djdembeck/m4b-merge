@@ -10,6 +10,13 @@ import subprocess
 
 
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+# 40-hex commit SHA and vN.N.N release version; shared by extract(),
+# assets(), and parse_asset_label() (anchor semantics via fullmatch).
+SHA = re.compile(r"[0-9a-f]{40}")
+VERSION = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
+ASSET_LABEL = re.compile(
+    r"m4b-publish-v1;sha=(" + SHA.pattern + r");"
+    r"tag=(" + VERSION.pattern + r");sha256=([0-9a-f]{64})")
 
 
 # Basename allowlist for --asset. Individual publication calls name their
@@ -78,9 +85,9 @@ def extract(args):
     provenance-verified image. All validation happens before the local
     output is created; the helper-owned container is always removed."""
     digest_value = digest(args.digest)
-    if not re.fullmatch(r"[0-9a-f]{40}", args.sha):
+    if not SHA.fullmatch(args.sha):
         raise ValueError(f"Invalid source SHA: {args.sha!r}")
-    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", args.version):
+    if not VERSION.fullmatch(args.version):
         raise ValueError(f"Invalid release version: {args.version!r}")
     output = Path(args.output)
     if output.exists() or output.is_symlink():
@@ -144,7 +151,7 @@ def asset_label(sha, tag, asset_digest):
 
 
 def parse_asset_label(label):
-    match = re.fullmatch(r"m4b-publish-v1;sha=([0-9a-f]{40});tag=(v[0-9]+\.[0-9]+\.[0-9]+);sha256=([0-9a-f]{64})", label)
+    match = ASSET_LABEL.fullmatch(label)
     if match is None:
         raise ValueError(f"Invalid release asset provenance label: {label!r}")
     return match.groups()
@@ -180,9 +187,9 @@ def artifacts(root, names):
 
 
 def assets(args):
-    if not re.fullmatch(r"[0-9a-f]{40}", args.sha):
+    if not SHA.fullmatch(args.sha):
         raise ValueError(f"Invalid source SHA: {args.sha!r}")
-    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", args.tag):
+    if not VERSION.fullmatch(args.tag):
         raise ValueError(f"Invalid release tag: {args.tag!r}")
     expected = list(getattr(args, "asset", None) or [])
     if not expected:

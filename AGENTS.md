@@ -97,9 +97,11 @@ Pull request templates belong in `.github/PULL_REQUEST_TEMPLATE.md`.
 
 1. **Lint & Format** — `cargo fmt --check`, `cargo clippy --all-features -- -D warnings`,
    and the release helper behavior tests
-   (`python3 -m unittest discover -s scripts -p 'test_release.py'`) and
+   (`python3 -m unittest discover -s scripts -p 'test_release.py'`),
    publisher reconciliation tests
-   (`python3 -m unittest discover -s scripts -p 'test_publish_release.py'`)
+   (`python3 -m unittest discover -s scripts -p 'test_publish_release.py'`), and
+   Linux asset gate behavior tests
+   (`python3 -m unittest discover -s scripts -p 'test_verify_linux_asset.py'`)
 2. **Compile** — `cargo check --locked --all-features`
 3. **Test** — `cargo test --all-features --locked`
 4. **Docker** — amd64 build on PRs; arm64 builds and the multi-arch

@@ -10,10 +10,10 @@
 # The binaries are the exact bytes of the validated historical images
 # (digest capture, provenance labels checked against the frozen v2.0.0
 # commit). They are never rebuilt, re-tagged, or stripped. Native parity
-# (GNU baseline vs extracted musl bytes) is advisory evidence: the
-# per-case distributions are bundled as artifacts for review, matching
-# the advisory cargo-audit convention — a noisy host measurement must
-# never block the immutable restoration.
+# (GNU baseline vs extracted musl bytes): measurement noise and
+# inconclusive bounds are advisory (per-case distributions are bundled
+# as artifacts for review), but a functional merge/probe failure fails
+# the job and blocks the publication.
 #
 # Default dispatch (publish=false) performs every local verification and
 # stops before any writes; publish=true is a separate authorization.
@@ -109,7 +109,7 @@ jobs:
           import json, os, subprocess
 
 
-          def api(*path):
+          def api(path):
               return json.loads(subprocess.run(
                   ["gh", "api", "--hostname", "github.com",
                    f"repos/{os.environ['GITHUB_REPOSITORY']}/{path}"],
@@ -316,6 +316,9 @@ jobs:
               exit 1
             }
             baseline="$RUNNER_TEMP/baseline/m4b-merge-linux"
+            # gh release download writes assets without the exec bit; the
+            # baseline must be executable (version check, benchmark).
+            chmod +x "$baseline"
             version=$("$baseline" --version)
             case "$version" in
               "m4b-merge 2.0.0") : ;;
@@ -344,7 +347,7 @@ jobs:
           fi
           echo "baseline=$baseline" >> "$GITHUB_OUTPUT"
 
-      - name: Native parity benchmark (GNU baseline vs extracted bytes; advisory)
+      - name: Native parity benchmark (GNU baseline vs extracted bytes; functional failures block the publication)
         run: |
           set -euo pipefail
           python3 scripts/verify_linux_asset.py benchmark \
@@ -404,7 +407,7 @@ jobs:
           import json, os, subprocess
 
 
-          def api(*path):
+          def api(path):
               return json.loads(subprocess.run(
                   ["gh", "api", "--hostname", "github.com",
                    f"repos/{os.environ['GITHUB_REPOSITORY']}/{path}"],

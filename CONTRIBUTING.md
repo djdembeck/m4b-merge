@@ -239,10 +239,12 @@ publishes that exact commit:
 - The Linux release assets are the **exact bytes extracted** from those
   verified per-arch staging images (the binary is stripped once in the
   image builder); they are proven on the native runners with a static
-  musl smoke, two container smokes, and an **advisory** GNU-vs-musl
-  parity benchmark whose per-case report is uploaded as evidence (same
-  convention as the advisory `cargo-audit` check) — it never gates
-  publication, which remains ruled by the natively passing checks above.
+  musl smoke, two container smokes, and a GNU-vs-musl parity
+  benchmark whose per-case report is uploaded as evidence. Measurement
+  noise and inconclusive bounds are advisory, but a functional
+  merge/probe failure in the benchmark fails the job and blocks the
+  tag (on that path the report is never written); publication remains
+  ruled by the natively passing checks above.
 - Only after test + binaries + Docker + Linux asset verification all
   succeed does the helper create the `vX.Y.Z` tag (via
   `scripts/release.py tag --sha`) and the minimal GitHub Release; the
