@@ -370,6 +370,56 @@ fn test_chapter_read_prefers_track_when_chpl_list_is_truncated() {
 }
 
 #[test]
+fn test_chapter_read_ignores_stale_track_after_replacement() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("test.m4b");
+    create_test_m4b(&m4b_path, 30);
+
+    // Seed a 10-chapter QuickTime track, as a file from another tool would have.
+    let mut tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag");
+    tag.chapter_track_mut().clear();
+    tag.chapter_track_mut().extend(
+        (0..10)
+            .map(|i| mp4ameta::Chapter::new(Duration::from_secs(i), format!("Old chapter {}", i))),
+    );
+    tag.write_to_path(&m4b_path).expect("write chapter track");
+    assert_eq!(
+        mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag").chapter_track().len(),
+        10
+    );
+
+    // Replace them through the public API. `embed_chapters` writes the list and
+    // leaves the pre-existing track untouched, so the track is now stale.
+    let chapters = vec![
+        m4b_merge::metadata::Chapter::new("New one", Duration::ZERO, Duration::from_secs(10)),
+        m4b_merge::metadata::Chapter::new(
+            "New two",
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+        ),
+        m4b_merge::metadata::Chapter::new(
+            "New three",
+            Duration::from_secs(20),
+            Duration::from_secs(10),
+        ),
+    ];
+    let tagger = m4b_merge::tagging::Tagger::new();
+    tagger.embed_chapters(&m4b_path, &chapters).expect("embed chapters");
+
+    let read_back =
+        m4b_merge::chapters::read_chapters(&m4b_path, None).expect("Failed to read chapters");
+
+    assert_eq!(read_back.len(), 3, "readback must follow the replacement, not the stale track");
+    assert_eq!(read_back[0].title, "New one");
+    assert_eq!(read_back[2].title, "New three");
+    assert_eq!(read_back[2].start_time, 20_000);
+}
+
+#[test]
 fn test_chapter_long_duration() {
     if !ffmpeg_available() {
         return;

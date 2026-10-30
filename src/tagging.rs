@@ -16,7 +16,7 @@ const CHAPTER_TITLE_MAX_BYTES: usize = 255;
 /// Maximum number of chapters representable in a chpl (Nero chapter list) atom.
 ///
 /// The atom stores the entry count in a single byte; larger counts wrap around.
-const CHAPTER_LIST_MAX_CHAPTERS: usize = u8::MAX as usize;
+pub(crate) const CHAPTER_LIST_MAX_CHAPTERS: usize = u8::MAX as usize;
 
 /// Errors that can occur during tagging operations
 #[derive(Error, Debug)]
