@@ -176,8 +176,8 @@ jobs:
 
             If the `docker-amd64` job failed, the image was not published.
 
-            After merge, the `main` push publishes the `latest` and SHA
-            images on both architectures.
+            CI publishes preview and SHA images. The release workflow
+            publishes the reserved version; no rolling latest alias is maintained.
 
   docker-amd64:
     # Pushes the -amd64-suffixed images for docker-manifest (main) and the
