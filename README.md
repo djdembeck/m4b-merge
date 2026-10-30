@@ -20,13 +20,14 @@ The tool automates metadata lookup by ASIN or AudiobookDB book ID through [Audio
 
 ### Docker (Fastest Path)
 
-Run without installation using the GHCR image.
+Choose a published `vX.Y.Z` tag or digest from the [release you intend to run](https://github.com/djdembeck/m4b-merge/releases), and set `IMAGE` to its full GHCR reference. The release workflow does not maintain a rolling `latest` alias.
 
 ```bash
+: "${IMAGE:?Set IMAGE to a published GHCR version tag or digest}"
 docker run --rm \
   -v /path/to/input:/input \
   -v /path/to/output:/output \
-  ghcr.io/djdembeck/m4b-merge:latest \
+  "$IMAGE" \
   -i /input/book_folder/ -o /output
 ```
 

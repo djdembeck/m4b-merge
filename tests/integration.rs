@@ -90,7 +90,7 @@ fn test_cli_version() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
+    assert_eq!(stdout.trim(), format!("m4b-merge {}", m4b_merge::VERSION));
 }
 
 #[test]
