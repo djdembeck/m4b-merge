@@ -2,6 +2,9 @@ use serde_json::Value;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use crate::tagging::CHAPTER_LIST_MAX_CHAPTERS;
 
 const MAX_TITLE_LEN: u32 = 10 * 1024;
 
@@ -12,6 +15,32 @@ pub struct Chapter {
     pub duration: u64,
 }
 
+/// Generate one chapter per input track, laid end to end.
+///
+/// This mirrors m4b-tool's `ChaptersFromFileTracks` followed by the numbering in
+/// the pre-rewrite `m4b_helper.py`: the merged output is the concatenation of the
+/// tracks in order, so each track becomes a `Chapter NN` chapter whose start time
+/// is the sum of the preceding track durations.
+///
+/// `durations` are track durations in milliseconds. Zero-length tracks cannot
+/// produce a chapter and are skipped; the running offset only advances by the
+/// durations that are kept, so start times always describe the merged timeline.
+pub fn generate_chapters_from_durations(durations: &[u64]) -> Vec<Chapter> {
+    let mut chapters: Vec<Chapter> = Vec::with_capacity(durations.len());
+    let mut offset: u64 = 0;
+
+    for duration in durations.iter().copied().filter(|d| *d > 0) {
+        chapters.push(Chapter {
+            title: format!("Chapter {:02}", chapters.len() + 1),
+            start_time: offset,
+            duration,
+        });
+        offset = offset.saturating_add(duration);
+    }
+
+    chapters
+}
+
 /// Read chapters from an M4B file.
 ///
 /// Tries ffprobe first, then falls back to chpl atom parsing.
@@ -20,6 +49,29 @@ pub fn read_chapters(
     path: &Path,
     ffprobe_path: Option<&str>,
 ) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+    if let Ok(tag) = mp4ameta::Tag::read_from_path(path) {
+        let list = tag.chapter_list();
+        let track = tag.chapter_track();
+
+        if !track.is_empty() {
+            // A `chpl` list stores its entry count in one byte, so a file with
+            // both representations can carry a list truncated at 255 entries
+            // while the track holds the full set: use the track only when the
+            // list is exactly that cap and repeats the track's prefix.
+            //
+            // Otherwise the two disagree because the track is stale —
+            // `embed_chapters` replaces the list and leaves any pre-existing
+            // track untouched — so the list is authoritative.
+            let source =
+                if list.is_empty() || list_is_truncated_chpl(list, track) { track } else { list };
+
+            let chapters = chapters_from_mp4ameta(source, tag.duration());
+            if !chapters.is_empty() {
+                return Ok(chapters);
+            }
+        }
+    }
+
     // Try to read chapters using ffprobe first
     if let Ok(chapters) = read_chapters_ffprobe(path, ffprobe_path) {
         if !chapters.is_empty() {
@@ -29,6 +81,56 @@ pub fn read_chapters(
 
     // Fall back to parsing the chpl atom directly
     read_chapters_from_atom(path)
+}
+
+/// Tolerance when matching a `chpl` start against a chapter-track start.
+///
+/// The list stores times in a fixed 10 MHz clock while the track uses its own
+/// timescale, so the same instant can land in a neighbouring millisecond.
+const CHAPTER_START_TOLERANCE: Duration = Duration::from_millis(20);
+
+/// Whether `list` is a `chpl` list truncated at the atom's entry cap.
+///
+/// True only when the list is exactly `CHAPTER_LIST_MAX_CHAPTERS` long, the
+/// track is longer, and every listed chapter matches the track's prefix. That
+/// is the shape `embed_chapters` produces for a >255-chapter book; any other
+/// disagreement between the representations means the track is stale.
+fn list_is_truncated_chpl(list: &[mp4ameta::Chapter], track: &[mp4ameta::Chapter]) -> bool {
+    if list.len() != CHAPTER_LIST_MAX_CHAPTERS || track.len() <= list.len() {
+        return false;
+    }
+
+    list.iter().zip(track).all(|(listed, tracked)| {
+        listed.title == tracked.title
+            && listed.start.abs_diff(tracked.start) <= CHAPTER_START_TOLERANCE
+    })
+}
+
+/// Convert mp4ameta chapters into chapters.
+///
+/// The source stores starts, not durations, so each chapter's duration is the
+/// gap to the next start; the last chapter runs to `media_duration`.
+fn chapters_from_mp4ameta(track: &[mp4ameta::Chapter], media_duration: Duration) -> Vec<Chapter> {
+    let mut chapters: Vec<Chapter> = track
+        .iter()
+        .map(|chapter| Chapter {
+            title: chapter.title.clone(),
+            start_time: chapter.start.as_millis() as u64,
+            duration: 0,
+        })
+        .collect();
+
+    for index in 0..chapters.len() {
+        if index + 1 < chapters.len() {
+            chapters[index].duration =
+                chapters[index + 1].start_time.saturating_sub(chapters[index].start_time);
+        }
+    }
+    if let Some(last) = chapters.last_mut() {
+        last.duration = (media_duration.as_millis() as u64).saturating_sub(last.start_time);
+    }
+
+    chapters
 }
 
 /// Read chapters using ffprobe.
@@ -307,6 +409,107 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn track(items: &[(&str, u64)]) -> Vec<mp4ameta::Chapter> {
+        items
+            .iter()
+            .map(|(title, start_ms)| {
+                mp4ameta::Chapter::new(Duration::from_millis(*start_ms), *title)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_chapters_from_mp4ameta_derives_durations() {
+        let chapters = chapters_from_mp4ameta(
+            &track(&[("Intro", 0), ("One", 2_000), ("Outro", 7_000)]),
+            Duration::from_secs(10),
+        );
+
+        assert_eq!(chapters.len(), 3);
+        assert_eq!(chapters[0].title, "Intro");
+        assert_eq!(chapters[0].start_time, 0);
+        assert_eq!(chapters[0].duration, 2_000);
+        assert_eq!(chapters[1].duration, 5_000);
+        // Last chapter runs to the media duration, not to the last start.
+        assert_eq!(chapters[2].duration, 3_000);
+    }
+
+    #[test]
+    fn test_chapters_from_mp4ameta_handles_empty_and_short_media() {
+        assert!(chapters_from_mp4ameta(&[], Duration::from_secs(10)).is_empty());
+
+        // Media shorter than the last start must not underflow.
+        let chapters = chapters_from_mp4ameta(&track(&[("Late", 5_000)]), Duration::from_secs(1));
+        assert_eq!(chapters[0].duration, 0);
+    }
+
+    fn capped_list() -> Vec<mp4ameta::Chapter> {
+        (0..CHAPTER_LIST_MAX_CHAPTERS)
+            .map(|i| {
+                mp4ameta::Chapter::new(Duration::from_millis(i as u64 * 100), format!("Ch{i}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_list_is_truncated_chpl_true_for_capped_matching_prefix() {
+        let list = capped_list();
+        let mut track = list.clone();
+        track.push(mp4ameta::Chapter::new(Duration::from_millis(25_500), "Tail".to_string()));
+        track.push(mp4ameta::Chapter::new(Duration::from_millis(25_600), "Tail2".to_string()));
+
+        assert!(list_is_truncated_chpl(&list, &track));
+    }
+
+    #[test]
+    fn test_list_is_truncated_chpl_false_for_stale_track_after_replacement() {
+        // `embed_chapters` replaces the list (3 new chapters) but leaves an
+        // existing 10-chapter track behind. That longer track is stale: the
+        // list is not at the cap, so it must stay authoritative.
+        let list: Vec<mp4ameta::Chapter> = (0..3)
+            .map(|i| mp4ameta::Chapter::new(Duration::from_secs(i), format!("New{i}")))
+            .collect();
+        let track: Vec<mp4ameta::Chapter> = (0..10)
+            .map(|i| mp4ameta::Chapter::new(Duration::from_secs(i), format!("Old{i}")))
+            .collect();
+
+        assert!(!list_is_truncated_chpl(&list, &track));
+    }
+
+    #[test]
+    fn test_list_is_truncated_chpl_false_unless_capped_and_matching() {
+        let list = capped_list();
+        let mut track = list.clone();
+        track.push(mp4ameta::Chapter::new(Duration::from_millis(25_500), "Tail".to_string()));
+
+        // Capped list, identical prefix: only length matters here.
+        assert!(list_is_truncated_chpl(&list, &track));
+
+        // Track shorter than the list is never a truncation.
+        assert!(!list_is_truncated_chpl(&list, &list));
+        assert!(!list_is_truncated_chpl(&list, &list[..10]));
+
+        // A list below the cap is a full list, not a truncated one.
+        let shorter = &list[..254];
+        assert!(!list_is_truncated_chpl(shorter, &track));
+
+        // A prefix that diverges means the track belongs to another chapter set.
+        let mut diverging_track = track.clone();
+        diverging_track[100] =
+            mp4ameta::Chapter::new(Duration::from_millis(10_000), "Different".to_string());
+        assert!(!list_is_truncated_chpl(&list, &diverging_track));
+
+        // Starts within the timescale rounding tolerance still match.
+        let mut rounded_track = track.clone();
+        rounded_track[7] = mp4ameta::Chapter::new(Duration::from_millis(700), "Ch7".to_string());
+        assert!(list_is_truncated_chpl(&list, &rounded_track));
+
+        // Starts beyond the tolerance do not.
+        let mut shifted_track = track.clone();
+        shifted_track[7] = mp4ameta::Chapter::new(Duration::from_millis(1_000), "Ch7".to_string());
+        assert!(!list_is_truncated_chpl(&list, &shifted_track));
+    }
+
     #[test]
     #[ignore = "This is a manual/local integration test. Run with: cargo test -- --ignored"]
     fn test_read_chapters() {
@@ -347,5 +550,47 @@ mod tests {
                 chapter.duration
             );
         }
+    }
+
+    #[test]
+    fn test_generate_chapters_from_durations() {
+        let chapters = generate_chapters_from_durations(&[5_000, 7_500, 1_000]);
+
+        assert_eq!(chapters.len(), 3);
+        assert_eq!(chapters[0].title, "Chapter 01");
+        assert_eq!(chapters[0].start_time, 0);
+        assert_eq!(chapters[0].duration, 5_000);
+        assert_eq!(chapters[1].start_time, 5_000);
+        assert_eq!(chapters[1].duration, 7_500);
+        assert_eq!(chapters[2].start_time, 12_500);
+        assert_eq!(chapters[2].duration, 1_000);
+    }
+
+    #[test]
+    fn test_generate_chapters_single_track() {
+        let chapters = generate_chapters_from_durations(&[42_000]);
+
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].title, "Chapter 01");
+        assert_eq!(chapters[0].start_time, 0);
+        assert_eq!(chapters[0].duration, 42_000);
+    }
+
+    #[test]
+    fn test_generate_chapters_empty_input() {
+        assert!(generate_chapters_from_durations(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_generate_chapters_skips_zero_length_tracks() {
+        // A zero-length track cannot produce a chapter; the offset only advances
+        // by durations that are kept, so later chapters stay on the merged timeline.
+        let chapters = generate_chapters_from_durations(&[0, 3_000, 0, 2_000]);
+
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0].start_time, 0);
+        assert_eq!(chapters[0].duration, 3_000);
+        assert_eq!(chapters[1].title, "Chapter 02");
+        assert_eq!(chapters[1].start_time, 3_000);
     }
 }

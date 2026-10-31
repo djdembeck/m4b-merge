@@ -2,6 +2,57 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [Unreleased]
+
+
+### Added
+- Chapter embedding into M4B files using native mp4ameta library
+- Chapters are now embedded directly into the M4B container, not just written to chapters.txt
+- Full chapter metadata round-trip: extraction from source → embedding in output
+- New **AudiobookDB** metadata source (`https://audiobookdb.org`, v1.0.0 API contract),
+  selected by default via `--metadata-source audiobookdb`:
+  - ASIN resolution via `GET /audiobooks/external/audible/{ASIN}`, with an
+    internal-ID retry when the ASIN endpoint 404s
+  - Cover art from the documented full-resolution `sourceUrl` (768px `large.jpg` fallback)
+  - Series positions from the authoritative `position` object
+  - Retry logic honors the `Retry-After` header on 429s
+
+### Fixed
+- Chapterless input groups (split MP3/M4A without embedded chapters and without provider chapters) now get one generated chapter per input track, titled `Chapter 01`, `Chapter 02`, … and embedded in the merged M4B, matching the pre-rewrite `ChaptersFromFileTracks` behaviour. Chapters and the `chapters.txt` sidecar are written even when no provider metadata was available.
+
+### Changed
+- **Breaking (Linux):** release Linux assets are now static-musl binaries.
+  From the release following v2.0.0, `m4b-merge-linux` is x86-64 static
+  musl and `m4b-merge-linux-arm64` is ARM64 static musl; no GNU-linked
+  Linux asset is produced. For v2.0.0 specifically, `m4b-merge-linux`
+  remains the original GNU binary and the assets added to that release
+  are the x86-64 `m4b-merge-linux-musl` and the ARM64
+  `m4b-merge-linux-arm64`. Select release assets by exact full name.
+- Linux release assets are now the exact bytes extracted from the
+  digest-pinned GHCR image, stripped once in the builder and proven
+  natively before publication; the GNU-vs-musl parity benchmark posts
+  its per-case report as evidence — measurement noise and inconclusive
+  bounds are advisory, but a functional merge/probe failure fails the
+  job and blocks the tag, and on that path the report is never written.
+- Release pipeline: versions are prepared on `develop` and promoted to `main` as a frozen tree; the `Release` workflow publishes tested `main` SHAs without source edits, merge-back, or `latest` writes. release-please configuration and manifest removed.
+- **Breaking:** `--asin` renamed to `--metadata-id` (accepts an ASIN or an AudiobookDB
+  book ID); new `--metadata-source` flag
+  (default `audiobookdb`) selects the metadata source, and new `--api-url` overrides the
+  selected source's default API URL. `--api-url` no longer implies the Audnexus
+  source: it only overrides the URL for the source chosen by `--metadata-source`,
+  and m4b-merge warns when a URL is passed to the AudiobookDB client.
+
+## [1.0.1](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.1) (2026-08-03)
+
+### Bug Fixes
+
+* **audio:** eliminate TOCTOU in concat file list creation ([8afebaa](https://github.com/djdembeck/m4b-merge/commit/8afebaa6158552c50ee889d59e000e60594e947f))
+* **ffmpeg:** remove dead prepare_concat_file_list, canonicalize concat paths ([#423](https://github.com/djdembeck/m4b-merge/issues/423)) ([b148e39](https://github.com/djdembeck/m4b-merge/commit/b148e39ef6a86610945059b6692ae481eeb4a85d))
+* use absolute paths for concat file list ([#419](https://github.com/djdembeck/m4b-merge/issues/419)) ([8858d6a](https://github.com/djdembeck/m4b-merge/commit/8858d6a3364a3c4276b02ed0d40fa162a8d0915e))
+
+### Fixed
+- Audnexus lookups now fetch chapter markers from `/books/{asin}/chapters` (the book endpoint never returns them), honor `isAccurate`, and carry the configured region on both requests.
+
 ## [1.0.0](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.0) (2026-07-20)
 
 
@@ -16,28 +67,6 @@ All notable changes to this project will be documented in this file. See [standa
 * **docker:** disable auto-generated latest tag and skip tagless refs ([d68f93d](https://github.com/djdembeck/m4b-merge/commit/d68f93d97a280fe29702a4f7bb3bac3abbfabeb4))
 * **docker:** disable latest tag in manifest job metadata ([29ee9ee](https://github.com/djdembeck/m4b-merge/commit/29ee9ee13d9073c4d8b5394d06ea2df480f7bdbd))
 * **docker:** point latest tag at multi-arch manifest ([8880992](https://github.com/djdembeck/m4b-merge/commit/888099289ae5995c4749ba3f4b587ee6ee1947e3))
-
-## [Unreleased]
-
-### Added
-- Chapter embedding into M4B files using native mp4ameta library
-- Chapters are now embedded directly into the M4B container, not just written to chapters.txt
-- Full chapter metadata round-trip: extraction from source → embedding in output
-- New **AudiobookDB** metadata source (`https://audiobookdb.org`, v1.0.0 API contract),
-  selected by default via `--metadata-source audiobookdb`:
-  - ASIN resolution via `GET /audiobooks/external/audible/{ASIN}`, with a search
-    fallback for unknown identifiers
-  - Cover art from the documented full-resolution `sourceUrl` (768px `large.jpg` fallback)
-  - Series positions from the authoritative `position` object
-  - Retry logic honors the `Retry-After` header on 429s
-
-### Changed
-- **Breaking:** `--asin` renamed to `--metadata-id` (accepts an ASIN or an AudiobookDB
-  book ID, falling back to search for other identifiers); new `--metadata-source` flag
-  (default `audiobookdb`) selects the metadata source, and new `--api-url` overrides the
-  selected source's default API URL. `--api-url` no longer implies the Audnexus
-  source: it only overrides the URL for the source chosen by `--metadata-source`,
-  and m4b-merge warns when a URL is passed to the AudiobookDB client.
 
 ### [0.5.3](https://github.com/djdembeck/m4b-merge/compare/v0.5.2...v0.5.3) (2024-08-07)
 

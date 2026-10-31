@@ -1,0 +1,41 @@
+# Trusted base-owned guard for direct same-repository develop -> main PRs.
+# Fetch head objects only; never execute PR code with this status-write token.
+# Main freshness stays unchanged until isolated platform proof and separate apply.
+# Required-check trust must be bound to this producer, not merely its context name.
+
+name: Release Policy
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Trusted code only: the base SHA this PR targets, full history (the
+      # helper reads release tags from main history) and all tags.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Verify direct develop promotion and report status
+        run: python3 scripts/release.py policy --event "$GITHUB_EVENT_PATH" --report-status

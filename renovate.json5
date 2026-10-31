@@ -2,18 +2,28 @@
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
   extends: ["config:recommended"],
   baseBranches: ["develop"],
-  branchConcurrentLimit: 10,
+  // Strictly smaller nightly batches: less simultaneous Cargo/Docker CI load
+  // and smaller rebase-churn blast radius when a merged branch forces a clean
+  // rebase + full re-run on the rest. Existing open branches are unaffected
+  // until they drain.
+  branchConcurrentLimit: 3,
   commitMessagePrefix: "chore(deps): ",
   labels: ["dependencies", "ci", "renovate"],
-  schedule: ["before 6am on Monday"],
+  // Daily early-morning creation window with stabilityDays: 5: fresh batches
+  // form every day, each updated at most once per day, never older than 5
+  // days. Replaces the weekly Monday burst that concentrated 8+ branches on
+  // one CI run.
+  schedule: ["before 6am"],
   timezone: "Etc/UTC",
   rebaseWhen: "auto",
   stabilityDays: 5,
+  automergeStrategy: "squash",
+  platformAutomerge: false,
   lockFileMaintenance: {
     enabled: true,
     automerge: true,
     automergeType: "pr",
-    platformAutomerge: true,
+    schedule: ["before 6am"],
   },
   packageRules: [
     {
@@ -24,7 +34,19 @@
       description: "Automatically merge minor and patch-level updates",
       matchUpdateTypes: ["minor", "digest", "patch"],
       automerge: true,
-      automergeType: "branch",
+      automergeType: "pr",
+    },
+  ],
+  customManagers: [
+    {
+      customType: "regex",
+      description: "Update the cargo-audit pin in vulncheck.yml",
+      managerFilePatterns: ["/^\\.github/workflows/vulncheck\\.yml$/"],
+      matchStrings: [
+        "cargo install cargo-audit --version (?<currentValue>[0-9.]+)",
+      ],
+      depNameTemplate: "cargo-audit",
+      datasourceTemplate: "crate",
     },
   ],
   vulnerabilityAlerts: {

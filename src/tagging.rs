@@ -6,8 +6,17 @@ use tracing::{debug, error, info, warn};
 
 use crate::metadata::BookMetadata;
 
-/// Maximum number of characters for chapter titles in embedded chapters (chpl atom limit)
-const CHAPTER_TITLE_MAX_CHARS: usize = 255;
+/// Maximum number of bytes for chapter titles in embedded chapters.
+///
+/// The chpl (Nero chapter list) atom stores each title's length in a single
+/// byte, so titles must be truncated on a UTF-8 char boundary before they are
+/// handed to mp4ameta.
+const CHAPTER_TITLE_MAX_BYTES: usize = 255;
+
+/// Maximum number of chapters representable in a chpl (Nero chapter list) atom.
+///
+/// The atom stores the entry count in a single byte; larger counts wrap around.
+pub(crate) const CHAPTER_LIST_MAX_CHAPTERS: usize = u8::MAX as usize;
 
 /// Errors that can occur during tagging operations
 #[derive(Error, Debug)]
@@ -23,6 +32,9 @@ pub enum TaggingError {
 
     #[error("Invalid file format: {0}")]
     InvalidFormat(String),
+
+    #[error("Cover conversion error: {0}")]
+    CoverConversion(String),
 
     #[error("File not found: {0}")]
     FileNotFound(PathBuf),
@@ -49,9 +61,41 @@ pub enum OverwriteBehavior {
     Force,
 }
 
+/// Truncate a chapter title to the chpl atom's byte limit on a char boundary.
+///
+/// mp4ameta slices title bytes at `min(len, 255)` before writing the chpl atom,
+/// which panics when that index falls inside a multi-byte UTF-8 character.
+/// Passing an already-short-enough title keeps the dependency's slice at a char
+/// boundary.
+fn truncate_chapter_title(title: &str) -> String {
+    if title.len() <= CHAPTER_TITLE_MAX_BYTES {
+        return title.to_string();
+    }
+
+    // `str::floor_char_boundary` is not stable yet, so walk back to the nearest
+    // boundary at or below the byte limit.
+    let mut end = CHAPTER_TITLE_MAX_BYTES;
+    while !title.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    title[..end].to_string()
+}
+
+/// The prefix of `chapters` that a Nero `chpl` atom can represent.
+///
+/// The atom stores its entry count in a single byte, so a longer list wraps the
+/// count and readers see an empty or truncated chapter list. The QuickTime
+/// chapter track has no such limit, so callers writing that representation must
+/// use the full list rather than this prefix.
+fn chpl_chapters(chapters: &[mp4ameta::Chapter]) -> &[mp4ameta::Chapter] {
+    &chapters[..chapters.len().min(CHAPTER_LIST_MAX_CHAPTERS)]
+}
+
 /// Convert metadata chapters to mp4ameta chapters
 ///
 /// Sorts chapters by start_time and converts each to mp4ameta::Chapter.
+/// Titles are truncated to the chpl atom limit (255 bytes) on a char boundary.
 /// The mp4ameta crate handles duration calculation internally based on chapter start times.
 fn convert_chapters_for_embedding(chapters: &[crate::metadata::Chapter]) -> Vec<mp4ameta::Chapter> {
     let mut metadata_chapters = chapters.to_vec();
@@ -62,10 +106,7 @@ fn convert_chapters_for_embedding(chapters: &[crate::metadata::Chapter]) -> Vec<
     let mut result = Vec::with_capacity(metadata_chapters.len());
 
     for chapter in metadata_chapters.iter() {
-        // Truncate title to 255 characters (chpl atom limit)
-        // Use character-aware truncation to safely handle multi-byte UTF-8 characters
-        let title: String = chapter.title.chars().take(CHAPTER_TITLE_MAX_CHARS).collect();
-
+        let title = truncate_chapter_title(&chapter.title);
         result.push(mp4ameta::Chapter::new(chapter.start_time, &title));
     }
 
@@ -97,8 +138,6 @@ fn validate_and_sort_chapters(chapters: &mut [crate::metadata::Chapter]) -> Resu
 /// Handles metadata tagging and file operations for audiobooks
 #[derive(Debug, Clone)]
 pub struct Tagger {
-    /// HTTP client for downloading cover art
-    http_client: reqwest::Client,
     /// Behavior when destination file exists
     overwrite_behavior: OverwriteBehavior,
 }
@@ -106,22 +145,7 @@ pub struct Tagger {
 impl Tagger {
     /// Create a new Tagger with default settings
     pub fn new() -> Self {
-        Self {
-            http_client: Self::build_http_client(),
-            overwrite_behavior: OverwriteBehavior::default(),
-        }
-    }
-
-    /// Build the cover-download HTTP client.
-    ///
-    /// Redirects are disabled: `download_image` validates the URL for SSRF before
-    /// requesting it, and a redirect to an internal address would bypass that check.
-    /// `download_image` treats any 3xx response as an error.
-    fn build_http_client() -> reqwest::Client {
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("reqwest client with static settings cannot fail")
+        Self { overwrite_behavior: OverwriteBehavior::default() }
     }
 
     /// Ensure a file exists, returning an error if not
@@ -129,12 +153,15 @@ impl Tagger {
         if !path.exists() { Err(TaggingError::FileNotFound(path.to_path_buf())) } else { Ok(()) }
     }
 
-    /// Validate a cover URL before downloading (SSRF guard).
+    /// Fast text-level pre-check for a cover URL before downloading (SSRF guard).
     ///
-    /// Only `https` URLs are accepted. Hostnames that are loopback, private,
-    /// link-local, or unspecified address literals (e.g. `127.0.0.1`, `10.x`,
+    /// Only `https` URLs are accepted. Address literals that are loopback,
+    /// private, link-local, CGN, or reserved (e.g. `127.0.0.1`, `10.x`,
     /// `192.168.x`, `169.254.169.254`, `::1`) are rejected, as is `localhost`.
-    /// Public CDN hostnames and public IP literals pass.
+    /// Public CDN hostnames and public IP literals pass; hostnames go on to be
+    /// resolved and their *resolved addresses* are validated by
+    /// [`download_image`](Self::download_image), since a name that looks public
+    /// may still point at an internal network.
     fn validate_cover_url(url: &str) -> Result<()> {
         let parsed = reqwest::Url::parse(url)
             .map_err(|e| TaggingError::CoverDownload(format!("Invalid cover URL '{url}': {e}")))?;
@@ -155,7 +182,9 @@ impl Tagger {
         let rejected = match std::net::IpAddr::from_str(host) {
             // IP literal: block loopback/private/link-local/reserved ranges.
             Ok(addr) => Self::is_restricted_ip(addr),
-            // Hostname: block only the loopback alias; public CDNs pass.
+            // Hostname: block the loopback alias here; `localhost` resolves to
+            // loopback addresses anyway, which `download_image`'s resolved
+            // address check also catches.
             Err(_) => host.eq_ignore_ascii_case("localhost"),
         };
         if rejected {
@@ -166,13 +195,15 @@ impl Tagger {
         Ok(())
     }
 
-    /// True for IP literals that are loopback, private, link-local, or reserved
+    /// True for IP literals that are loopback, private, link-local, multicast,
+    /// reserved, or a tunnel embed of one of those IPv4 ranges (6to4, NAT64)
     /// and therefore must never be a cover-download destination.
     fn is_restricted_ip(addr: std::net::IpAddr) -> bool {
         match addr {
             std::net::IpAddr::V4(v4) => {
                 let (a, b) = (v4.octets()[0], v4.octets()[1]);
                 v4.is_unspecified()
+                    || a == 0 // 0.0.0.0/8
                     || a == 127 // 127.0.0.0/8 loopback
                     || (a == 10) // 10.0.0.0/8
                     || (a == 172 && (16..=31).contains(&b)) // 172.16.0.0/12
@@ -183,17 +214,84 @@ impl Tagger {
             }
             std::net::IpAddr::V6(v6) => {
                 let segs = v6.segments();
-                // ::1 loopback, :: unspecified
-                v6.is_loopback()
-                    || v6.is_unspecified()
+                if v6.is_unspecified()
+                    || v6.is_loopback()
                     // fe80::/10 link-local
                     || (segs[0] & 0xffc0) == 0xfe80
                     // fc00::/7 unique-local
                     || (segs[0] & 0xfe00) == 0xfc00
                     // IPv4-mapped (::ffff:a.b.c.d): judge by the embedded v4.
                     || v6.to_ipv4_mapped().is_some_and(|v4| Self::is_restricted_ip(v4.into()))
+                {
+                    return true;
+                }
+                // `segments` returns the address's eight 16-bit groups in
+                // network order.
+                let first = segs[0];
+                // ff00::/8 multicast.
+                if (first & 0xff00) == 0xff00 {
+                    return true;
+                }
+                // 2002::/16 (6to4): the embedded IPv4 address occupies 16-bit
+                // groups 2-3; judge it as a plain v4 address.
+                if first == 0x2002 {
+                    return Self::is_restricted_ip(std::net::IpAddr::V4(Self::v4_from_6to4(&v6)));
+                }
+                // 64:ff9b::/96 (NAT64, RFC 6052): the embedded IPv4 address
+                // occupies the last 4 bytes; judge it as a plain v4 address.
+                // Only the true /96 is matched — the first 64 bits must be
+                // exactly `64:ff9b:0000:0000` (groups 0-3) — so addresses in
+                // neighboring prefixes that happen to end in the IPv4 form of a
+                // restricted range are not misclassified.
+                if segs[0] == 0x0064 && segs[1] == 0xff9b && segs[2] == 0 && segs[3] == 0 {
+                    return Self::is_restricted_ip(std::net::IpAddr::V4(Self::v4_from_nat64(&v6)));
+                }
+                false
             }
         }
+    }
+
+    /// Extract the embedded IPv4 address from a 6to4 (`2002::/16`) address.
+    /// The address's 16-bit groups 2-3 hold the IPv4 octets.
+    fn v4_from_6to4(v6: &std::net::Ipv6Addr) -> std::net::Ipv4Addr {
+        let segs = v6.segments();
+        // Groups 2 and 3 (index 1) hold the IPv4 address.
+        std::net::Ipv4Addr::new(
+            (segs[1] >> 8) as u8,
+            (segs[1] & 0xff) as u8,
+            (segs[2] >> 8) as u8,
+            (segs[2] & 0xff) as u8,
+        )
+    }
+
+    /// Extract the embedded IPv4 address from a NAT64 (`64:ff9b::/96`) address.
+    /// The address's last 4 bytes hold the IPv4 octets.
+    fn v4_from_nat64(v6: &std::net::Ipv6Addr) -> std::net::Ipv4Addr {
+        let octets: [u16; 8] = v6.segments();
+        std::net::Ipv4Addr::new(
+            (octets[6] >> 8) as u8,
+            (octets[6] & 0xff) as u8,
+            (octets[7] >> 8) as u8,
+            (octets[7] & 0xff) as u8,
+        )
+    }
+
+    /// Reject a set of resolved addresses if ANY of them is restricted
+    /// ([`is_restricted_ip`]: loopback/private/link-local/multicast/reserved
+    /// plus 6to4/NAT64 embeds of IPv4-restricted ranges).
+    ///
+    /// A hostname may list one public and one internal A record; the request
+    /// could land on either, so every address is judged, not just the first.
+    fn validate_addresses(addrs: impl IntoIterator<Item = std::net::SocketAddr>) -> Result<()> {
+        for addr in addrs {
+            if Self::is_restricted_ip(addr.ip()) {
+                return Err(TaggingError::CoverDownload(format!(
+                    "Cover URL resolves to a loopback/private/link-local address ({addr}); \
+                     refusing to fetch it"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Create a new Tagger with custom overwrite behavior
@@ -202,32 +300,153 @@ impl Tagger {
         self
     }
 
-    /// Create a new Tagger with a custom HTTP client.
+    /// Build a cover-download client for one fetch: the no-redirect
+    /// configuration plus a DNS pin of `host` to exactly `addrs`.
     ///
-    /// `download_image` validates the URL before requesting it and treats any
-    /// 3xx response as an error, but that only catches clients that return the
-    /// 3xx itself: a redirect-following client (reqwest's default policy)
-    /// follows the hop internally and surfaces a plain 200 from an internal
-    /// address. The no-redirect-bypass guarantee therefore holds only for
-    /// clients that do not follow redirects, as `Tagger::new()`'s built-in
-    /// client does via `Policy::none()`; inject only non-redirect-following
-    /// clients.
-    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
-        self.http_client = client;
-        self
+    /// Redirects are disabled: `download_image` validates the URL and its
+    /// resolved addresses for SSRF before requesting it, and a redirect to an
+    /// internal address would bypass that check. `download_image` treats any
+    /// 3xx response as an error.
+    ///
+    /// The pin closes the TOCTOU window between `download_image`'s
+    /// `validate_addresses` check and the connect: the client never re-resolves
+    /// the host, so it can only reach the addresses that were just validated.
+    /// The URL keeps the hostname, so TLS/SNI and certificate validation are
+    /// unaffected.
+    ///
+    /// Proxying is intentionally disabled (`no_proxy()` also turns off the
+    /// automatic system proxy, so `HTTPS_PROXY`/`ALL_PROXY` are ignored): a
+    /// proxy receives the hostname in CONNECT and could route it to a
+    /// restricted address the pin never saw, re-opening the SSRF bypass. The
+    /// validated addresses are the only resolution path.
+    fn build_fetch_client(host: &str, addrs: &[std::net::SocketAddr]) -> reqwest::Client {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .resolve_to_addrs(host, addrs)
+            .build()
+            .expect("reqwest client with static settings cannot fail")
+    }
+
+    /// Separator between genres in `©gen`.
+    ///
+    /// `©gen` is a single string; the pre-Rust pipeline joined every genre
+    /// with `/` and player/library conventions (and Audiobookshelf's parser)
+    /// recognize that form, so it is kept for compatibility.
+    const GENRE_SEPARATOR: &'static str = "/";
+
+    /// Map `BookMetadata` onto an MP4 tag.
+    ///
+    /// Atoms:
+    /// - title, plus subtitle when present -> ©nam (`"title - subtitle"`)
+    /// - artist (authors), joined with ", " -> ©ART
+    /// - album (base title only) -> ©alb
+    /// - album artist (authors), joined with ", " -> ©aART
+    /// - genre (all genres), joined with "/" -> ©gen
+    /// - year -> ©day
+    /// - comment (description) -> ©cmt
+    /// - narrator -> ©wrt (composer), multiple narrators joined with ", "
+    /// - series -> ©grp (grouping)
+    ///
+    /// Tags with no corresponding metadata are removed rather than left
+    /// untouched, so retagging a file from a different source cannot leave
+    /// stale values behind.
+    fn apply_metadata(tag: &mut mp4ameta::Tag, metadata: &BookMetadata) {
+        // Title (base title plus subtitle, when the subtitle is non-blank).
+        // `BookMetadata::full_title` owns the documented `"title - subtitle"`
+        // form so every consumer of the title agrees on the separator.
+        tag.set_title(metadata.full_title());
+
+        // Artist and album artist (authors)
+        let authors = Self::join_values(&metadata.authors, ", ");
+        if let Some(authors) = authors.as_deref() {
+            tag.set_artist(authors);
+            tag.set_album_artist(authors);
+        } else {
+            tag.remove_artists();
+            tag.remove_album_artists();
+        }
+
+        // Album (base title only, so album grouping stays stable across
+        // editions and unchanged by the subtitle)
+        tag.set_album(&metadata.title);
+
+        // Genre (all genres in a single `©gen` value)
+        match Self::join_values(&metadata.genres, Self::GENRE_SEPARATOR) {
+            Some(genres) => tag.set_genre(genres),
+            None => tag.remove_genres(),
+        }
+
+        // Year
+        if let Some(year) = metadata.year {
+            tag.set_year(year.to_string());
+        }
+
+        // Comment (description)
+        if !metadata.description.is_empty() {
+            tag.set_comment(&metadata.description);
+        }
+
+        // Narrator (composer is the convention used by Prologue, Audiobookshelf,
+        // and Audible for audiobook narrators)
+        if !metadata.narrators.is_empty() {
+            tag.set_composer(metadata.narrators.join(", "));
+        }
+
+        // Series information. Grouping also carries any unrelated user content,
+        // so rebuild the generated entry instead of appending: legacy
+        // `Narrator: ...` segments are dropped and any existing `Series: ...`
+        // segment is replaced. This keeps repeated writes and retags of files
+        // produced by older versions from duplicating or retaining stale data.
+        if !metadata.narrators.is_empty() || metadata.series_name.is_some() {
+            let mut segments = Self::preserved_grouping_segments(tag.grouping());
+
+            if let Some(series_name) = &metadata.series_name {
+                let series_info = match &metadata.series_position {
+                    Some(pos) => format!("{} #{}", series_name, pos),
+                    None => series_name.clone(),
+                };
+                segments.push(format!("Series: {}", series_info));
+            }
+
+            if segments.is_empty() {
+                tag.remove_groupings();
+            } else {
+                tag.set_grouping(segments.join(" | "));
+            }
+        }
+    }
+
+    /// Join non-blank values with `separator`, or `None` when every value is
+    /// blank.
+    fn join_values(values: &[String], separator: &str) -> Option<String> {
+        let kept: Vec<&str> =
+            values.iter().map(|value| value.trim()).filter(|value| !value.is_empty()).collect();
+        if kept.is_empty() { None } else { Some(kept.join(separator)) }
+    }
+
+    /// Grouping segments that this tool did not generate.
+    ///
+    /// `©grp` historically held `Narrator: ...` and `Series: ...` entries; both
+    /// are regenerated by [`Tagger::apply_metadata`], so they are filtered out
+    /// while unrelated grouping content is kept.
+    fn preserved_grouping_segments(grouping: Option<&str>) -> Vec<String> {
+        grouping
+            .unwrap_or_default()
+            .split(" | ")
+            .map(str::trim)
+            .filter(|segment| {
+                !segment.is_empty()
+                    && !segment.starts_with("Narrator:")
+                    && !segment.starts_with("Series:")
+            })
+            .map(str::to_string)
+            .collect()
     }
 
     /// Write metadata tags to an MP4 file
     ///
-    /// Maps BookMetadata to MP4 atoms:
-    /// - title -> ©nam
-    /// - artist (authors) -> ©ART
-    /// - album (title) -> ©alb
-    /// - genre -> ©gen
-    /// - year -> ©day
-    /// - comment (description) -> ©cmt
-    /// - narrator -> ©nrt (custom)
-    /// - series -> ©grp (grouping)
+    /// See [`Tagger::apply_metadata`] for the metadata-to-atom mapping.
     pub fn write_metadata<P: AsRef<Path>>(
         &self,
         file_path: P,
@@ -242,56 +461,7 @@ impl Tagger {
         // Read existing tag or create new one
         let mut tag = mp4ameta::Tag::read_from_path(path).unwrap_or_default();
 
-        // Standard tags
-        tag.set_title(&metadata.title);
-
-        // Artist (authors)
-        if !metadata.authors.is_empty() {
-            let authors = metadata.authors.join(", ");
-            tag.set_artist(&authors);
-        }
-
-        // Album (use title for audiobooks)
-        tag.set_album(&metadata.title);
-
-        // Genre
-        if let Some(first_genre) = metadata.genres.first() {
-            tag.set_genre(first_genre.as_str());
-        }
-
-        // Year
-        if let Some(year) = metadata.year {
-            tag.set_year(year.to_string());
-        }
-
-        // Comment (description)
-        if !metadata.description.is_empty() {
-            tag.set_comment(&metadata.description);
-        }
-
-        // Extended tags (using custom atoms)
-
-        // Narrator
-        if !metadata.narrators.is_empty() {
-            let narrators = metadata.narrators.join(", ");
-            // Use grouping atom for narrator (custom convention)
-            tag.set_grouping(format!("Narrator: {}", narrators));
-        }
-
-        // Series information
-        if let Some(series_name) = &metadata.series_name {
-            let series_info = match &metadata.series_position {
-                Some(pos) => format!("{} #{}", series_name, pos),
-                None => series_name.clone(),
-            };
-            // Add to grouping if not already set, otherwise append
-            let existing_grouping = tag.grouping().map(|s| s.to_string()).unwrap_or_default();
-            if existing_grouping.is_empty() {
-                tag.set_grouping(format!("Series: {}", series_info));
-            } else {
-                tag.set_grouping(format!("{} | Series: {}", existing_grouping, series_info));
-            }
-        }
+        Self::apply_metadata(&mut tag, metadata);
 
         // Write the tag back to file
         tag.write_to_path(path)
@@ -329,15 +499,21 @@ impl Tagger {
         // Detect image format
         let format = detect_image_format(image_data)?;
 
+        // `covr` atoms only carry JPEG/PNG/BMP; transcode anything else before
+        // embedding instead of dropping the cover.
+        let (img_fmt, data) = match format {
+            ImageFormat::Jpeg => (mp4ameta::ImgFmt::Jpeg, image_data.to_vec()),
+            ImageFormat::Png => (mp4ameta::ImgFmt::Png, image_data.to_vec()),
+            ImageFormat::Webp | ImageFormat::Gif => {
+                debug!("Converting {format:?} cover to JPEG before embedding");
+                (mp4ameta::ImgFmt::Jpeg, convert_cover_to_jpeg(image_data)?)
+            }
+        };
+
         // Read existing tag or create new one
         let mut tag = mp4ameta::Tag::read_from_path(path).unwrap_or_default();
 
-        // Set artwork based on format
-        let img_fmt = match format {
-            ImageFormat::Jpeg => mp4ameta::ImgFmt::Jpeg,
-            ImageFormat::Png => mp4ameta::ImgFmt::Png,
-        };
-        let artwork = mp4ameta::Img::new(img_fmt, image_data.to_vec());
+        let artwork = mp4ameta::Img::new(img_fmt, data);
         tag.set_artwork(artwork);
 
         // Write the tag back to file
@@ -384,6 +560,15 @@ impl Tagger {
         let mut chapters_vec = chapters.to_vec();
         validate_and_sort_chapters(&mut chapters_vec)?;
 
+        if chapters_vec.len() > CHAPTER_LIST_MAX_CHAPTERS {
+            warn!(
+                "Nero chapter list is limited to {} entries; omitting {} chapter(s) from: {}",
+                CHAPTER_LIST_MAX_CHAPTERS,
+                chapters_vec.len() - CHAPTER_LIST_MAX_CHAPTERS,
+                path.display()
+            );
+        }
+
         info!("Embedding {} chapters into: {}", chapters_vec.len(), path.display());
 
         // Read existing tag
@@ -393,9 +578,11 @@ impl Tagger {
         // Clear existing chapters
         tag.chapter_list_mut().clear();
 
-        // Convert to mp4ameta chapters and add to tag
+        // Convert to mp4ameta chapters and write the chpl representation. The
+        // chpl atom cannot represent more than 255 entries; other chapter
+        // representations (the QuickTime chapter track) use the full list.
         let mp4_chapters = convert_chapters_for_embedding(&chapters_vec);
-        tag.chapter_list_mut().extend(mp4_chapters);
+        tag.chapter_list_mut().extend_from_slice(chpl_chapters(&mp4_chapters));
 
         // Write back to file
         tag.write_to_path(path)
@@ -405,21 +592,48 @@ impl Tagger {
         Ok(())
     }
 
-    /// Download image from URL
+    /// Download image from URL.
+    ///
+    /// SSRF guard: `validate_cover_url` fast-rejects non-https schemes and
+    /// restricted address literals textually, then the host is resolved and
+    /// every resolved address is checked against [`is_restricted_ip`] via
+    /// [`validate_addresses`] before the request goes out (a public-looking
+    /// name may point at an internal network). The connection is pinned to
+    /// exactly those validated addresses — the per-fetch client overrides DNS
+    /// for the host, so it no longer re-resolves and a re-resolve to a
+    /// restricted address between our lookup and the connect is not possible.
+    /// Redirects are disabled (`Policy::none()`), so a 3xx cannot bounce the
+    /// download to an unchecked internal host; `download_image` treats any 3xx
+    /// as an error.
     async fn download_image(&self, url: &str) -> Result<Vec<u8>> {
         const MAX_SIZE: usize = 5 * 1024 * 1024; // 5 MB
 
-        // Reject URLs that could reach loopback/private/link-local/reserved
-        // addresses (SSRF) before any request goes out.
+        // Textual pre-check (scheme, literal IP, localhost) before any I/O.
         Self::validate_cover_url(url)?;
 
-        let response = self
-            .http_client
-            .get(url)
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| TaggingError::CoverDownload(format!("Request failed/timeout: {}", e)))?;
+        // Resolve the host and reject if ANY resolved address is restricted.
+        let parsed = reqwest::Url::parse(url)
+            .map_err(|e| TaggingError::CoverDownload(format!("Invalid cover URL '{url}': {e}")))?;
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| TaggingError::CoverDownload(format!("Cover URL '{url}' has no host")))?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+        let addrs = tokio::net::lookup_host((host.as_str(), port)).await.map_err(|e| {
+            TaggingError::CoverDownload(format!("Cover URL '{url}' does not resolve: {e}"))
+        })?;
+        let addrs: Vec<std::net::SocketAddr> = addrs.collect();
+        Self::validate_addresses(addrs.iter().copied())?;
+
+        // Pin the request to the validated addresses so the client cannot
+        // re-resolve the host between the check above and the connect.
+        let client = Self::build_fetch_client(&host, &addrs);
+        let response =
+            client.get(url).timeout(std::time::Duration::from_secs(30)).send().await.map_err(
+                |e| TaggingError::CoverDownload(format!("Request failed/timeout: {}", e)),
+            )?;
 
         // The client disables redirects (they could bypass the SSRF check above);
         // a 3xx means the server refused to serve the image directly.
@@ -475,6 +689,28 @@ impl Tagger {
         output_path: P,
         metadata: &BookMetadata,
     ) -> Result<()> {
+        let artist =
+            if metadata.authors.is_empty() { None } else { Some(metadata.authors.join(", ")) };
+
+        self.write_chapters_txt_with(
+            output_path,
+            &metadata.title,
+            artist.as_deref(),
+            &metadata.chapters,
+        )
+    }
+
+    /// Write chapters to a chapters.txt file using explicit header values.
+    ///
+    /// Used when chapters were resolved without provider metadata (generated
+    /// from the input tracks), where there is no [`BookMetadata`] to export.
+    pub fn write_chapters_txt_with<P: AsRef<Path>>(
+        &self,
+        output_path: P,
+        album: &str,
+        artist: Option<&str>,
+        chapters: &[crate::metadata::Chapter],
+    ) -> Result<()> {
         let path = output_path.as_ref();
 
         debug!("Writing chapters.txt to: {}", path.display());
@@ -482,14 +718,15 @@ impl Tagger {
         // Build chapters content
         let mut content = String::new();
 
-        // Add metadata headers
-        if !metadata.authors.is_empty() {
-            content.push_str(&format!("## artist: {}\n", metadata.authors.join(", ")));
+        // Add headers
+        if let Some(artist) = artist.filter(|artist| !artist.is_empty()) {
+            content.push_str(&format!("## artist: {}\n", artist));
         }
-        content.push_str(&format!("## album: {}\n", metadata.title));
+        content.push_str(&format!("## album: {}\n", album));
 
         // Add total duration if available
-        if let Some(duration) = metadata.total_duration() {
+        let total_duration = chapters.iter().map(|chapter| chapter.end_time()).max();
+        if let Some(duration) = total_duration {
             content.push_str(&format!("## total-duration: {}\n", format_duration(duration)));
         }
 
@@ -497,7 +734,7 @@ impl Tagger {
         content.push('\n');
 
         // Add chapters
-        for chapter in &metadata.chapters {
+        for chapter in chapters {
             let timestamp = format_duration(chapter.start_time);
             content.push_str(&format!("{} {}\n", timestamp, chapter.title));
         }
@@ -658,11 +895,16 @@ impl Default for Tagger {
     }
 }
 
-/// Image format enumeration
+/// Image format enumeration.
+///
+/// `Jpeg` and `Png` are stored as-is; `Webp` and `Gif` are not valid `covr`
+/// payloads and are transcoded to JPEG before embedding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImageFormat {
     Jpeg,
     Png,
+    Webp,
+    Gif,
 }
 
 /// Detect image format from magic bytes
@@ -689,7 +931,75 @@ fn detect_image_format(data: &[u8]) -> Result<ImageFormat> {
         return Ok(ImageFormat::Png);
     }
 
+    // GIF magic bytes: "GIF87a" or "GIF89a"
+    if data.len() >= 6 && &data[0..3] == b"GIF" && (&data[3..6] == b"87a" || &data[3..6] == b"89a")
+    {
+        return Ok(ImageFormat::Gif);
+    }
+
+    // WebP magic bytes: "RIFF" .... "WEBP" (chunk size between the two tags)
+    if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        return Ok(ImageFormat::Webp);
+    }
+
     Err(TaggingError::InvalidFormat("Unknown image format".to_string()))
+}
+
+/// Transcode an arbitrary raster image (WebP, GIF, ...) to JPEG via FFmpeg.
+///
+/// MP4 `covr` atoms only carry JPEG, PNG, or BMP data, so container formats
+/// that cover providers also serve must be converted before embedding. The
+/// pre-rewrite pipeline got this for free by writing the download to disk and
+/// handing it to m4b-tool, which shells out to FFmpeg; FFmpeg is already a
+/// required runtime dependency here, so conversion stays local.
+///
+/// Animated GIF and WebP inputs contribute their first frame only.
+fn convert_cover_to_jpeg(image_data: &[u8]) -> Result<Vec<u8>> {
+    let ffmpeg = crate::audio::ffmpeg::FFmpeg::discover().map_err(|e| {
+        TaggingError::CoverConversion(format!(
+            "FFmpeg is required to convert this cover image: {e}"
+        ))
+    })?;
+
+    let temp_dir = tempfile::TempDir::new().map_err(|e| {
+        TaggingError::CoverConversion(format!("Failed to create temp dir for cover: {e}"))
+    })?;
+    let input_path = temp_dir.path().join("cover_input");
+    let output_path = temp_dir.path().join("cover_output.jpg");
+
+    std::fs::write(&input_path, image_data).map_err(|e| {
+        TaggingError::CoverConversion(format!("Failed to write temp cover file: {e}"))
+    })?;
+
+    // `-frames:v 1` keeps animated inputs to a single still frame. No scaling
+    // filter is applied, so the source dimensions are preserved.
+    let output = std::process::Command::new(ffmpeg.ffmpeg_path())
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&input_path)
+        .args(["-frames:v", "1", "-c:v", "mjpeg", "-q:v", "2", "-f", "image2", "-y"])
+        .arg(&output_path)
+        .output()
+        .map_err(|e| TaggingError::CoverConversion(format!("Failed to run FFmpeg: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TaggingError::CoverConversion(format!(
+            "FFmpeg failed to convert cover image: {}",
+            stderr.trim()
+        )));
+    }
+
+    let jpeg = std::fs::read(&output_path).map_err(|e| {
+        TaggingError::CoverConversion(format!("Failed to read converted cover: {e}"))
+    })?;
+
+    if jpeg.is_empty() {
+        return Err(TaggingError::CoverConversion(
+            "FFmpeg produced an empty cover image".to_string(),
+        ));
+    }
+
+    Ok(jpeg)
 }
 
 /// Format a Duration as HH:MM:SS.mmm
@@ -726,8 +1036,9 @@ mod tests {
 
     #[test]
     fn test_validate_cover_url_table() {
-        // (url, should pass). https + public host passes; anything that is not
-        // https, or that resolves to a non-public destination, is rejected.
+        // (url, should pass). Textual pre-check only: https + host that is not
+        // a restricted address literal or localhost passes; resolved-address
+        // validation happens in `download_image` and is tested separately.
         let cases = [
             ("https://images.example.com/covers/book.jpg", true),
             ("https://93.184.216.34/cover.jpg", true), // public IP literal
@@ -742,11 +1053,119 @@ mod tests {
             ("https://::1/cover.jpg", false),
             ("https://[::1]/cover.jpg", false),
             ("https://0.0.0.0/cover.jpg", false),
+            ("https://0.9.9.9/cover.jpg", false), // 0.0.0.0/8
             ("not a url", false),
         ];
         for (url, expected) in cases {
             let passed = Tagger::validate_cover_url(url).is_ok();
             assert_eq!(passed, expected, "url {url:?}");
+        }
+    }
+
+    #[test]
+    fn test_validate_addresses_rejects_restricted_members() {
+        use std::net::SocketAddr;
+        use std::net::SocketAddrV4;
+        use std::net::SocketAddrV6;
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
+        // All-public set passes.
+        let pub_only: [SocketAddr; 2] = [
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(93, 184, 216, 34), 443)),
+            SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1),
+                443,
+                0,
+                0,
+            )),
+        ];
+        assert!(Tagger::validate_addresses(pub_only).is_ok());
+
+        // A single restricted v4 address in a mixed set is rejected.
+        let mixed: [SocketAddr; 2] =
+            [pub_only[0], SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 443))];
+        assert!(Tagger::validate_addresses(mixed).is_err());
+
+        // Restricted v6 (link-local) is rejected too.
+        let v6ll: [SocketAddr; 1] = [SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+            443,
+            0,
+            0,
+        ))];
+        assert!(Tagger::validate_addresses(v6ll).is_err());
+
+        // Empty set passes (nothing to judge).
+        assert!(Tagger::validate_addresses(std::iter::empty::<SocketAddr>()).is_ok());
+    }
+
+    #[test]
+    fn test_is_restricted_ip_table() {
+        use std::net::IpAddr;
+        use std::str::FromStr;
+
+        let reject = [
+            // Existing v4 behavior.
+            "0.0.0.0",
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "100.127.255.255",
+            "224.0.0.1",
+            "255.255.255.255",
+            // Existing v6 behavior.
+            "::",
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            // IPv4-mapped restricted.
+            "::ffff:127.0.0.1",
+            // IPv6 multicast (ff00::/8).
+            "ff02::1",
+            "ff05::2",
+            // 6to4 (2002::/16) embeds of restricted v4 ranges.
+            "2002:7f00:1::5",
+            "2002:0a00:0001::1",
+            // NAT64 (64:ff9b::/96) embed of loopback.
+            "64:ff9b::7f00:1",
+            // NAT64 /96 embed of a CGN address (100.64.0.1).
+            "64:ff9b::6440:1",
+        ];
+        for s in reject {
+            assert!(
+                Tagger::is_restricted_ip(IpAddr::from_str(s).unwrap()),
+                "{s} should be restricted"
+            );
+        }
+
+        let accept = [
+            // Public v4.
+            "1.1.1.1",
+            "172.15.255.255",
+            "172.32.0.1",
+            "223.255.255.255",
+            // Public v6.
+            "2001:4860:4860::8888",
+            "2400:3200::1",
+            // 6to4 embed of a public v4 address (128.100.255.255).
+            "2002:8064:ffff::",
+            // NAT64 embed of a public v4 address (128.100.255.255).
+            "64:ff9b::8064:ffff",
+            // Outside the 64:ff9b::/96 prefix (a middle group is nonzero):
+            // not a NAT64 embed, so the trailing 7f00:1 must not be read as
+            // an embedded 127.0.0.1.
+            "64:ff9b:0:1::7f00:1",
+        ];
+        for s in accept {
+            assert!(
+                !Tagger::is_restricted_ip(IpAddr::from_str(s).unwrap()),
+                "{s} should be accepted"
+            );
         }
     }
 
@@ -774,6 +1193,112 @@ mod tests {
     fn test_detect_image_format_too_short() {
         let short_data = vec![0xFF, 0xD8];
         assert!(detect_image_format(&short_data).is_err());
+    }
+
+    #[test]
+    fn test_detect_image_format_gif87a() {
+        let gif_data = b"GIF87a\x01\x00\x01\x00".to_vec();
+        assert_eq!(detect_image_format(&gif_data).unwrap(), ImageFormat::Gif);
+    }
+
+    #[test]
+    fn test_detect_image_format_gif89a() {
+        let gif_data = b"GIF89a\x01\x00\x01\x00".to_vec();
+        assert_eq!(detect_image_format(&gif_data).unwrap(), ImageFormat::Gif);
+    }
+
+    #[test]
+    fn test_detect_image_format_webp() {
+        // "RIFF" <size> "WEBP"
+        let mut webp_data = b"RIFF".to_vec();
+        webp_data.extend_from_slice(&[0x24, 0x00, 0x00, 0x00]);
+        webp_data.extend_from_slice(b"WEBPVP8 ");
+        assert_eq!(detect_image_format(&webp_data).unwrap(), ImageFormat::Webp);
+    }
+
+    #[test]
+    fn test_detect_image_format_riff_not_webp() {
+        // A RIFF container that is not WebP (e.g. WAV) must stay unknown.
+        let mut riff_data = b"RIFF".to_vec();
+        riff_data.extend_from_slice(&[0x24, 0x00, 0x00, 0x00]);
+        riff_data.extend_from_slice(b"WAVEfmt ");
+        assert!(detect_image_format(&riff_data).is_err());
+    }
+
+    /// Generate a PNG test image with FFmpeg, then transcode it to `format`.
+    fn generate_image(dir: &TempDir, format: &str) -> Vec<u8> {
+        use std::process::Command;
+
+        let png_path = dir.path().join("source.png");
+        let out_path = dir.path().join(format!("cover.{format}"));
+
+        let status = Command::new("ffmpeg")
+            .args(["-f", "lavfi", "-i", "testsrc=size=64x64:duration=1", "-frames:v", "1", "-y"])
+            .arg(&png_path)
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            _ => panic!("FFmpeg required for tests"),
+        }
+
+        let status = Command::new("ffmpeg")
+            .arg("-i")
+            .arg(&png_path)
+            .args(["-frames:v", "1", "-y"])
+            .arg(&out_path)
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            _ => panic!("FFmpeg required for tests"),
+        }
+
+        std::fs::read(&out_path).unwrap()
+    }
+
+    #[test]
+    fn test_convert_cover_to_jpeg_produces_jpeg() {
+        let temp_dir = TempDir::new().unwrap();
+        let webp = generate_image(&temp_dir, "webp");
+
+        let jpeg = convert_cover_to_jpeg(&webp).unwrap();
+        assert_eq!(&jpeg[0..3], &[0xFF, 0xD8, 0xFF], "expected JPEG magic bytes");
+        assert_eq!(detect_image_format(&jpeg).unwrap(), ImageFormat::Jpeg);
+    }
+
+    #[test]
+    fn test_convert_cover_to_jpeg_rejects_non_image() {
+        let result = convert_cover_to_jpeg(b"this is not an image");
+        assert!(matches!(result, Err(TaggingError::CoverConversion(_))));
+    }
+
+    #[test]
+    fn test_embed_cover_webp_converted_to_jpeg() {
+        let temp_dir = TempDir::new().unwrap();
+        let m4b_path = create_minimal_m4b(&temp_dir);
+        let webp = generate_image(&temp_dir, "webp");
+
+        let tagger = Tagger::new();
+        tagger.embed_cover_data(&m4b_path, &webp).expect("embed webp cover");
+
+        let tag = mp4ameta::Tag::read_from_path(&m4b_path).unwrap();
+        let artwork = tag.artwork().expect("cover should be embedded");
+        assert_eq!(artwork.fmt, mp4ameta::ImgFmt::Jpeg);
+        assert_eq!(&artwork.data[0..3], &[0xFF, 0xD8, 0xFF], "stored data must be JPEG");
+    }
+
+    #[test]
+    fn test_embed_cover_gif_converted_to_jpeg() {
+        let temp_dir = TempDir::new().unwrap();
+        let m4b_path = create_minimal_m4b(&temp_dir);
+        let gif = generate_image(&temp_dir, "gif");
+
+        let tagger = Tagger::new();
+        tagger.embed_cover_data(&m4b_path, &gif).expect("embed gif cover");
+
+        let tag = mp4ameta::Tag::read_from_path(&m4b_path).unwrap();
+        let artwork = tag.artwork().expect("cover should be embedded");
+        assert_eq!(artwork.fmt, mp4ameta::ImgFmt::Jpeg);
+        assert_eq!(&artwork.data[0..3], &[0xFF, 0xD8, 0xFF], "stored data must be JPEG");
     }
 
     #[test]
@@ -819,6 +1344,29 @@ mod tests {
         assert!(content.contains("## album: Test Book"));
         assert!(content.contains("00:00:00.000 Chapter 1"));
         assert!(content.contains("00:10:00.000 Chapter 2"));
+    }
+
+    #[test]
+    fn test_write_chapters_txt_without_artist() {
+        let temp_dir = TempDir::new().unwrap();
+        let chapters_path = temp_dir.path().join("audiobook.chapters.txt");
+
+        // Generated chapters have no provider metadata: no artist header, and the
+        // album falls back to the output name.
+        let chapters = vec![
+            Chapter::new("Chapter 01", Duration::from_secs(0), Duration::from_secs(5)),
+            Chapter::new("Chapter 02", Duration::from_secs(5), Duration::from_secs(5)),
+        ];
+
+        let tagger = Tagger::new();
+        tagger.write_chapters_txt_with(&chapters_path, "audiobook", None, &chapters).unwrap();
+
+        let content = std::fs::read_to_string(&chapters_path).unwrap();
+        assert!(!content.contains("## artist:"));
+        assert!(content.contains("## album: audiobook"));
+        assert!(content.contains("## total-duration: 00:00:10.000"));
+        assert!(content.contains("00:00:00.000 Chapter 01"));
+        assert!(content.contains("00:00:05.000 Chapter 02"));
     }
 
     #[test]
@@ -923,6 +1471,192 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_metadata_writes_narrators_to_composer() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc")
+            .add_author("Author One")
+            .add_author("Author Two")
+            .add_narrator("Narrator One")
+            .add_narrator("Narrator Two");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.composer(), Some("Narrator One, Narrator Two"));
+        assert_eq!(tag.artist(), Some("Author One, Author Two"));
+        assert_eq!(tag.grouping(), None, "narrator must not be duplicated in grouping");
+    }
+
+    #[test]
+    fn test_apply_metadata_includes_subtitle_in_title() {
+        let metadata =
+            BookMetadata::new("B08XYZ1234", "Test Book", "Desc").with_subtitle("The Sequel");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.title(), Some("Test Book - The Sequel"));
+        assert_eq!(tag.album(), Some("Test Book"), "album keeps the base title only");
+    }
+
+    #[test]
+    fn test_apply_metadata_without_subtitle_uses_plain_title() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.title(), Some("Test Book"));
+    }
+
+    #[test]
+    fn test_apply_metadata_ignores_blank_subtitle() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc").with_subtitle("   ");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.title(), Some("Test Book"));
+    }
+
+    #[test]
+    fn test_apply_metadata_joins_all_genres() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc")
+            .add_genre("Fiction")
+            .add_genre("Science Fiction")
+            .add_genre("Adventure");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.genre(), Some("Fiction/Science Fiction/Adventure"));
+    }
+
+    #[test]
+    fn test_apply_metadata_single_genre_unchanged() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc").add_genre("Fiction");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.genre(), Some("Fiction"));
+    }
+
+    #[test]
+    fn test_apply_metadata_without_genres_leaves_genre_unset() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc");
+
+        let mut tag = mp4ameta::Tag::default();
+        tag.set_genre("Stale Genre");
+
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.genre(), None, "retagging must not keep a stale genre");
+    }
+
+    #[test]
+    fn test_apply_metadata_writes_album_artist_from_authors() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc")
+            .add_author("Author One")
+            .add_author("Author Two");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.album_artist(), Some("Author One, Author Two"));
+        assert_eq!(tag.album(), Some("Test Book"));
+    }
+
+    #[test]
+    fn test_apply_metadata_without_authors_leaves_album_artist_unset() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc");
+
+        let mut tag = mp4ameta::Tag::default();
+        tag.set_album_artist("Stale Artist");
+
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.album_artist(), None, "retagging must not keep a stale album artist");
+    }
+
+    #[test]
+    fn test_apply_metadata_keeps_series_in_grouping() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc")
+            .add_narrator("Narrator One")
+            .with_series("My Series", "2");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.composer(), Some("Narrator One"));
+        assert_eq!(tag.grouping(), Some("Series: My Series #2"));
+    }
+
+    #[test]
+    fn test_apply_metadata_without_narrators_leaves_composer_unset() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc").add_author("Author");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.composer(), None);
+    }
+
+    #[test]
+    fn test_apply_metadata_series_grouping_is_idempotent() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc")
+            .add_narrator("Narrator One")
+            .with_series("My Series", "2");
+
+        let mut tag = mp4ameta::Tag::default();
+        Tagger::apply_metadata(&mut tag, &metadata);
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.grouping(), Some("Series: My Series #2"));
+    }
+
+    #[test]
+    fn test_apply_metadata_drops_legacy_grouping_entries() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "Desc")
+            .add_narrator("New Narrator")
+            .with_series("New Series", "2");
+
+        let mut tag = mp4ameta::Tag::default();
+        tag.set_grouping("Narrator: Old Narrator | Series: Old Series #1");
+
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.composer(), Some("New Narrator"));
+        assert_eq!(tag.grouping(), Some("Series: New Series #2"));
+    }
+
+    #[test]
+    fn test_apply_metadata_preserves_unrelated_grouping() {
+        let metadata =
+            BookMetadata::new("B08XYZ1234", "Test Book", "Desc").add_narrator("New Narrator");
+
+        let mut tag = mp4ameta::Tag::default();
+        tag.set_grouping("User Grouping | Narrator: Old Narrator");
+
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.grouping(), Some("User Grouping"));
+    }
+
+    #[test]
+    fn test_apply_metadata_clears_grouping_holding_only_legacy_narrator() {
+        let metadata =
+            BookMetadata::new("B08XYZ1234", "Test Book", "Desc").add_narrator("New Narrator");
+
+        let mut tag = mp4ameta::Tag::default();
+        tag.set_grouping("Narrator: Old Narrator");
+
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.composer(), Some("New Narrator"));
+        assert_eq!(tag.grouping(), None);
+    }
+
+    #[test]
     fn test_chapters_txt_format() {
         let temp_dir = TempDir::new().unwrap();
         let chapters_path = temp_dir.path().join("chapters.txt");
@@ -1010,18 +1744,80 @@ mod tests {
 
     #[test]
     fn test_convert_chapters_for_embedding_utf8_safe_truncation() {
-        // Test that multi-byte UTF-8 characters are handled safely without panicking
-        // Each emoji is 4 bytes in UTF-8, so 300 emojis would be 1200 bytes
+        // Titles must be cut on a char boundary within the 255-byte chpl limit;
+        // mp4ameta slices at a raw byte index and panics mid-character.
         let emoji_title = "😀".repeat(300);
         let chapters =
             vec![Chapter::new(emoji_title.clone(), Duration::ZERO, Duration::from_secs(60))];
 
         let mp4_chapters = convert_chapters_for_embedding(&chapters);
         assert_eq!(mp4_chapters.len(), 1);
-        // Should have exactly 255 characters (not bytes)
-        assert_eq!(mp4_chapters[0].title.chars().count(), 255);
-        // Verify the title starts with the emoji character
-        assert!(mp4_chapters[0].title.starts_with('😀'));
+        // Each emoji is 4 bytes, so 63 whole emoji (252 bytes) fit under 255.
+        assert_eq!(mp4_chapters[0].title, "😀".repeat(63));
+        assert!(mp4_chapters[0].title.len() <= CHAPTER_TITLE_MAX_BYTES);
+    }
+
+    #[test]
+    fn test_convert_chapters_for_embedding_truncates_three_byte_chars() {
+        // 'é' is 2 bytes: 127 chars fit in 254 bytes, while 128 need 256.
+        let title = "é".repeat(200);
+        let chapters = vec![Chapter::new(title, Duration::ZERO, Duration::from_secs(60))];
+
+        let mp4_chapters = convert_chapters_for_embedding(&chapters);
+        assert_eq!(mp4_chapters[0].title, "é".repeat(127));
+        assert!(mp4_chapters[0].title.len() <= CHAPTER_TITLE_MAX_BYTES);
+    }
+
+    #[test]
+    fn test_truncate_chapter_title_keeps_short_titles() {
+        assert_eq!(truncate_chapter_title(""), "");
+        assert_eq!(truncate_chapter_title("Chapter 1"), "Chapter 1");
+
+        // Exactly at the limit is unchanged, including multibyte text.
+        let at_limit = "é".repeat(127) + "a";
+        assert_eq!(at_limit.len(), CHAPTER_TITLE_MAX_BYTES);
+        assert_eq!(truncate_chapter_title(&at_limit), at_limit);
+    }
+
+    #[test]
+    fn test_convert_chapters_for_embedding_keeps_all_entries() {
+        // Conversion is representation-agnostic; only the chpl write site caps.
+        let chapters: Vec<Chapter> = (0..CHAPTER_LIST_MAX_CHAPTERS + 1)
+            .map(|i| {
+                Chapter::new(
+                    format!("Ch{}", i),
+                    Duration::from_secs(i as u64 * 60),
+                    Duration::from_secs(60),
+                )
+            })
+            .collect();
+
+        let mp4_chapters = convert_chapters_for_embedding(&chapters);
+        assert_eq!(mp4_chapters.len(), CHAPTER_LIST_MAX_CHAPTERS + 1);
+        assert_eq!(mp4_chapters.last().unwrap().title, "Ch255");
+    }
+
+    #[test]
+    fn test_chpl_chapters_caps_at_representable_count() {
+        // A 256-entry chapter list would wrap the chpl entry count byte.
+        let chapters: Vec<Chapter> = (0..CHAPTER_LIST_MAX_CHAPTERS + 1)
+            .map(|i| {
+                Chapter::new(
+                    format!("Ch{}", i),
+                    Duration::from_secs(i as u64 * 60),
+                    Duration::from_secs(60),
+                )
+            })
+            .collect();
+
+        let mp4_chapters = convert_chapters_for_embedding(&chapters);
+        let chpl = chpl_chapters(&mp4_chapters);
+        assert_eq!(chpl.len(), CHAPTER_LIST_MAX_CHAPTERS);
+        assert_eq!(chpl.last().unwrap().title, "Ch254");
+
+        // Lists that already fit are returned unchanged.
+        assert_eq!(chpl_chapters(&mp4_chapters[..3]).len(), 3);
+        assert!(chpl_chapters(&[]).is_empty());
     }
 
     #[test]

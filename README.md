@@ -7,7 +7,7 @@ A blazing fast CLI tool for merging audiobook files into sorted, tagged M4B file
 
 m4b-merge takes split audio files (MP3, M4A, or M4B) and merges them into a single, consistently tagged M4B file. Originally written in Python and rewritten in Rust, it provides high-performance processing with zero-copy merging for files of the same format, ensuring the original bitrate and sample rate are preserved.
 
-The tool automates metadata lookup by ASIN or AudiobookDB book ID through [AudiobookDB](https://audiobookdb.org) — a community-maintained audiobook metadata database with proper book/release separation and moderated contributions — embeds high-resolution cover art, and maintains chapter markers from source files.
+The tool automates metadata lookup by ASIN or AudiobookDB book ID through [AudiobookDB](https://audiobookdb.org) — a community-maintained audiobook metadata database with proper book/release separation and moderated contributions — embeds high-resolution cover art, and maintains chapter markers from source files. When inputs carry no chapters, one chapter per input track is generated instead.
 
 - [Install](#install)
 - [Usage](#usage)
@@ -20,19 +20,33 @@ The tool automates metadata lookup by ASIN or AudiobookDB book ID through [Audio
 
 ### Docker (Fastest Path)
 
-Run without installation using the GHCR image.
+Choose a published `vX.Y.Z` tag or digest from the [release you intend to run](https://github.com/djdembeck/m4b-merge/releases), and set `IMAGE` to its full GHCR reference. The release workflow does not maintain a rolling `latest` alias.
 
 ```bash
+: "${IMAGE:?Set IMAGE to a published GHCR version tag or digest}"
 docker run --rm \
   -v /path/to/input:/input \
   -v /path/to/output:/output \
-  ghcr.io/djdembeck/m4b-merge:latest \
+  "$IMAGE" \
   -i /input/book_folder/ -o /output
 ```
 
 ### Pre-built Binaries
 
-Download the latest release for your platform from the [releases page](https://github.com/djdembeck/m4b-merge/releases).
+Download the release for your platform from the [releases page](https://github.com/djdembeck/m4b-merge/releases). Select the asset by its exact full name — never by the first asset containing `linux`:
+
+| Asset | Platform | Linkage | Runtime prerequisites |
+|---|---|---|---|
+| `m4b-merge-linux` | Linux x86-64 | static musl | FFmpeg, CA roots, resolver files |
+| `m4b-merge-linux-arm64` | Linux ARM64 | static musl | FFmpeg, CA roots, resolver files |
+| `m4b-merge-macos` | macOS | — | FFmpeg (CA roots and name resolution come from the platform) |
+| `m4b-merge-windows.exe` | Windows | — | FFmpeg (CA roots and name resolution come from the platform) |
+
+From this release forward no GNU-linked Linux asset is produced. For
+v2.0.0 only, `m4b-merge-linux` is the original GNU binary; the assets
+added to that release are the static-musl x86-64 asset
+`m4b-merge-linux-musl` and the ARM64 asset
+`m4b-merge-linux-arm64`.
 
 ### From Source
 
@@ -61,6 +75,8 @@ Provide a metadata ID (ASIN or AudiobookDB book ID) to automatically fetch metad
 ```bash
 m4b-merge -i input/book_folder/ -a B012345678
 ```
+
+Non-US Audible books need `--region` with `--metadata-source audnexus` (default `us`; accepted: `au ca de es fr in it jp us uk`).
 
 ### Custom Output & Organization
 
@@ -91,6 +107,23 @@ Check FFmpeg installation and version.
 m4b-merge --check-ffmpeg
 ```
 
+## Embedded Tags
+
+| Atom    | Source                                                        |
+|---------|---------------------------------------------------------------|
+| `©nam`  | Title; subtitle appended as `title - subtitle` when present   |
+| `©ART`  | All authors, joined by `, `                                   |
+| `©aART` | Same as `©ART` (album artist)                                 |
+| `©alb`  | Base title only (never the subtitle)                           |
+| `©gen`  | All genres, joined by `/` (single `©gen` value)                |
+| `©day`  | Release year                                                  |
+| `©cmt`  | Description                                                   |
+| `©wrt`  | All narrators, joined by `, `                                 |
+| `©grp`  | `Series: <name> #<position>`                                  |
+
+A tag with no corresponding metadata is removed, so retagging from a different
+source cannot leave stale values behind.
+
 ## Path Format Variables
 
 The output path is generated using the `-p` / `--path-format` template.
@@ -99,11 +132,17 @@ The output path is generated using the `-p` / `--path-format` template.
 |---------------|----------------------------------|
 | `{author}`   | Author name                     |
 | `{narrator}`  | Narrator name                   |
+| `{authors}`   | All authors, joined by `, ` (empty: `Unknown`) |
+| `{narrators}` | All narrators, joined by `, ` (empty: `Unknown`) |
 | `{title}`    | Book title                      |
 | `{subtitle}`  | Book subtitle                   |
 | `{series_name}` | Series name                    |
 | `{series_position}` | Series position number    |
 | `{year}`     | Release year                    |
+| `{genre}`      | First genre                     |
+| `{metadata_id}` | Looked-up metadata ID (ASIN or AudiobookDB book ID) |
+
+A token whose value is missing or empty does not contribute a path segment (empty segments are stripped). The only exceptions are `{author}`, `{authors}`, `{narrator}`, and `{narrators}`, which substitute `Unknown` when no person is known.
 
 **Default:** `{author}/{title}`
 
