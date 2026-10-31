@@ -200,7 +200,8 @@ class Repository:
         require(isinstance(source, str) and OID.fullmatch(source), "Expected a full commit object ID")
         repository = self.repository()
         require(self.api_tag_target(tag) == source, f"Tag {tag} does not point at the frozen source")
-        existing = [record for record in self.release_records(repository) if record.get("tag_name") == tag]
+        records = self.release_records(repository)
+        existing = [record for record in records if record.get("tag_name") == tag]
         require(len(existing) <= 1, f"Multiple release records share tag {tag}; failing closed")
         if not existing:
             require(not publish, "Cannot finalize a missing draft release")
@@ -213,7 +214,7 @@ class Repository:
                 not record.get("draft") and not record.get("prerelease")
                 and VERSION.fullmatch(str(record.get("tag_name", "")).removeprefix("v"))
                 and semver(str(record.get("tag_name", "")).removeprefix("v")) > target
-                for record in self.release_records(repository))
+                for record in records)
             # GitHub Latest is independent of Docker aliases: a new highest
             # stable release must advance it; a delayed lower release must not
             # roll it back. Tags outside the numeric X.Y.Z grammar never claim Latest.

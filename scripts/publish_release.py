@@ -118,13 +118,35 @@ def asset_digest(asset, repo):
     return actual
 
 
+def release_listing(repo, tag):
+    """Complete authenticated release listing; drafts included, errors propagate.
+
+    GET releases/tags/{tag} is a published-release lookup only, so a draft's
+    assets must be reconciled through the paginated listing instead."""
+    records, page = [], 1
+    while True:
+        batch = json.loads(run("gh", "api", "--hostname", "github.com",
+                               f"repos/{repo}/releases?per_page=100&page={page}"))
+        if not isinstance(batch, list):
+            raise ValueError(f"Unexpected release listing response on page {page}")
+        records.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    matches = [record for record in records if record.get("tag_name") == tag]
+    if len(matches) > 1:
+        raise ValueError(f"Multiple release records share tag {tag}; failing closed")
+    if not matches:
+        raise ValueError(f"No release record for tag {tag} after a complete listing; the draft is missing")
+    return matches[0]
+
+
 def assets(args):
     if not re.fullmatch(r"[0-9a-f]{40}", args.sha):
         raise ValueError(f"Invalid source SHA: {args.sha!r}")
     if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", args.tag):
         raise ValueError(f"Invalid release tag: {args.tag!r}")
-    release = json.loads(run("gh", "api", "--hostname", "github.com",
-                             f"repos/{args.repo}/releases/tags/{args.tag}"))
+    release = release_listing(args.repo, args.tag)
     existing = {}
     for asset in release["assets"]:
         if asset["name"] in existing:

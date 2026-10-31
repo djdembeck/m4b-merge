@@ -225,10 +225,13 @@ class ReleaseBehavior(unittest.TestCase):
             self.repo.release("v1.1.0", self.source, publish=True)
         self.assertEqual(self.repo.releases, {})
 
-    def test_delayed_lower_publish_keeps_latest_on_higher_published_release(self):
-        self.git("tag", "v1.2.0", self.source)
-        self.git("push", "origin", "v1.2.0")
+    def publish_tag(self, tag):
+        self.git("tag", tag, self.source)
+        self.git("push", "origin", tag)
         self.repo.fetch()
+
+    def test_publish_higher_than_published_promotes_latest(self):
+        self.publish_tag("v1.3.0")
         self.repo.extra_records = [
             {"tag_name": "v2.0.0", "draft": False, "prerelease": False},
             {"tag_name": "v3.0.0-rc.1", "draft": False, "prerelease": True},
@@ -237,13 +240,35 @@ class ReleaseBehavior(unittest.TestCase):
         self.repo.latest = "v2.0.0"
         self.assertEqual(
             self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v2.0.0")
-        self.repo.release("v1.2.0", self.source)
-        self.repo.release("v1.2.0", self.source, publish=True)
+        self.repo.release("v1.3.0", self.source)
+        self.repo.release("v1.3.0", self.source, publish=True)
         self.assertEqual(self.repo.release_commands, ["create", "edit"])
-        self.assertFalse(self.repo.releases["v1.2.0"]["draft"])
+        self.assertFalse(self.repo.releases["v1.3.0"]["draft"])
         self.assertEqual(
             self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v2.0.0")
-        self.repo.release("v1.2.0", self.source, publish=True)
+        self.repo.release("v1.3.0", self.source, publish=True)
+
+    def test_prerelease_and_draft_higher_records_never_block_latest(self):
+        self.publish_tag("v2.1.0")
+        # Only a prerelease and a draft sit above v2.1.0: neither is published
+        # stable, so the publish passes --latest=true and Latest advances to it.
+        self.repo.extra_records = [
+            {"tag_name": "v3.0.0-rc.1", "draft": False, "prerelease": True},
+            {"tag_name": "v9.9.9", "draft": True, "prerelease": False},
+        ]
+        self.repo.latest = "v1.9.0"
+        self.repo.releases["v1.9.0"] = {"tag_name": "v1.9.0", "draft": False, "prerelease": False}
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v1.9.0")
+        self.repo.release("v2.1.0", self.source)
+        self.repo.release("v2.1.0", self.source, publish=True)
+        self.assertEqual(self.repo.release_commands, ["create", "edit"])
+        self.assertFalse(self.repo.releases["v2.1.0"]["draft"])
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v2.1.0")
+        self.repo.release("v2.1.0", self.source, publish=True)
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v2.1.0")
         self.assertEqual(self.repo.release_commands, ["create", "edit"])
 
     def test_release_listing_pagination_walks_all_pages(self):
