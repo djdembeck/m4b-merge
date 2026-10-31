@@ -689,6 +689,28 @@ impl Tagger {
         output_path: P,
         metadata: &BookMetadata,
     ) -> Result<()> {
+        let artist =
+            if metadata.authors.is_empty() { None } else { Some(metadata.authors.join(", ")) };
+
+        self.write_chapters_txt_with(
+            output_path,
+            &metadata.title,
+            artist.as_deref(),
+            &metadata.chapters,
+        )
+    }
+
+    /// Write chapters to a chapters.txt file using explicit header values.
+    ///
+    /// Used when chapters were resolved without provider metadata (generated
+    /// from the input tracks), where there is no [`BookMetadata`] to export.
+    pub fn write_chapters_txt_with<P: AsRef<Path>>(
+        &self,
+        output_path: P,
+        album: &str,
+        artist: Option<&str>,
+        chapters: &[crate::metadata::Chapter],
+    ) -> Result<()> {
         let path = output_path.as_ref();
 
         debug!("Writing chapters.txt to: {}", path.display());
@@ -696,14 +718,15 @@ impl Tagger {
         // Build chapters content
         let mut content = String::new();
 
-        // Add metadata headers
-        if !metadata.authors.is_empty() {
-            content.push_str(&format!("## artist: {}\n", metadata.authors.join(", ")));
+        // Add headers
+        if let Some(artist) = artist.filter(|artist| !artist.is_empty()) {
+            content.push_str(&format!("## artist: {}\n", artist));
         }
-        content.push_str(&format!("## album: {}\n", metadata.title));
+        content.push_str(&format!("## album: {}\n", album));
 
         // Add total duration if available
-        if let Some(duration) = metadata.total_duration() {
+        let total_duration = chapters.iter().map(|chapter| chapter.end_time()).max();
+        if let Some(duration) = total_duration {
             content.push_str(&format!("## total-duration: {}\n", format_duration(duration)));
         }
 
@@ -711,7 +734,7 @@ impl Tagger {
         content.push('\n');
 
         // Add chapters
-        for chapter in &metadata.chapters {
+        for chapter in chapters {
             let timestamp = format_duration(chapter.start_time);
             content.push_str(&format!("{} {}\n", timestamp, chapter.title));
         }
@@ -1321,6 +1344,29 @@ mod tests {
         assert!(content.contains("## album: Test Book"));
         assert!(content.contains("00:00:00.000 Chapter 1"));
         assert!(content.contains("00:10:00.000 Chapter 2"));
+    }
+
+    #[test]
+    fn test_write_chapters_txt_without_artist() {
+        let temp_dir = TempDir::new().unwrap();
+        let chapters_path = temp_dir.path().join("audiobook.chapters.txt");
+
+        // Generated chapters have no provider metadata: no artist header, and the
+        // album falls back to the output name.
+        let chapters = vec![
+            Chapter::new("Chapter 01", Duration::from_secs(0), Duration::from_secs(5)),
+            Chapter::new("Chapter 02", Duration::from_secs(5), Duration::from_secs(5)),
+        ];
+
+        let tagger = Tagger::new();
+        tagger.write_chapters_txt_with(&chapters_path, "audiobook", None, &chapters).unwrap();
+
+        let content = std::fs::read_to_string(&chapters_path).unwrap();
+        assert!(!content.contains("## artist:"));
+        assert!(content.contains("## album: audiobook"));
+        assert!(content.contains("## total-duration: 00:00:10.000"));
+        assert!(content.contains("00:00:00.000 Chapter 01"));
+        assert!(content.contains("00:00:05.000 Chapter 02"));
     }
 
     #[test]
