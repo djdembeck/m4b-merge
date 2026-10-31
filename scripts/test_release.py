@@ -2,6 +2,7 @@
 """Real git-history regressions; only the remote GitHub transport is replaced."""
 import copy
 import json
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -17,7 +18,11 @@ class LocalGitHub(release.Repository):
         self.pulls = []
         self.statuses = []
         self.releases = {}
+        self.extra_records = []
         self.release_commands = []
+        self.list_error = None
+        self.list_calls = 0
+        self.latest = None
 
     def repository(self):
         return "example/m4b-merge"
@@ -38,10 +43,29 @@ class LocalGitHub(release.Repository):
         if path.startswith("statuses/"):
             self.statuses.append(fields)
             return fields
-        if path.startswith("releases/tags/"):
-            record = self.releases.get(path.removeprefix("releases/tags/"))
+        if path == "releases/latest":
+            record = (self.releases.get(self.latest) or next(
+                (r for r in self.extra_records if r.get("tag_name") == self.latest), None)) \
+                if self.latest is not None else None
             if record is None:
-                raise release.ReleaseError("HTTP 404: Not Found (no release for tag)")
+                raise release.ReleaseError("HTTP 404: Not Found")
+            return copy.deepcopy(record)
+        if path.startswith("releases?"):
+            # GitHub doc semantics: the list includes drafts for authorized
+            # users, so the store (dict) plus injected records are served.
+            params = dict(part.split("=", 1) for part in path[len("releases?"):].split("&") if "=" in part)
+            per_page, page = int(params.get("per_page", "30")), int(params.get("page", "1"))
+            if self.list_error is not None:
+                raise release.ReleaseError(self.list_error)
+            records = list(self.releases.values()) + self.extra_records
+            start = (page - 1) * per_page
+            self.list_calls += 1
+            return copy.deepcopy(records[start:start + per_page])
+        if path.startswith("releases/tags/"):
+            # Published-release lookup only: drafts are not disclosed here.
+            record = self.releases.get(path.removeprefix("releases/tags/"))
+            if record is None or record.get("draft"):
+                raise release.ReleaseError("HTTP 404: Not Found (published by-tag lookup)")
             return copy.deepcopy(record)
         raise AssertionError((endpoint, method, fields))
 
@@ -56,7 +80,13 @@ class LocalGitHub(release.Repository):
                 return ""
             self.release_commands.append("edit")
             if "--draft=false" in args:
+                # Newly-published releases default to GitHub Latest unless
+                # the edit explicitly opts out.
+                if record["draft"] and "--latest=false" not in args:
+                    self.latest = tag
                 record["draft"] = False
+            elif "--latest=true" in args:
+                self.latest = tag
             return ""
         return super().run(*args, ok=ok)
 
@@ -162,21 +192,30 @@ class ReleaseBehavior(unittest.TestCase):
         self.assertEqual(self.repo.remote_git("rev-parse", "refs/tags/v1.0.0"), initial)
 
     def test_release_draft_publish_cycle_is_idempotent(self):
-        initial = self.git("rev-parse", "v1.0.0")
-        self.repo.release("v1.0.0", initial)
+        # v1.10.0 beats the published v1.9.0 numerically, not lexically.
+        self.repo.extra_records.append(
+            {"tag_name": "v1.9.0", "draft": False, "prerelease": False})
+        self.repo.latest = "v1.9.0"
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v1.9.0")
+        self.assertEqual(self.repo.reserve(self.source, version="v1.10.0"), "v1.10.0")
+        self.repo.fetch()
+        self.repo.release("v1.10.0", self.source)
         self.assertEqual(self.repo.release_commands, ["create"])
-        draft = self.repo.releases["v1.0.0"]
+        draft = self.repo.releases["v1.10.0"]
         self.assertTrue(draft["draft"])
-        self.repo.release("v1.0.0", initial)
+        self.repo.release("v1.10.0", self.source)
         self.assertEqual(self.repo.release_commands, ["create"])
-        self.assertIs(self.repo.releases["v1.0.0"], draft)
-        self.repo.release("v1.0.0", initial, publish=True)
+        self.assertIs(self.repo.releases["v1.10.0"], draft)
+        self.repo.release("v1.10.0", self.source, publish=True)
         self.assertEqual(self.repo.release_commands, ["create", "edit"])
-        self.assertFalse(self.repo.releases["v1.0.0"]["draft"])
-        self.repo.release("v1.0.0", initial, publish=True)
+        self.assertFalse(self.repo.releases["v1.10.0"]["draft"])
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v1.10.0")
+        self.repo.release("v1.10.0", self.source, publish=True)
         self.assertEqual(self.repo.release_commands, ["create", "edit"])
         self.assertEqual(len(self.repo.releases), 1)
-        self.assertEqual(self.repo.remote_git("rev-parse", "refs/tags/v1.0.0"), initial)
+        self.assertEqual(self.repo.remote_git("rev-parse", "refs/tags/v1.10.0"), self.source)
 
     def test_publish_without_existing_draft_is_refused(self):
         self.git("tag", "v1.1.0", self.source)
@@ -185,6 +224,61 @@ class ReleaseBehavior(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "Cannot finalize a missing draft release"):
             self.repo.release("v1.1.0", self.source, publish=True)
         self.assertEqual(self.repo.releases, {})
+
+    def test_delayed_lower_publish_keeps_latest_on_higher_published_release(self):
+        self.git("tag", "v1.2.0", self.source)
+        self.git("push", "origin", "v1.2.0")
+        self.repo.fetch()
+        self.repo.extra_records = [
+            {"tag_name": "v2.0.0", "draft": False, "prerelease": False},
+            {"tag_name": "v3.0.0-rc.1", "draft": False, "prerelease": True},
+            {"tag_name": "v9.9.9", "draft": True, "prerelease": False},
+        ]
+        self.repo.latest = "v2.0.0"
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v2.0.0")
+        self.repo.release("v1.2.0", self.source)
+        self.repo.release("v1.2.0", self.source, publish=True)
+        self.assertEqual(self.repo.release_commands, ["create", "edit"])
+        self.assertFalse(self.repo.releases["v1.2.0"]["draft"])
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v2.0.0")
+        self.repo.release("v1.2.0", self.source, publish=True)
+        self.assertEqual(self.repo.release_commands, ["create", "edit"])
+
+    def test_release_listing_pagination_walks_all_pages(self):
+        initial = self.git("rev-parse", "v1.0.0")
+        self.repo.extra_records = [{"tag_name": f"v0.0.{i}", "draft": False, "prerelease": False}
+                                   for i in range(105)]
+        self.repo.latest = "v0.0.104"
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v0.0.104")
+        self.repo.release("v1.0.0", initial)
+        self.assertEqual(self.repo.release_commands, ["create"])
+        self.assertGreaterEqual(self.repo.list_calls, 2)
+        self.repo.release("v1.0.0", initial, publish=True)
+        self.assertEqual(self.repo.release_commands, ["create", "edit"])
+        # v1.0.0 is the new highest published stable: the seeded page-2 Latest advances.
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v1.0.0")
+
+    def test_release_duplicate_tag_records_fail_closed(self):
+        self.repo.extra_records = [
+            {"tag_name": "v1.0.0", "draft": False, "prerelease": False},
+            {"tag_name": "v1.0.0", "draft": True, "prerelease": False},
+        ]
+        with self.assertRaisesRegex(release.ReleaseError, "Multiple release records share tag v1.0.0"):
+            self.repo.release("v1.0.0", self.git("rev-parse", "v1.0.0"))
+        self.assertEqual(self.repo.release_commands, [])
+
+    def test_release_listing_failure_propagates_without_release_mutation(self):
+        initial = self.git("rev-parse", "v1.0.0")
+        for message in ("HTTP 502: Bad Gateway (remote registry unavailable)", "HTTP 403: Rate limit exceeded, please try again later."):
+            self.repo.list_error = message
+            with self.assertRaisesRegex(release.ReleaseError, re.escape(message)):
+                self.repo.release("v1.0.0", initial, publish=True)
+        self.assertEqual(self.repo.releases, {})
+        self.assertEqual(self.repo.release_commands, [])
 
     def test_unreserved_automatic_candidate_is_coalesced_but_manual_is_not(self):
         old = self.source

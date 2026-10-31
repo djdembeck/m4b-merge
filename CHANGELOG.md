@@ -31,6 +31,7 @@ All notable changes to this project will be documented in this file. See [standa
   bounds are advisory, but a functional merge/probe failure fails the
   job and blocks the tag, and on that path the report is never written.
 - Release pipeline: versions are prepared on `develop` and promoted to `main` as a frozen tree; the `Release` workflow publishes tested `main` SHAs without source edits, merge-back, or `latest` writes. release-please configuration and manifest removed.
+- Release helper finalizes drafts from the authenticated, paginated release listing (exact `tag_name` match; duplicate records fail closed; listing failures propagate without creating releases) and publishes with `--latest` computed from published non-prerelease semver releases, so a delayed lower release never rolls back the GitHub *Latest* label.
 - **Breaking:** `--asin` renamed to `--metadata-id` (accepts an ASIN or an AudiobookDB
   book ID); new `--metadata-source` flag
   (default `audiobookdb`) selects the metadata source, and new `--api-url` overrides the
