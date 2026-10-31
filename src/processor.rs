@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
 use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
-use crate::tagging::{Tagger, TaggingError, format_duration};
+use crate::tagging::{Tagger, TaggingError, describe_out_of_range_chapters, format_duration};
 
 /// Static metadata ID regex compiled once at startup
 static METADATA_ID_REGEX: OnceLock<regex::Regex> = OnceLock::new();
@@ -451,42 +451,31 @@ impl Processor {
         // Reject chapters that start at or beyond the merged file's duration.
         // mp4ameta writes start times verbatim, so embedding them would create
         // unplayable entries; dropping them would silently shorten the chapter
-        // list, so fail the book and name every offending chapter.
+        // list, so fail the book and name every offending chapter. The merged
+        // output is removed first: a failed book must not look complete to
+        // anything scanning the output directory.
         if !chapters.is_empty() {
-            match self.ffmpeg.get_duration(&merged_path) {
-                Ok(duration) => {
-                    let out_of_range: Vec<_> = chapters
-                        .iter()
-                        .filter(|chapter| chapter.is_out_of_range(duration))
-                        .collect();
-                    if !out_of_range.is_empty() {
-                        let details = out_of_range
-                            .iter()
-                            .map(|chapter| {
-                                format!(
-                                    "'{}' at {}",
-                                    chapter.title,
-                                    format_duration(chapter.start_time)
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        return Err(ProcessorError::ChaptersOutOfRange {
-                            path: merged_path,
-                            count: out_of_range.len(),
-                            playlength: format_duration(duration),
-                            details,
-                        });
-                    }
-                }
+            let duration = match self.ffmpeg.get_duration(&merged_path) {
+                Ok(duration) => duration,
                 Err(e) => {
                     warn!(
                         "Could not determine duration of {}; refusing to tag chapters: {}",
                         merged_path.display(),
                         e
                     );
+                    Self::discard_output(&merged_path);
                     return Err(ProcessorError::ProbeFailed { path: merged_path, source: e });
                 }
+            };
+
+            if let Some((count, details)) = describe_out_of_range_chapters(&chapters, duration) {
+                Self::discard_output(&merged_path);
+                return Err(ProcessorError::ChaptersOutOfRange {
+                    path: merged_path,
+                    count,
+                    playlength: format_duration(duration),
+                    details,
+                });
             }
         }
 
@@ -579,6 +568,16 @@ impl Processor {
             metadata_applied,
             files_moved,
         })
+    }
+
+    /// Remove a merged output that failed post-merge validation.
+    ///
+    /// The output keeps its final name once merged, so leaving it behind makes a
+    /// rejected book look like a finished one. Source files are never touched.
+    fn discard_output(path: &std::path::Path) {
+        if let Err(e) = std::fs::remove_file(path) {
+            warn!("Failed to remove rejected output {}: {}", path.display(), e);
+        }
     }
 
     /// Discover audio files from input paths
@@ -1338,12 +1337,10 @@ mod tests {
             other => panic!("expected ChaptersOutOfRange, got {other:?}"),
         }
 
-        // The check runs before tagging: the copied output has no chapters and
-        // no chapters.txt was written.
+        // The check runs before tagging, so nothing was tagged or written, and the
+        // rejected merge is removed rather than left looking like a finished book.
         let output = temp_dir.path().join("output/Test Author/Book abc123def456.m4b");
-        assert!(output.exists());
-        let tag = mp4ameta::Tag::read_from_path(&output).unwrap();
-        assert!(tag.chapter_list().is_empty(), "chapters must not be embedded");
+        assert!(!output.exists(), "rejected output must not be left behind");
         assert!(!output.with_extension("chapters.txt").exists());
 
         // And before the source files are moved.
@@ -1412,6 +1409,10 @@ mod tests {
             other => panic!("expected ProbeFailed, got {other:?}"),
         }
         assert!(message.contains("refusing to tag chapters"), "{message}");
+
+        // The unprobeable merge must not be left behind either.
+        let output = temp_dir.path().join("output/Test Author/Book abc123def456.m4b");
+        assert!(!output.exists(), "unprobeable output must not be left behind");
     }
 
     #[tokio::test]
