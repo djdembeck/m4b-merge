@@ -50,6 +50,9 @@ All notable changes to this project will be documented in this file. See [standa
 * **ffmpeg:** remove dead prepare_concat_file_list, canonicalize concat paths ([#423](https://github.com/djdembeck/m4b-merge/issues/423)) ([b148e39](https://github.com/djdembeck/m4b-merge/commit/b148e39ef6a86610945059b6692ae481eeb4a85d))
 * use absolute paths for concat file list ([#419](https://github.com/djdembeck/m4b-merge/issues/419)) ([8858d6a](https://github.com/djdembeck/m4b-merge/commit/8858d6a3364a3c4276b02ed0d40fa162a8d0915e))
 
+### Fixed
+- Audnexus lookups now fetch chapter markers from `/books/{asin}/chapters` (the book endpoint never returns them), honor `isAccurate`, and carry the configured region on both requests.
+
 ## [1.0.0](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.0) (2026-07-20)
 
 
