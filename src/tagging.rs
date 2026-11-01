@@ -44,6 +44,11 @@ pub enum TaggingError {
 
     #[error("Duplicate chapter start times detected")]
     DuplicateChapterTimes,
+
+    #[error(
+        "Refusing to embed chapters for {path}: {count} chapter(s) start at or past the {playlength} playlength ({details})"
+    )]
+    ChaptersOutOfRange { path: PathBuf, count: usize, playlength: String, details: String },
 }
 
 /// Result type for tagging operations
@@ -80,6 +85,31 @@ fn truncate_chapter_title(title: &str) -> String {
     }
 
     title[..end].to_string()
+}
+
+/// Describe every chapter that starts at or beyond `file_duration`.
+///
+/// Returns `(count, details)` for the offending chapters — ready to drop into an
+/// error message — or `None` when every chapter is in range. mp4ameta writes
+/// start times verbatim, so a chapter at or beyond the file duration can only
+/// become an unplayable entry.
+pub(crate) fn describe_out_of_range_chapters(
+    chapters: &[crate::metadata::Chapter],
+    file_duration: Duration,
+) -> Option<(usize, String)> {
+    let out_of_range: Vec<&crate::metadata::Chapter> =
+        chapters.iter().filter(|chapter| chapter.is_out_of_range(file_duration)).collect();
+    if out_of_range.is_empty() {
+        return None;
+    }
+
+    let details = out_of_range
+        .iter()
+        .map(|chapter| format!("'{}' at {}", chapter.title, format_duration(chapter.start_time)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Some((out_of_range.len(), details))
 }
 
 /// The prefix of `chapters` that a Nero `chpl` atom can represent.
@@ -538,7 +568,7 @@ impl Tagger {
     ///
     /// Returns `TaggingError` if:
     /// - File doesn't exist
-    /// - Chapters are invalid (empty, duplicates)
+    /// - Chapters are invalid (duplicates, or starting at/beyond the file duration)
     /// - Writing to file fails
     pub fn embed_chapters<P: AsRef<Path>>(
         &self,
@@ -574,6 +604,21 @@ impl Tagger {
         // Read existing tag
         let mut tag = mp4ameta::Tag::read_from_path(path)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to read tag: {}", e)))?;
+
+        // Reject chapters at or beyond the file duration before writing. mp4ameta
+        // stores start times verbatim, so such a chapter becomes an unplayable
+        // entry. This guard lives at the write boundary so every caller — this
+        // API, `process_completed_book`, and the processor — is covered.
+        if let Some((count, details)) =
+            describe_out_of_range_chapters(&chapters_vec, tag.info.duration)
+        {
+            return Err(TaggingError::ChaptersOutOfRange {
+                path: path.to_path_buf(),
+                count,
+                playlength: format_duration(tag.info.duration),
+                details,
+            });
+        }
 
         // Clear existing chapters
         tag.chapter_list_mut().clear();
@@ -1003,7 +1048,7 @@ fn convert_cover_to_jpeg(image_data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Format a Duration as HH:MM:SS.mmm
-fn format_duration(duration: Duration) -> String {
+pub(crate) fn format_duration(duration: Duration) -> String {
     let total_millis = duration.as_millis();
     let hours = total_millis / 3_600_000;
     let minutes = (total_millis % 3_600_000) / 60_000;

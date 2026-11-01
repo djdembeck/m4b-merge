@@ -420,7 +420,7 @@ fn test_chapter_read_ignores_stale_track_after_replacement() {
 }
 
 #[test]
-fn test_chapter_long_duration() {
+fn test_chapter_embed_rejects_start_past_file_duration() {
     if !ffmpeg_available() {
         return;
     }
@@ -431,45 +431,72 @@ fn test_chapter_long_duration() {
     // Create a 10-second test M4B file
     create_test_m4b(&m4b_path, 10);
 
-    // Define a chapter with start_time > 24 hours (90000s = 25 hours)
-    // to verify no overflow or truncation occurs
-    let long_start = Duration::from_secs(90_000); // 25 hours
+    // A chapter 25 hours into a 10-second file cannot be represented; the
+    // embedding boundary must reject it instead of writing an unplayable entry.
+    let long_start = Duration::from_secs(90_000);
     let chapters = vec![
         m4b_merge::metadata::Chapter::new("Early Chapter", Duration::ZERO, Duration::from_secs(5)),
         m4b_merge::metadata::Chapter::new("Late Chapter", long_start, Duration::from_secs(3_600)),
     ];
 
-    // Embed chapters using Tagger
     let tagger = m4b_merge::tagging::Tagger::new();
-    tagger
+    let err = tagger
         .embed_chapters(&m4b_path, &chapters)
-        .expect("Failed to embed chapters with long duration");
+        .expect_err("out-of-range chapter must be rejected");
 
-    // Read back chapters
-    let read_chapters =
+    match &err {
+        m4b_merge::tagging::TaggingError::ChaptersOutOfRange {
+            count, playlength, details, ..
+        } => {
+            assert_eq!(*count, 1);
+            assert_eq!(playlength, "00:00:10.000");
+            assert!(details.contains("Late Chapter"), "{details}");
+        }
+        other => panic!("expected ChaptersOutOfRange, got {other:?}"),
+    }
+
+    // Nothing was written: the earlier, in-range chapter is not embedded either.
+    let read_back =
         m4b_merge::chapters::read_chapters(&m4b_path, None).expect("Failed to read chapters");
+    assert!(read_back.is_empty(), "rejected embed must leave the chapter list untouched");
+}
 
-    // Verify we have both chapters
-    assert_eq!(read_chapters.len(), 2, "Should have 2 chapters after embedding long duration");
+#[test]
+fn test_process_completed_book_does_not_embed_out_of_range_chapters() {
+    if !ffmpeg_available() {
+        return;
+    }
 
-    // Verify the long-duration chapter start_time survived without overflow
-    let late_chapter = read_chapters
-        .iter()
-        .find(|c| c.title == "Late Chapter")
-        .expect("Late Chapter should be readable back");
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("completed.m4b");
+    create_test_m4b(&m4b_path, 10);
 
-    assert_eq!(
-        late_chapter.start_time,
-        (long_start.as_secs() * 1000) as u64,
-        "Late chapter start_time should be {}ms (25 hours), got {}ms",
-        long_start.as_secs() * 1000,
-        late_chapter.start_time
+    let metadata = m4b_merge::metadata::BookMetadata::new("id", "Title", "description")
+        .add_chapter(m4b_merge::metadata::Chapter::new(
+            "Intro",
+            Duration::ZERO,
+            Duration::from_secs(5),
+        ))
+        .add_chapter(m4b_merge::metadata::Chapter::new(
+            "End Credits",
+            Duration::from_secs(20),
+            Duration::from_secs(30),
+        ));
+
+    let tagger = m4b_merge::tagging::Tagger::new();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime
+        .block_on(tagger.process_completed_book(&m4b_path, &metadata, &["a.mp3"], None))
+        .expect("chapter failure is logged, not fatal");
+
+    // `process_completed_book` warns and continues, but the invalid chapter list
+    // must not have been written.
+    let tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag");
+    assert!(
+        tag.chapter_list().is_empty(),
+        "out-of-range chapters must not reach the file: {:?}",
+        tag.chapter_list()
     );
-
-    // Duration is derived from the next chapter's start_time by mp4ameta.
-    // For the last chapter there is no "next chapter", so duration may be 0.
-    // The important invariant is that the start_time survived without overflow.
-    assert_eq!(late_chapter.duration, 0, "Last chapter duration should be 0 (no next chapter)");
 }
 
 // ---------------------------------------------------------------------------
