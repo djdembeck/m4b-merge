@@ -165,6 +165,36 @@ fn validate_and_sort_chapters(chapters: &mut [crate::metadata::Chapter]) -> Resu
     Ok(())
 }
 
+/// The tagging operations the processor applies to a merged output.
+///
+/// `Processor` holds this trait object so tests can substitute a mock and
+/// verify failure behavior (for example, that a failed chapter embed fails
+/// the book) without driving a real [`Tagger`] down the failure path.
+pub trait TaggerOps: Send + Sync {
+    fn write_metadata(&self, file_path: &Path, metadata: &BookMetadata) -> Result<()>;
+
+    fn embed_cover<'a>(
+        &'a self,
+        file_path: &'a Path,
+        cover_url: &'a str,
+    ) -> std::pin::Pin<Box<dyn core::future::Future<Output = Result<()>> + Send + 'a>>;
+
+    fn embed_chapters(&self, file_path: &Path, chapters: &[crate::metadata::Chapter])
+    -> Result<()>;
+
+    fn write_chapters_txt(&self, output_path: &Path, metadata: &BookMetadata) -> Result<()>;
+
+    fn write_chapters_txt_with(
+        &self,
+        output_path: &Path,
+        album: &str,
+        artist: Option<&str>,
+        chapters: &[crate::metadata::Chapter],
+    ) -> Result<()>;
+
+    fn move_completed_files(&self, files: &[PathBuf], dest_dir: &Path) -> Result<Vec<PathBuf>>;
+}
+
 /// Handles metadata tagging and file operations for audiobooks
 #[derive(Debug, Clone)]
 pub struct Tagger {
@@ -410,17 +440,23 @@ impl Tagger {
         // Year
         if let Some(year) = metadata.year {
             tag.set_year(year.to_string());
+        } else {
+            tag.remove_year();
         }
 
         // Comment (description)
         if !metadata.description.is_empty() {
             tag.set_comment(&metadata.description);
+        } else {
+            tag.remove_comments();
         }
 
         // Narrator (composer is the convention used by Prologue, Audiobookshelf,
         // and Audible for audiobook narrators)
         if !metadata.narrators.is_empty() {
             tag.set_composer(metadata.narrators.join(", "));
+        } else {
+            tag.remove_composers();
         }
 
         // Series information. Grouping also carries any unrelated user content,
@@ -938,6 +974,46 @@ impl Tagger {
 
         info!("Completed post-processing for: {}", output.display());
         Ok(())
+    }
+}
+
+impl TaggerOps for Tagger {
+    fn write_metadata(&self, file_path: &Path, metadata: &BookMetadata) -> Result<()> {
+        self.write_metadata(file_path, metadata)
+    }
+
+    fn embed_cover<'a>(
+        &'a self,
+        file_path: &'a Path,
+        cover_url: &'a str,
+    ) -> std::pin::Pin<Box<dyn core::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(self.embed_cover(file_path, cover_url))
+    }
+
+    fn embed_chapters(
+        &self,
+        file_path: &Path,
+        chapters: &[crate::metadata::Chapter],
+    ) -> Result<()> {
+        self.embed_chapters(file_path, chapters)
+    }
+
+    fn write_chapters_txt(&self, output_path: &Path, metadata: &BookMetadata) -> Result<()> {
+        self.write_chapters_txt(output_path, metadata)
+    }
+
+    fn write_chapters_txt_with(
+        &self,
+        output_path: &Path,
+        album: &str,
+        artist: Option<&str>,
+        chapters: &[crate::metadata::Chapter],
+    ) -> Result<()> {
+        self.write_chapters_txt_with(output_path, album, artist, chapters)
+    }
+
+    fn move_completed_files(&self, files: &[PathBuf], dest_dir: &Path) -> Result<Vec<PathBuf>> {
+        self.move_completed_files(files, dest_dir)
     }
 }
 
@@ -1651,6 +1727,41 @@ mod tests {
         Tagger::apply_metadata(&mut tag, &metadata);
 
         assert_eq!(tag.composer(), None);
+    }
+
+    #[test]
+    fn test_apply_metadata_removes_stale_year_comment_composer_when_absent() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "").add_author("Author");
+
+        let mut tag = mp4ameta::Tag::default();
+        tag.set_year("2019");
+        tag.set_comment("Old description");
+        tag.set_composer("Old Narrator");
+
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.year(), None, "retagging must not keep a stale year");
+        assert_eq!(tag.comment(), None, "retagging must not keep a stale comment");
+        assert_eq!(tag.composer(), None, "retagging must not keep a stale composer");
+    }
+
+    #[test]
+    fn test_apply_metadata_keeps_present_year_comment_composer() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "New description")
+            .add_author("Author")
+            .add_narrator("Narrator One")
+            .with_year(2020);
+
+        let mut tag = mp4ameta::Tag::default();
+        tag.set_year("2019");
+        tag.set_comment("Old description");
+        tag.set_composer("Old Narrator");
+
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.year(), Some("2020"));
+        assert_eq!(tag.comment(), Some("New description"));
+        assert_eq!(tag.composer(), Some("Narrator One"));
     }
 
     #[test]

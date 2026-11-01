@@ -10,7 +10,9 @@ use crate::config::Config;
 use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
 use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
-use crate::tagging::{Tagger, TaggingError, describe_out_of_range_chapters, format_duration};
+use crate::tagging::{
+    Tagger, TaggerOps, TaggingError, describe_out_of_range_chapters, format_duration,
+};
 
 /// Static metadata ID regex compiled once at startup
 static METADATA_ID_REGEX: OnceLock<regex::Regex> = OnceLock::new();
@@ -170,7 +172,7 @@ pub struct Processor {
     ffmpeg: Arc<FFmpeg>,
     api_client: Option<MetadataSource>,
     merger: Merger,
-    tagger: Tagger,
+    tagger: Arc<dyn TaggerOps>,
 }
 
 impl Processor {
@@ -199,7 +201,7 @@ impl Processor {
         };
 
         let merger = Merger::new(ffmpeg.clone());
-        let tagger = Tagger::new();
+        let tagger = Arc::new(Tagger::new());
 
         Ok(Self { config, ffmpeg, api_client, merger, tagger })
     }
@@ -210,9 +212,9 @@ impl Processor {
         config: Config,
         ffmpeg: Arc<FFmpeg>,
         api_client: Option<MetadataSource>,
+        tagger: Arc<dyn TaggerOps>,
     ) -> Self {
         let merger = Merger::new(ffmpeg.clone());
-        let tagger = Tagger::new();
 
         Self { config, ffmpeg, api_client, merger, tagger }
     }
@@ -512,7 +514,13 @@ impl Processor {
         // they are applied even when no provider metadata was available.
         if !chapters.is_empty() {
             if let Err(e) = self.tagger.embed_chapters(&merged_path, &chapters) {
-                warn!("Failed to embed chapters: {}", e);
+                // The pre-merge guard probes the ffprobe duration, but mp4ameta
+                // validates chapters against the container's mvhd duration, which
+                // can be shorter. A failed embed would otherwise ship a
+                // "successful" book with no chapters, so discard the merged
+                // output and fail the book.
+                Self::discard_output(&merged_path);
+                return Err(ProcessorError::Tagging(e));
             } else {
                 info!("Successfully embedded {} chapters", chapters.len());
             }
@@ -816,11 +824,6 @@ impl Processor {
     pub fn merger(&self) -> &Merger {
         &self.merger
     }
-
-    /// Get the tagger
-    pub fn tagger(&self) -> &Tagger {
-        &self.tagger
-    }
 }
 
 #[cfg(test)]
@@ -829,6 +832,7 @@ mod tests {
     use crate::api::{MetadataRegion, MetadataSourceKind};
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
+    use std::path::Path;
     use tempfile::TempDir;
 
     /// Build a test `Config` with the standard dry-run defaults
@@ -1438,5 +1442,109 @@ mod tests {
             }
             other => panic!("expected PartialFailure, got {other:?}"),
         }
+    }
+
+    /// A no-op tagger whose `embed_chapters` fails, so a chapter-embed failure
+    /// can be tested without driving the real [`Tagger`] down the failure path.
+    struct MockTagger {
+        /// The path handed to `embed_chapters`, for asserting which file was
+        /// about to be (but must not) left behind.
+        embed_path: std::sync::Mutex<Option<PathBuf>>,
+    }
+
+    impl MockTagger {
+        fn new() -> Self {
+            Self { embed_path: std::sync::Mutex::new(None) }
+        }
+
+        fn embedded_into(&self) -> Option<PathBuf> {
+            self.embed_path.lock().unwrap().clone()
+        }
+    }
+
+    impl TaggerOps for MockTagger {
+        fn write_metadata(&self, _: &Path, _: &BookMetadata) -> crate::tagging::Result<()> {
+            Ok(())
+        }
+
+        fn embed_cover<'a>(
+            &'a self,
+            _: &'a Path,
+            _: &'a str,
+        ) -> std::pin::Pin<
+            Box<dyn core::future::Future<Output = crate::tagging::Result<()>> + Send + 'a>,
+        > {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn embed_chapters(
+            &self,
+            file_path: &Path,
+            _: &[crate::metadata::Chapter],
+        ) -> crate::tagging::Result<()> {
+            *self.embed_path.lock().unwrap() = Some(file_path.to_path_buf());
+            Err(TaggingError::Mp4Meta("mock chapter embed failure".to_string()))
+        }
+
+        fn write_chapters_txt(&self, _: &Path, _: &BookMetadata) -> crate::tagging::Result<()> {
+            Ok(())
+        }
+
+        fn write_chapters_txt_with(
+            &self,
+            _: &Path,
+            _: &str,
+            _: Option<&str>,
+            _: &[crate::metadata::Chapter],
+        ) -> crate::tagging::Result<()> {
+            Ok(())
+        }
+
+        fn move_completed_files(
+            &self,
+            _: &[PathBuf],
+            _: &Path,
+        ) -> crate::tagging::Result<Vec<PathBuf>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_group_embed_failure_discards_output() {
+        let temp_dir = TempDir::new().unwrap();
+        let api_url = spawn_metadata_api();
+        let config = api_test_config(&temp_dir, &api_url);
+        let ffmpeg = Arc::new(FFmpeg::discover().unwrap());
+        let tagger = Arc::new(MockTagger::new());
+        let processor = Processor::with_components(config, ffmpeg, None, tagger.clone());
+
+        let book_dir = temp_dir.path().join("Book [xyz987uvw654]");
+        let input = create_test_m4b(&book_dir, 10);
+        let group = AudioGroup {
+            name: "Book [xyz987uvw654]".to_string(),
+            files: vec![AudioFile::new(input.clone()).unwrap()],
+            disc_number: None,
+        };
+
+        // Chapters are generated from the input tracks (no API client), and
+        // in range, so the ffprobe guard passes — but the mock tagger makes
+        // the actual embed fail.
+        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+
+        assert!(
+            matches!(err, ProcessorError::Tagging(TaggingError::Mp4Meta(_))),
+            "a failed chapter embed must fail the book, got {err:?}",
+        );
+
+        // The merged output must be discarded, not shipped as a "successful"
+        // book with no chapters.
+        let expected = temp_dir.path().join("output/Book [xyz987uvw654].m4b");
+        assert_eq!(
+            tagger.embedded_into().as_ref(),
+            Some(&expected),
+            "embed must have targeted the merged output"
+        );
+        assert!(!expected.exists(), "embed failure must not leave the output behind");
+        assert!(input.exists(), "source file must not be moved after a failed embed");
     }
 }

@@ -201,7 +201,7 @@ jobs:
             echo '| Concern | Enabled | Gates |'
             echo '| --- | --- | --- |'
             echo "| workflow | $(flag "$W") | workflow-lint (actionlint over .github/workflows/**) |"
-            echo "| lint | $(flag "$L") | lint-format (cargo fmt --check, clippy --all-features, cargo audit) |"
+            echo "| lint | $(flag "$L") | lint-format (cargo fmt --check, clippy --all-features; cargo audit is advisory-only in vulncheck.yml) |"
             echo "| build | $(flag "$B") | build (cargo check --all-features) |"
             echo "| test | $(flag "$T") | test (ffmpeg + cargo test --all-features) |"
             echo "| docker | $(flag "$D") | docker-amd64, docker-arm64, docker-manifest |"
