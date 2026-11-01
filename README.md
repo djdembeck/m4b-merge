@@ -7,7 +7,7 @@ A blazing fast CLI tool for merging audiobook files into sorted, tagged M4B file
 
 m4b-merge takes split audio files (MP3, M4A, or M4B) and merges them into a single, consistently tagged M4B file. Originally written in Python and rewritten in Rust, it provides high-performance processing with zero-copy merging for files of the same format, ensuring the original bitrate and sample rate are preserved.
 
-The tool automates metadata lookup by ASIN or AudiobookDB book ID through [AudiobookDB](https://audiobookdb.org) — a community-maintained audiobook metadata database with proper book/release separation and moderated contributions — embeds high-resolution cover art, and maintains chapter markers from source files. When inputs carry no chapters, one chapter per input track is generated instead.
+The tool automates metadata lookup by ASIN or AudiobookDB book ID through [AudiobookDB](https://audiobookdb.org) — a community-maintained audiobook metadata database with proper book/release separation and moderated contributions — embeds high-resolution cover art, and maintains chapter markers. The looked-up provider's chapters are preferred, the first input file's own chapters are used when the provider has none, and only when both are empty is one chapter per input track generated instead.
 
 - [Install](#install)
 - [Usage](#usage)
@@ -122,7 +122,12 @@ m4b-merge --check-ffmpeg
 | `©grp`  | `Series: <name> #<position>`                                  |
 
 A tag with no corresponding metadata is removed, so retagging from a different
-source cannot leave stale values behind.
+source cannot leave stale values behind. The one exception is `©grp`: the group
+is rebuilt only when the metadata carries a narrator or a series name; when it
+carries neither, the existing group is left as is (on a rebuild, legacy
+`Narrator:` and `Series:` segments are dropped, a new series entry is added
+when series metadata is present, and unrelated segments are kept, so a group
+holding only legacy content is cleared entirely).
 
 ## Path Format Variables
 

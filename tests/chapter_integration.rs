@@ -341,6 +341,45 @@ fn test_chapter_embed_caps_count_at_chpl_limit() {
 }
 
 #[test]
+fn test_chapter_embed_caps_chpl_but_keeps_full_track() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("test.m4b");
+    create_test_m4b(&m4b_path, 10);
+
+    // 256 chapters: the Nero `chpl` list is capped at the atom's one-byte
+    // entry count, but the QuickTime chapter track must keep the full list.
+    let chapters: Vec<m4b_merge::metadata::Chapter> = (0..=255)
+        .map(|i| {
+            m4b_merge::metadata::Chapter::new(
+                format!("Chapter {}", i),
+                Duration::from_millis(i as u64 * 10),
+                Duration::from_millis(10),
+            )
+        })
+        .collect();
+
+    let tagger = m4b_merge::tagging::Tagger::new();
+    tagger.embed_chapters(&m4b_path, &chapters).expect("embed chapters");
+
+    let tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read back chapters");
+    assert_eq!(tag.chapter_list().len(), 255, "chpl atom holds at most 255 chapters");
+    assert_eq!(
+        tag.chapter_track().len(),
+        256,
+        "the QuickTime chapter track keeps the uncapped list"
+    );
+    assert_eq!(
+        tag.chapter_track()[255].title,
+        "Chapter 255",
+        "the final chapter must reach the track"
+    );
+}
+
+#[test]
 fn test_chapter_embed_multibyte_title_does_not_panic() {
     if !ffmpeg_available() {
         return;
@@ -397,7 +436,7 @@ fn test_chapter_read_prefers_track_when_chpl_list_is_truncated() {
 }
 
 #[test]
-fn test_chapter_read_ignores_stale_track_after_replacement() {
+fn test_chapter_read_prefers_list_over_stale_track() {
     if !ffmpeg_available() {
         return;
     }
@@ -406,21 +445,8 @@ fn test_chapter_read_ignores_stale_track_after_replacement() {
     let m4b_path = temp_dir.path().join("test.m4b");
     create_test_m4b(&m4b_path, 30);
 
-    // Seed a 10-chapter QuickTime track, as a file from another tool would have.
-    let mut tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag");
-    tag.chapter_track_mut().clear();
-    tag.chapter_track_mut().extend(
-        (0..10)
-            .map(|i| mp4ameta::Chapter::new(Duration::from_secs(i), format!("Old chapter {}", i))),
-    );
-    tag.write_to_path(&m4b_path).expect("write chapter track");
-    assert_eq!(
-        mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag").chapter_track().len(),
-        10
-    );
-
-    // Replace them through the public API. `embed_chapters` writes the list and
-    // leaves the pre-existing track untouched, so the track is now stale.
+    // Write the replacement chapters through the public API so both the
+    // `chpl` list and the QuickTime track hold the same three chapters.
     let chapters = vec![
         m4b_merge::metadata::Chapter::new("New one", Duration::ZERO, Duration::from_secs(10)),
         m4b_merge::metadata::Chapter::new(
@@ -437,10 +463,27 @@ fn test_chapter_read_ignores_stale_track_after_replacement() {
     let tagger = m4b_merge::tagging::Tagger::new();
     tagger.embed_chapters(&m4b_path, &chapters).expect("embed chapters");
 
+    // Now desynchronize the two representations: keep the three-chapter
+    // `chpl` list but write a stale ten-chapter QuickTime track, as an older
+    // write of the same file by another tool would leave behind.
+    let mut tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag");
+    assert_eq!(tag.chapter_list().len(), 3, "list must hold the replacement chapters");
+    tag.chapter_track_mut().clear();
+    tag.chapter_track_mut().extend(
+        (0..10).map(|i| mp4ameta::Chapter::new(Duration::from_secs(i * 3), format!("Old {}", i))),
+    );
+    tag.write_to_path(&m4b_path).expect("write stale chapter track");
+    let planted = mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag");
+    assert_eq!(planted.chapter_list().len(), 3, "list must be untouched by the track write");
+    assert_eq!(planted.chapter_track().len(), 10, "stale track must be present");
+
+    // The two representations disagree without the list being the 255-entry
+    // truncated cap, so `read_chapters` must treat the `chpl` list as the
+    // canonical form rather than falling back to the stale track.
     let read_back =
         m4b_merge::chapters::read_chapters(&m4b_path, None).expect("Failed to read chapters");
 
-    assert_eq!(read_back.len(), 3, "readback must follow the replacement, not the stale track");
+    assert_eq!(read_back.len(), 3, "readback must follow the chpl list, not the stale track");
     assert_eq!(read_back[0].title, "New one");
     assert_eq!(read_back[2].title, "New three");
     assert_eq!(read_back[2].start_time, 20_000);

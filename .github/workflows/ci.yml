@@ -195,6 +195,21 @@ jobs:
             echo "docker=$(flag "$D")"
           } >>"$GITHUB_OUTPUT"
 
+          # The docker concern gates different jobs per event: pushes build and
+          # publish (amd64 on main/develop; arm64 + manifest on main only),
+          # pull requests run docker-check (plus docker-amd64 for eligible
+          # same-repo human PRs), and a manual run triggers none — every
+          # docker job's if expression only accepts pull_request, push to
+          # main/develop, or push to main — so the summary names only the jobs
+          # this event can trigger.
+          if [ "$EVENT_NAME" = 'pull_request' ]; then
+            DOCKER_GATES="docker-check (and docker-amd64 for eligible same-repo human PRs)"
+          elif [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
+            DOCKER_GATES="none on a manual run (each docker job filters on github.event_name: docker-check pull_request only; docker-amd64 push to main/develop or an eligible same-repo human PR; docker-arm64 and docker-manifest push to main only)"
+          else
+            DOCKER_GATES="docker-amd64, docker-arm64 (main only), docker-manifest (main only)"
+          fi
+
           {
             echo '### Changed-path classification'
             echo ''
@@ -204,7 +219,7 @@ jobs:
             echo "| lint | $(flag "$L") | lint-format (cargo fmt --check, clippy --all-features; cargo audit is advisory-only in vulncheck.yml) |"
             echo "| build | $(flag "$B") | build (cargo check --all-features) |"
             echo "| test | $(flag "$T") | test (ffmpeg + cargo test --all-features) |"
-            echo "| docker | $(flag "$D") | docker-amd64, docker-arm64, docker-manifest |"
+            echo "| docker | $(flag "$D") | ${DOCKER_GATES} |"
             echo ''
             echo "> Note: ${NOTE}"
           } >>"$GITHUB_STEP_SUMMARY"

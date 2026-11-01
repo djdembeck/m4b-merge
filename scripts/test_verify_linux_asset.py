@@ -105,6 +105,16 @@ class CheckVersionTests(unittest.TestCase):
             with self.assertRaises(verifier.VerifierFailure):
                 verifier.check_version(Path("m4b-merge"), "2.0.0")
 
+    def test_parse_version_rejects_invalid_format(self):
+        # A missing prefix, a missing component, surplus components, and a
+        # prerelease suffix all must hard-fail with the malformed value named.
+        for version in ("2.0", "v1.2", "v1.2.3.4", "v2.0.0-rc.1"):
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(
+                        SystemExit,
+                        f"Invalid version format: {version!r}"):
+                    verifier.parse_version(version)
+
 
 class CheckELFTests(unittest.TestCase):
     """readelf fixture tests: static musl pass and each hard rejection."""

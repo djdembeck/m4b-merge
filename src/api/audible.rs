@@ -944,7 +944,7 @@ mod tests {
                 let (status, body) = if path.contains("/chapters") {
                     if chapters_status == 404 {
                         (404, r#"{"error":"not found"}"#.to_string())
-                    } else {
+                    } else if chapters_status == 200 {
                         let accurate =
                             is_accurate.map(|value| value.to_string()).unwrap_or("null".into());
                         (
@@ -953,6 +953,11 @@ mod tests {
                                 r#"{{"asin":"B08XYZ1234","isAccurate":{accurate},"chapters":[{{"title":"Chapter 1","startOffsetMs":0,"lengthMs":3600000}},{{"title":"Chapter 2","startOffsetMs":3600000,"lengthMs":3700000}}]}}"#
                             ),
                         )
+                    } else {
+                        // Any other status: the chapters endpoint fails the
+                        // request, e.g. a 403 the client must not treat as an
+                        // empty chapter list.
+                        (chapters_status, r#"{"error":"chapter list unavailable"}"#.to_string())
                     }
                 } else {
                     (
@@ -1036,5 +1041,25 @@ mod tests {
         assert_eq!(metadata.title, "Test Book");
         assert_eq!(metadata.authors, vec!["Test Author".to_string()]);
         assert!(metadata.chapters.is_empty(), "404 means the book has no chapter list");
+    }
+
+    #[tokio::test]
+    async fn test_chapter_fetch_error_preserves_book_metadata() {
+        // A non-transient chapter failure (403: no retry, no 404 tolerance)
+        // must leave the already-fetched book metadata intact.
+        let base_url = spawn_mock_audnexus(Arc::new(Mutex::new(Vec::new())), Some(true), 403);
+        let client = AudibleClient::with_base_url(base_url).expect("client should build");
+
+        let metadata = client
+            .fetch_book("B08XYZ1234")
+            .await
+            .expect("book metadata must survive a chapter-fetch failure");
+
+        assert_eq!(metadata.title, "Test Book");
+        assert_eq!(metadata.authors, vec!["Test Author".to_string()]);
+        assert!(
+            metadata.chapters.is_empty(),
+            "a failed chapter fetch yields no chapters but must not discard the book"
+        );
     }
 }

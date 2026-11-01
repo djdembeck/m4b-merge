@@ -174,6 +174,16 @@ class ReleaseBehavior(unittest.TestCase):
             self.repo.reserve(self.source, "v1.0.0")
         self.assertEqual(self.repo.remote_git("rev-parse", "refs/tags/v1.0.0"), self.git("rev-parse", "v1.0.0"))
 
+    def test_select_rejects_noncanonical_explicit_versions(self):
+        # Leading-zero components and a missing component are malformed
+        # explicit versions: select must fail before reserving anything.
+        for version in ("v01.10.0", "1.10"):
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(
+                        release.ReleaseError,
+                        "Invalid release version"):
+                    self.repo.select(self.source, version)
+
     def test_ambiguous_exact_source_reservations_fail(self):
         for tag in ("v1.1.0", "v1.2.0"):
             self.git("tag", tag, self.source)

@@ -118,7 +118,7 @@ required-check list.
 
 ### Release Gate
 
-`develop` reaches `main` through one ordinary same-repository promotion PR, not a version-preparation or candidate branch. The base-owned `Promotion guard` validates develop source and merge-tree state without executing PR code. Main freshness stays unchanged until isolated platform proof and a separately authorized policy apply; develop uses non-strict freshness with required CI. The publisher reserves an immutable version and builds actual CLI/user-agent outputs from that source, without Cargo version commits or merge-back.
+Releases follow the [Releasing](CONTRIBUTING.md#releasing) section: one ordinary same-repository `develop` → `main` promotion, no preparation/candidate branches, and no Cargo version commits, source edits, or merge-back. The invariants for every task: tags are immutable (never move them), version output comes from the reserved source via `M4B_MERGE_VERSION`, and no mutable `latest` alias is published.
 
 ---
 
