@@ -240,7 +240,7 @@ class Repository:
             except ReleaseError as error:
                 require("HTTP 404" in str(error), str(error))
                 latest = None
-            if latest is not None and latest != tag:
+            if latest != tag:
                 self.run("gh", "release", "edit", tag, "--repo", repository, "--latest=true")
 
     def live_ref(self, branch):

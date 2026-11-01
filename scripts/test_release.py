@@ -264,6 +264,23 @@ class ReleaseBehavior(unittest.TestCase):
         self.assertEqual(
             self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v1.3.0")
 
+    def test_published_highest_release_restores_missing_latest(self):
+        self.publish_tag("v1.3.0")
+        # The old helper published v1.3.0 with --latest=false and nothing else
+        # advanced it: GET releases/latest 404s, so reconciliation must not
+        # skip the missing-Latest case and must restore it with one edit.
+        self.repo.extra_records = [{"tag_name": "v1.1.0", "draft": False, "prerelease": False}]
+        self.repo.latest = None
+        with self.assertRaisesRegex(release.ReleaseError, "HTTP 404"):
+            self.repo.api("repos/example/m4b-merge/releases/latest")
+        self.repo.releases["v1.3.0"] = {"tag_name": "v1.3.0", "draft": False, "prerelease": False}
+        self.repo.release("v1.3.0", self.source, publish=True)
+        self.assertEqual(self.repo.release_commands, ["edit"])
+        self.assertEqual(self.repo.latest, "v1.3.0")
+        self.repo.release("v1.3.0", self.source, publish=True)
+        self.assertEqual(self.repo.release_commands, ["edit"])
+        self.assertEqual(self.repo.latest, "v1.3.0")
+
     def test_published_lower_release_never_promotes_latest(self):
         self.publish_tag("v1.3.0")
         # A higher published stable v2.0.0 exists, so the lower v1.3.0 must
