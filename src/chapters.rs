@@ -43,7 +43,9 @@ pub fn generate_chapters_from_durations(durations: &[u64]) -> Vec<Chapter> {
 
 /// Read chapters from an M4B file.
 ///
-/// Tries ffprobe first, then falls back to chpl atom parsing.
+/// Prefers the Nero `chpl` list because its start times are exact; ffprobe
+/// prefers the QuickTime chapter text track, whose sample timeline is rebased
+/// to zero. Falls back to ffprobe, then to direct chpl parsing.
 /// Pass `ffprobe_path` to use a specific ffprobe binary; `None` uses PATH.
 pub fn read_chapters(
     path: &Path,
@@ -59,9 +61,11 @@ pub fn read_chapters(
             // while the track holds the full set: use the track only when the
             // list is exactly that cap and repeats the track's prefix.
             //
-            // Otherwise the two disagree because the track is stale —
-            // `embed_chapters` replaces the list and leaves any pre-existing
-            // track untouched — so the list is authoritative.
+            // Otherwise the two disagree and the list is authoritative: a
+            // truncated list means the track is also incomplete, and a
+            // matching-length disagreement says the two representations were
+            // written independently (e.g. by a tool other than
+            // `embed_chapters`) and the chpl list is the canonical form.
             let source =
                 if list.is_empty() || list_is_truncated_chpl(list, track) { track } else { list };
 
@@ -106,6 +110,24 @@ fn list_is_truncated_chpl(list: &[mp4ameta::Chapter], track: &[mp4ameta::Chapter
     })
 }
 
+/// Derive durations from chapter start times.
+///
+/// Both chapter sources store starts, not durations, so each chapter's
+/// duration is the gap to the next start; the last chapter runs to
+/// `media_duration`, or keeps a duration of 0 rather than a guess when the
+/// media duration is unknown.
+fn derive_durations(chapters: &mut [Chapter], media_duration: Option<Duration>) {
+    for index in 0..chapters.len() {
+        if index + 1 < chapters.len() {
+            chapters[index].duration =
+                chapters[index + 1].start_time.saturating_sub(chapters[index].start_time);
+        }
+    }
+    if let (Some(media_duration), Some(last)) = (media_duration, chapters.last_mut()) {
+        last.duration = (media_duration.as_millis() as u64).saturating_sub(last.start_time);
+    }
+}
+
 /// Convert mp4ameta chapters into chapters.
 ///
 /// The source stores starts, not durations, so each chapter's duration is the
@@ -120,15 +142,7 @@ fn chapters_from_mp4ameta(track: &[mp4ameta::Chapter], media_duration: Duration)
         })
         .collect();
 
-    for index in 0..chapters.len() {
-        if index + 1 < chapters.len() {
-            chapters[index].duration =
-                chapters[index + 1].start_time.saturating_sub(chapters[index].start_time);
-        }
-    }
-    if let Some(last) = chapters.last_mut() {
-        last.duration = (media_duration.as_millis() as u64).saturating_sub(last.start_time);
-    }
+    derive_durations(&mut chapters, Some(media_duration));
 
     chapters
 }
@@ -196,7 +210,11 @@ fn read_chapters_ffprobe(
     Ok(Vec::new())
 }
 
-/// Read chapters by parsing the chpl atom directly
+/// Read chapters by parsing the chpl atom directly.
+///
+/// The movie header's `mvhd` supplies the media duration the last chapter
+/// runs to, matching `chapters_from_mp4ameta`; without it, the last chapter
+/// keeps a duration of 0.
 fn read_chapters_from_atom(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
     let mut file = std::fs::File::open(path)?;
 
@@ -237,10 +255,75 @@ fn read_chapters_from_atom(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::err
     Ok(Vec::new())
 }
 
+/// Read the media duration in milliseconds from an `mvhd` atom.
+///
+/// `mvhd` is the movie header: its `timescale` and `duration` describe the
+/// whole media timeline, so the direct-atom fallback derives the last
+/// chapter's duration the same way `chapters_from_mp4ameta` does. Returns
+/// `None` when the atom is truncated, unknown, carries a zero timescale, or
+/// holds a duration too large to scale to milliseconds.
+fn read_media_duration_from_mvhd(file: &mut std::fs::File, content_len: u32) -> Option<Duration> {
+    // Per ISO 14496-12: mvhd content = version(1) + flags(3) +
+    // creation_time + modification_time + timescale(4) + duration. v0
+    // timestamps and durations are 4 bytes, v1 is 8. The parser only needs
+    // the `4 + 3 * stamp` leading bytes (32 for v1), so read a fixed
+    // 32-byte prefix instead of allocating from the declared size: a crafted
+    // `content_len` of several gigabytes must not make us reserve that much.
+    // `read_exact` is bounded by the 32-byte stack array and retries short
+    // reads; a file ending before the prefix completes errors out and
+    // falls through to the truncated `None` path below.
+    let mut buffer = [0u8; 32];
+    if file.read_exact(&mut buffer).is_err() {
+        return None;
+    }
+
+    let stamp = match buffer.first()? {
+        0 => 4usize,
+        1 => 8,
+        _ => return None,
+    };
+
+    let timescale_offset = 4 + 2 * stamp; // version/flags + two timestamps
+    let duration_offset = timescale_offset + 4;
+    let header_len = duration_offset + stamp;
+    if content_len < header_len as u32 {
+        return None;
+    }
+
+    // Advance to the end of the declared body (or back, if the fixed read
+    // spilled past a short atom) so the caller keeps iterating siblings.
+    let delta = content_len as i64 - buffer.len() as i64;
+    if file.seek(SeekFrom::Current(delta)).is_err() {
+        return None;
+    }
+
+    let timescale =
+        u32::from_be_bytes(buffer[timescale_offset..timescale_offset + 4].try_into().ok()?);
+    if timescale == 0 {
+        return None;
+    }
+
+    let mut duration: u64 = 0;
+    for &byte in &buffer[duration_offset..duration_offset + stamp] {
+        duration = (duration << 8) | (byte as u64);
+    }
+
+    // A v1 `duration` is 64 bits, so a sentinel such as `u64::MAX` would
+    // overflow the scale to milliseconds: treat any value that does not fit
+    // as unknown, the way mp4ameta's `scale_duration` does. Dividing after
+    // the multiply keeps the same result as the unchecked form.
+    let millis = duration.checked_mul(1000)? / timescale as u64;
+
+    Some(Duration::from_millis(millis))
+}
+
 fn search_chapters_in_moov(
     file: &mut std::fs::File,
     moov_end: u64,
 ) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+    // The movie header carries the media duration the last chapter runs to.
+    let mut media_duration: Option<Duration> = None;
+
     while file.stream_position()? < moov_end {
         let mut buffer = [0u8; 8];
         let bytes_read = file.read(&mut buffer)?;
@@ -253,9 +336,15 @@ fn search_chapters_in_moov(
 
         if atom_len < 8 {
             break;
+        } else if atom_ident == "mvhd" {
+            let mvhd_end = file.stream_position()? + (atom_len as u64 - 8);
+            media_duration = read_media_duration_from_mvhd(file, atom_len - 8);
+            if file.stream_position()? != mvhd_end {
+                file.seek(SeekFrom::Start(mvhd_end))?;
+            }
         } else if atom_ident == "udta" {
             let udta_end = file.stream_position()? + (atom_len as u64 - 8);
-            return search_chapters_in_udta(file, udta_end);
+            return search_chapters_in_udta(file, udta_end, media_duration);
         } else if atom_len == 8 {
             continue;
         } else {
@@ -269,6 +358,7 @@ fn search_chapters_in_moov(
 fn search_chapters_in_udta(
     file: &mut std::fs::File,
     udta_end: u64,
+    media_duration: Option<Duration>,
 ) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
     while file.stream_position()? < udta_end {
         let mut buffer = [0u8; 8];
@@ -284,9 +374,9 @@ fn search_chapters_in_udta(
             break;
         } else if atom_ident == "meta" {
             let meta_end = file.stream_position()? + (atom_len as u64 - 8);
-            return search_chapters_in_meta(file, meta_end);
+            return search_chapters_in_meta(file, meta_end, media_duration);
         } else if atom_ident == "chpl" {
-            return parse_chpl_atom(file, atom_len - 8);
+            return parse_chpl_atom(file, atom_len - 8, media_duration);
         } else if atom_len == 8 {
             continue;
         } else {
@@ -300,6 +390,7 @@ fn search_chapters_in_udta(
 fn search_chapters_in_meta(
     file: &mut std::fs::File,
     meta_end: u64,
+    media_duration: Option<Duration>,
 ) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
     // meta atom has a 4-byte header (version/flags)
     let mut header = [0u8; 4];
@@ -320,7 +411,7 @@ fn search_chapters_in_meta(
         if atom_len < 8 {
             break;
         } else if atom_ident == "chpl" {
-            return parse_chpl_atom(file, atom_len - 8);
+            return parse_chpl_atom(file, atom_len - 8, media_duration);
         } else if atom_len == 8 {
             continue;
         } else {
@@ -334,9 +425,18 @@ fn search_chapters_in_meta(
 fn parse_chpl_atom(
     file: &mut std::fs::File,
     content_len: u32,
+    media_duration: Option<Duration>,
 ) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
     let mut chapters = Vec::new();
-    let mut buffer = vec![0; content_len as usize];
+
+    // Cap the allocation to 1 MiB: the chpl body is variable-length (one
+    // entry per chapter, ~30 bytes with a 20-character title), so a
+    // 255-chapter list needs ~8 KiB — 1 MiB covers real-world books by a
+    // wide margin while keeping a crafted atom from declaring a multi-giB
+    // body and forcing a huge allocation.
+    const MAX_CHPL_BUFFER: usize = 1 << 20;
+    let read_len = content_len.min(MAX_CHPL_BUFFER as u32) as usize;
+    let mut buffer = vec![0; read_len];
     file.read_exact(&mut buffer)?;
 
     // Per ISO 14496-12 / ffmpeg mov_read_chpl:
@@ -392,14 +492,9 @@ fn parse_chpl_atom(
         chapters.push(Chapter { title, start_time, duration: 0 });
     }
 
-    for i in 0..chapters.len() {
-        if i + 1 < chapters.len() {
-            let duration = chapters[i + 1].start_time.saturating_sub(chapters[i].start_time);
-            chapters[i].duration = duration;
-        } else {
-            chapters[i].duration = 0;
-        }
-    }
+    // Starts only: derive the durations, the last chapter running to
+    // `media_duration` when the movie header supplied one.
+    derive_durations(&mut chapters, media_duration);
 
     Ok(chapters)
 }
@@ -407,7 +502,9 @@ fn parse_chpl_atom(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::path::PathBuf;
+    use tempfile::NamedTempFile;
 
     fn track(items: &[(&str, u64)]) -> Vec<mp4ameta::Chapter> {
         items
@@ -441,6 +538,197 @@ mod tests {
         // Media shorter than the last start must not underflow.
         let chapters = chapters_from_mp4ameta(&track(&[("Late", 5_000)]), Duration::from_secs(1));
         assert_eq!(chapters[0].duration, 0);
+    }
+
+    /// v0 `mvhd` content: `duration` media ticks at `timescale` ticks/second.
+    fn mvhd(timescale: u32, duration: u32) -> Vec<u8> {
+        let mut v = vec![0u8; 12]; // version + flags + two 4-byte timestamps
+        v.extend_from_slice(&timescale.to_be_bytes());
+        v.extend_from_slice(&duration.to_be_bytes());
+        v.extend_from_slice(&[0u8; 8]); // rate, volume, zero padding
+        v
+    }
+
+    /// v1 `mvhd` content: 8-byte timestamps and an 8-byte `duration`.
+    fn mvhd_v1(timescale: u32, duration: u64) -> Vec<u8> {
+        let mut v = vec![1u8]; // version
+        v.extend_from_slice(&[0u8; 3]); // flags
+        v.extend_from_slice(&[0u8; 16]); // two 8-byte timestamps
+        v.extend_from_slice(&timescale.to_be_bytes());
+        v.extend_from_slice(&duration.to_be_bytes());
+        v.extend_from_slice(&[0u8; 8]); // rate, volume, zero padding
+        v
+    }
+
+    /// Nero `chpl` atom content for starts in milliseconds.
+    fn chpl_atom(entries: &[(&str, u64)]) -> Vec<u8> {
+        let mut v = vec![0u8; 4]; // version + flags = 0
+        v.push(entries.len() as u8);
+        for (title, start_ms) in entries {
+            v.extend_from_slice(&(*start_ms * 10_000).to_be_bytes());
+            v.push(title.len() as u8);
+            v.extend_from_slice(title.as_bytes());
+        }
+        v
+    }
+
+    /// ftyp + moov{ mvhd?, udta{ chpl } } fixture written to a temp file.
+    fn moov_file(mvhd: Option<&[u8]>, chpl: &[u8]) -> Vec<u8> {
+        let mut file = Vec::new();
+
+        file.extend_from_slice(&16u32.to_be_bytes());
+        file.extend_from_slice(b"ftypm4b");
+        file.extend_from_slice(&[0u8; 5]); // pads to exactly 16 bytes
+
+        let chpl_len = 8 + chpl.len() as u64;
+        let udta_len = 8 + chpl_len;
+        let mvhd_len = mvhd.map_or(0, |m| 8 + m.len() as u64);
+        file.extend_from_slice(&(((8 + mvhd_len + udta_len) as u32).to_be_bytes()));
+        file.extend_from_slice(b"moov");
+        if let Some(m) = mvhd {
+            file.extend_from_slice(&((8 + m.len() as u32).to_be_bytes()));
+            file.extend_from_slice(b"mvhd");
+            file.extend_from_slice(m);
+        }
+        file.extend_from_slice(&(udta_len as u32).to_be_bytes());
+        file.extend_from_slice(b"udta");
+        file.extend_from_slice(&(chpl_len as u32).to_be_bytes());
+        file.extend_from_slice(b"chpl");
+        file.extend_from_slice(chpl);
+        file
+    }
+
+    /// Write `bytes` to a temp fixture file and run the direct-atom fallback
+    /// on it; the `NamedTempFile` cleans up when dropped.
+    fn chapters_from_atom_file(bytes: Vec<u8>) -> Vec<Chapter> {
+        let mut temp_file = NamedTempFile::new().expect("create fixture");
+        temp_file.write_all(&bytes).expect("write fixture");
+
+        read_chapters_from_atom(temp_file.path()).expect("parse chpl")
+    }
+
+    #[test]
+    fn test_parse_chpl_atom_last_duration_from_mvhd() {
+        let file = moov_file(
+            Some(&mvhd(1000, 10_000)),
+            &chpl_atom(&[("Intro", 0), ("One", 2_000), ("Outro", 7_000)]),
+        );
+
+        let chapters = chapters_from_atom_file(file);
+        assert_eq!(chapters.len(), 3);
+        assert_eq!(chapters[0].title, "Intro");
+        assert_eq!(chapters[0].start_time, 0);
+        assert_eq!(chapters[0].duration, 2_000);
+        assert_eq!(chapters[1].duration, 5_000);
+        // Last chapter runs to the media duration, not 0, like the primary path.
+        assert_eq!(chapters[2].start_time, 7_000);
+        assert_eq!(chapters[2].duration, 3_000);
+    }
+
+    #[test]
+    fn test_parse_chpl_atom_single_chapter_runs_to_media_duration() {
+        let file = moov_file(Some(&mvhd(1000, 10_000)), &chpl_atom(&[("Only", 2_500)]));
+
+        let chapters = chapters_from_atom_file(file);
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].title, "Only");
+        assert_eq!(chapters[0].start_time, 2_500);
+        assert_eq!(chapters[0].duration, 7_500);
+    }
+
+    #[test]
+    fn test_parse_chpl_atom_empty_list_and_missing_mvhd_keep_zero() {
+        // An empty chpl has no last chapter, so the media duration is unused.
+        let file = moov_file(Some(&mvhd(1000, 10_000)), &chpl_atom(&[]));
+        assert!(chapters_from_atom_file(file).is_empty());
+
+        // Without an mvhd there is no media duration, so the last chapter keeps
+        // a duration of 0 rather than a guess.
+        let file = moov_file(None, &chpl_atom(&[("One", 0), ("Two", 5_000)]));
+        let chapters = chapters_from_atom_file(file);
+        assert_eq!(chapters[1].start_time, 5_000);
+        assert_eq!(chapters[1].duration, 0);
+    }
+
+    #[test]
+    fn test_parse_chpl_atom_short_media_saturates_last_duration() {
+        let file = moov_file(Some(&mvhd(1000, 1_000)), &chpl_atom(&[("Late", 5_000)]));
+
+        let chapters = chapters_from_atom_file(file);
+        // Media shorter than the last start must not underflow.
+        assert_eq!(chapters[0].duration, 0);
+    }
+
+    #[test]
+    fn test_parse_chpl_atom_v1_mvhd_and_overflowing_sentinel() {
+        // A v1 header scales its 64-bit duration like v0 does.
+        let file = moov_file(Some(&mvhd_v1(1000, 10_000)), &chpl_atom(&[("Late", 5_000)]));
+        let chapters = chapters_from_atom_file(file);
+        assert_eq!(chapters[0].duration, 5_000);
+
+        // A v1 sentinel duration cannot be scaled to milliseconds: treat it as
+        // unknown rather than overflowing.
+        let file = moov_file(Some(&mvhd_v1(1000, u64::MAX)), &chpl_atom(&[("Late", 5_000)]));
+        let chapters = chapters_from_atom_file(file);
+        assert_eq!(chapters[0].duration, 0);
+    }
+
+    #[test]
+    fn test_mvhd_oversized_declaration_is_bounded_and_seeks_exact() {
+        // Declared body of several gigabytes, but only 8 of the 12 v0 header
+        // bytes exist: must return `None` via the fixed 32-byte prefix read,
+        // not by allocating the declared size.
+        let body = mvhd(1_000, 10_000);
+        assert_eq!(body.len(), 28);
+        let mut file = NamedTempFile::new().expect("create fixture");
+        file.write_all(&body[..8]).expect("write fixture");
+        let mut f = std::fs::File::open(file.path()).expect("open fixture");
+        assert!(read_media_duration_from_mvhd(&mut f, u32::MAX).is_none());
+
+        // Full v1 header present and the declared body far exceeding it: the
+        // fixed read consumes the header, the remainder is seeked over, and
+        // the cursor lands exactly at the next sibling atom's start.
+        let mut bytes = mvhd_v1(1_000, 10_000);
+        assert_eq!(bytes.len(), 40);
+        let declared = 32u32 + 1_000;
+        bytes.resize(declared as usize, 0);
+        bytes.extend_from_slice(&0x42u32.to_be_bytes()); // stands in for the next atom
+        let mut file = NamedTempFile::new().expect("create fixture");
+        file.write_all(&bytes).expect("write fixture");
+        let mut f = std::fs::File::open(file.path()).expect("open fixture");
+        let duration = read_media_duration_from_mvhd(&mut f, declared).expect("full header");
+        assert_eq!(duration, Duration::from_millis(10_000));
+        assert_eq!(f.stream_position().expect("position"), declared as u64);
+    }
+
+    #[test]
+    fn test_mvhd_exact_header_len_body_is_parsed() {
+        // The v1 header is exactly 32 bytes: a body declaring exactly that
+        // size must parse, and the fixed prefix read must leave the cursor at
+        // the body's end so the caller can continue with the next sibling.
+        let mut body = mvhd_v1(1_000, 10_000);
+        assert_eq!(body.len(), 40);
+        body.truncate(32); // version/flags/timestamps/timescale/duration, no padding
+        let mut file = NamedTempFile::new().expect("create fixture");
+        file.write_all(&body).expect("write fixture");
+        let mut f = std::fs::File::open(file.path()).expect("open fixture");
+        let duration = read_media_duration_from_mvhd(&mut f, 32).expect("exact header");
+        assert_eq!(duration, Duration::from_millis(10_000));
+        assert_eq!(f.stream_position().expect("position"), 32);
+    }
+
+    #[test]
+    fn test_parse_chpl_atom_oversized_declaration_is_bounded() {
+        // A declared body of several gigabytes against a 5-byte chpl body:
+        // the allocation is capped, and the function fails with the same
+        // `read_exact` EOF error the bounded-size path uses, not by
+        // allocating the declared size.
+        let content = chpl_atom(&[]);
+        assert_eq!(content.len(), 5);
+        let mut file = NamedTempFile::new().expect("create fixture");
+        file.write_all(&content).expect("write fixture");
+        let mut f = std::fs::File::open(file.path()).expect("open fixture");
+        assert!(parse_chpl_atom(&mut f, u32::MAX, None).is_err());
     }
 
     fn capped_list() -> Vec<mp4ameta::Chapter> {
