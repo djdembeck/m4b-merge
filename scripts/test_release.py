@@ -248,6 +248,51 @@ class ReleaseBehavior(unittest.TestCase):
             self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v2.0.0")
         self.repo.release("v1.3.0", self.source, publish=True)
 
+    def test_published_highest_release_reconciles_stale_latest(self):
+        self.publish_tag("v1.3.0")
+        # The old helper published v1.3.0 with --latest=false: it is the
+        # highest published stable, but GitHub Latest still points at the
+        # older v1.1.0, so this version must advance it with one edit.
+        self.repo.extra_records = [{"tag_name": "v1.1.0", "draft": False, "prerelease": False}]
+        self.repo.latest = "v1.1.0"
+        self.repo.releases["v1.3.0"] = {"tag_name": "v1.3.0", "draft": False, "prerelease": False}
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v1.1.0")
+        self.repo.release("v1.3.0", self.source, publish=True)
+        self.assertEqual(self.repo.release_commands, ["edit"])
+        self.assertEqual(len(self.repo.releases), 1)
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v1.3.0")
+
+    def test_published_lower_release_never_promotes_latest(self):
+        self.publish_tag("v1.3.0")
+        # A higher published stable v2.0.0 exists, so the lower v1.3.0 must
+        # perform no edit and leave GitHub Latest unchanged.
+        self.repo.extra_records = [{"tag_name": "v2.0.0", "draft": False, "prerelease": False}]
+        self.repo.latest = "v2.0.0"
+        self.repo.releases["v1.3.0"] = {"tag_name": "v1.3.0", "draft": False, "prerelease": False}
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v2.0.0")
+        self.repo.release("v1.3.0", self.source, publish=True)
+        self.assertEqual(self.repo.release_commands, [])
+        self.assertEqual(len(self.repo.releases), 1)
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v2.0.0")
+
+    def test_published_release_with_current_latest_performs_no_write(self):
+        self.publish_tag("v1.3.0")
+        # GitHub Latest already points at this published release: an ordinary
+        # idempotent retry must be a complete no-op, not a redundant edit.
+        self.repo.latest = "v1.3.0"
+        self.repo.releases["v1.3.0"] = {"tag_name": "v1.3.0", "draft": False, "prerelease": False}
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v1.3.0")
+        self.repo.release("v1.3.0", self.source, publish=True)
+        self.assertEqual(self.repo.release_commands, [])
+        self.assertEqual(len(self.repo.releases), 1)
+        self.assertEqual(
+            self.repo.api("repos/example/m4b-merge/releases/latest")["tag_name"], "v1.3.0")
+
     def test_prerelease_and_draft_higher_records_never_block_latest(self):
         self.publish_tag("v2.1.0")
         # Only a prerelease and a draft sit above v2.1.0: neither is published

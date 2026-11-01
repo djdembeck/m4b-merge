@@ -196,7 +196,7 @@ class Repository:
             page += 1
 
     def release(self, tag, source, publish=False):
-        semver(tag.removeprefix("v"))
+        target = semver(tag.removeprefix("v"))
         require(isinstance(source, str) and OID.fullmatch(source), "Expected a full commit object ID")
         repository = self.repository()
         require(self.api_tag_target(tag) == source, f"Tag {tag} does not point at the frozen source")
@@ -208,18 +208,40 @@ class Repository:
             self.run("gh", "release", "create", tag, "--repo", repository, "--verify-tag", "--draft", "--title", f"Release {tag}", "--notes", "")
             return
         existing = existing[0]
-        if publish and existing.get("draft"):
-            target = semver(tag.removeprefix("v"))
+        if publish:
+            if existing.get("draft"):
+                higher_published = any(
+                    not record.get("draft") and not record.get("prerelease")
+                    and VERSION.fullmatch(str(record.get("tag_name", "")).removeprefix("v"))
+                    and semver(str(record.get("tag_name", "")).removeprefix("v")) > target
+                    for record in records)
+                # GitHub Latest is independent of Docker aliases: a new highest
+                # stable release must advance it; a delayed lower release must not
+                # roll it back. Tags outside the numeric X.Y.Z grammar never claim Latest.
+                self.run("gh", "release", "edit", tag, "--repo", repository, "--draft=false",
+                         f"--latest={'true' if not higher_published else 'false'}")
+                return
+            if existing.get("prerelease"):
+                return
+            # Already published: the old helper always edited with
+            # --latest=false, so a report performed with this version as Latest
+            # can leave GitHub Latest behind. Reconcile it, using the same
+            # listing snapshot, only for the highest published stable release;
+            # a lower published release must never promote itself.
             higher_published = any(
                 not record.get("draft") and not record.get("prerelease")
                 and VERSION.fullmatch(str(record.get("tag_name", "")).removeprefix("v"))
                 and semver(str(record.get("tag_name", "")).removeprefix("v")) > target
                 for record in records)
-            # GitHub Latest is independent of Docker aliases: a new highest
-            # stable release must advance it; a delayed lower release must not
-            # roll it back. Tags outside the numeric X.Y.Z grammar never claim Latest.
-            self.run("gh", "release", "edit", tag, "--repo", repository, "--draft=false",
-                     f"--latest={'true' if not higher_published else 'false'}")
+            if higher_published:
+                return
+            try:
+                latest = (self.api(f"repos/{repository}/releases/latest") or {}).get("tag_name")
+            except ReleaseError as error:
+                require("HTTP 404" in str(error), str(error))
+                latest = None
+            if latest is not None and latest != tag:
+                self.run("gh", "release", "edit", tag, "--repo", repository, "--latest=true")
 
     def live_ref(self, branch):
         value = self.api(f"repos/{self.repository()}/git/ref/heads/{branch}")["object"]["sha"]
