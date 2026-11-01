@@ -263,14 +263,20 @@ fn read_chapters_from_atom(path: &Path) -> Result<Vec<Chapter>, Box<dyn std::err
 /// `None` when the atom is truncated, unknown, carries a zero timescale, or
 /// holds a duration too large to scale to milliseconds.
 fn read_media_duration_from_mvhd(file: &mut std::fs::File, content_len: u32) -> Option<Duration> {
-    let mut buffer = vec![0; content_len as usize];
+    // Per ISO 14496-12: mvhd content = version(1) + flags(3) +
+    // creation_time + modification_time + timescale(4) + duration. v0
+    // timestamps and durations are 4 bytes, v1 is 8. The parser only needs
+    // the `4 + 3 * stamp` leading bytes (32 for v1), so read a fixed
+    // 32-byte prefix instead of allocating from the declared size: a crafted
+    // `content_len` of several gigabytes must not make us reserve that much.
+    // `read_exact` is bounded by the 32-byte stack array and retries short
+    // reads; a file ending before the prefix completes errors out and
+    // falls through to the truncated `None` path below.
+    let mut buffer = [0u8; 32];
     if file.read_exact(&mut buffer).is_err() {
         return None;
     }
 
-    // Per ISO 14496-12: mvhd content = version(1) + flags(3) +
-    // creation_time + modification_time + timescale(4) + duration. v0
-    // timestamps and durations are 4 bytes, v1 is 8.
     let stamp = match buffer.first()? {
         0 => 4usize,
         1 => 8,
@@ -279,7 +285,15 @@ fn read_media_duration_from_mvhd(file: &mut std::fs::File, content_len: u32) -> 
 
     let timescale_offset = 4 + 2 * stamp; // version/flags + two timestamps
     let duration_offset = timescale_offset + 4;
-    if buffer.len() < duration_offset + stamp {
+    let header_len = duration_offset + stamp;
+    if content_len < header_len as u32 {
+        return None;
+    }
+
+    // Advance to the end of the declared body (or back, if the fixed read
+    // spilled past a short atom) so the caller keeps iterating siblings.
+    let delta = content_len as i64 - buffer.len() as i64;
+    if file.seek(SeekFrom::Current(delta)).is_err() {
         return None;
     }
 
@@ -414,7 +428,15 @@ fn parse_chpl_atom(
     media_duration: Option<Duration>,
 ) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
     let mut chapters = Vec::new();
-    let mut buffer = vec![0; content_len as usize];
+
+    // Cap the allocation to 1 MiB: the chpl body is variable-length (one
+    // entry per chapter, ~30 bytes with a 20-character title), so a
+    // 255-chapter list needs ~8 KiB — 1 MiB covers real-world books by a
+    // wide margin while keeping a crafted atom from declaring a multi-giB
+    // body and forcing a huge allocation.
+    const MAX_CHPL_BUFFER: usize = 1 << 20;
+    let read_len = content_len.min(MAX_CHPL_BUFFER as u32) as usize;
+    let mut buffer = vec![0; read_len];
     file.read_exact(&mut buffer)?;
 
     // Per ISO 14496-12 / ffmpeg mov_read_chpl:
@@ -649,6 +671,64 @@ mod tests {
         let file = moov_file(Some(&mvhd_v1(1000, u64::MAX)), &chpl_atom(&[("Late", 5_000)]));
         let chapters = chapters_from_atom_file(file);
         assert_eq!(chapters[0].duration, 0);
+    }
+
+    #[test]
+    fn test_mvhd_oversized_declaration_is_bounded_and_seeks_exact() {
+        // Declared body of several gigabytes, but only 8 of the 12 v0 header
+        // bytes exist: must return `None` via the fixed 32-byte prefix read,
+        // not by allocating the declared size.
+        let body = mvhd(1_000, 10_000);
+        assert_eq!(body.len(), 28);
+        let mut file = NamedTempFile::new().expect("create fixture");
+        file.write_all(&body[..8]).expect("write fixture");
+        let mut f = std::fs::File::open(file.path()).expect("open fixture");
+        assert!(read_media_duration_from_mvhd(&mut f, u32::MAX).is_none());
+
+        // Full v1 header present and the declared body far exceeding it: the
+        // fixed read consumes the header, the remainder is seeked over, and
+        // the cursor lands exactly at the next sibling atom's start.
+        let mut bytes = mvhd_v1(1_000, 10_000);
+        assert_eq!(bytes.len(), 40);
+        let declared = 32u32 + 1_000;
+        bytes.resize(declared as usize, 0);
+        bytes.extend_from_slice(&0x42u32.to_be_bytes()); // stands in for the next atom
+        let mut file = NamedTempFile::new().expect("create fixture");
+        file.write_all(&bytes).expect("write fixture");
+        let mut f = std::fs::File::open(file.path()).expect("open fixture");
+        let duration = read_media_duration_from_mvhd(&mut f, declared).expect("full header");
+        assert_eq!(duration, Duration::from_millis(10_000));
+        assert_eq!(f.stream_position().expect("position"), declared as u64);
+    }
+
+    #[test]
+    fn test_mvhd_exact_header_len_body_is_parsed() {
+        // The v1 header is exactly 32 bytes: a body declaring exactly that
+        // size must parse, and the fixed prefix read must leave the cursor at
+        // the body's end so the caller can continue with the next sibling.
+        let mut body = mvhd_v1(1_000, 10_000);
+        assert_eq!(body.len(), 40);
+        body.truncate(32); // version/flags/timestamps/timescale/duration, no padding
+        let mut file = NamedTempFile::new().expect("create fixture");
+        file.write_all(&body).expect("write fixture");
+        let mut f = std::fs::File::open(file.path()).expect("open fixture");
+        let duration = read_media_duration_from_mvhd(&mut f, 32).expect("exact header");
+        assert_eq!(duration, Duration::from_millis(10_000));
+        assert_eq!(f.stream_position().expect("position"), 32);
+    }
+
+    #[test]
+    fn test_parse_chpl_atom_oversized_declaration_is_bounded() {
+        // A declared body of several gigabytes against a 5-byte chpl body:
+        // the allocation is capped, and the function fails with the same
+        // `read_exact` EOF error the bounded-size path uses, not by
+        // allocating the declared size.
+        let content = chpl_atom(&[]);
+        assert_eq!(content.len(), 5);
+        let mut file = NamedTempFile::new().expect("create fixture");
+        file.write_all(&content).expect("write fixture");
+        let mut f = std::fs::File::open(file.path()).expect("open fixture");
+        assert!(parse_chpl_atom(&mut f, u32::MAX, None).is_err());
     }
 
     fn capped_list() -> Vec<mp4ameta::Chapter> {
