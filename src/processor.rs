@@ -10,9 +10,7 @@ use crate::config::Config;
 use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
 use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
-use crate::tagging::{
-    Tagger, TaggerOps, TaggingError, describe_out_of_range_chapters, format_duration,
-};
+use crate::tagging::{Tagger, TaggingError, describe_out_of_range_chapters, format_duration};
 
 /// Static metadata ID regex compiled once at startup
 static METADATA_ID_REGEX: OnceLock<regex::Regex> = OnceLock::new();
@@ -172,8 +170,17 @@ pub struct Processor {
     ffmpeg: Arc<FFmpeg>,
     api_client: Option<MetadataSource>,
     merger: Merger,
-    tagger: Arc<Tagger>,
-    chapter_embedder: Arc<dyn TaggerOps>,
+    tagger: Tagger,
+    /// Test-only substitute for [`Tagger::embed_chapters`], so the
+    /// chapter-embed failure path can be exercised without a real file.
+    #[cfg(test)]
+    embed_hook: Option<
+        Arc<
+            dyn Fn(&std::path::Path, &[crate::metadata::Chapter]) -> crate::tagging::Result<()>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 impl Processor {
@@ -202,10 +209,19 @@ impl Processor {
         };
 
         let merger = Merger::new(ffmpeg.clone());
-        let tagger = Arc::new(Tagger::new());
-        let chapter_embedder: Arc<dyn TaggerOps> = tagger.clone();
+        let tagger = Tagger::new();
+        #[cfg(test)]
+        let embed_hook = None;
 
-        Ok(Self { config, ffmpeg, api_client, merger, tagger, chapter_embedder })
+        Ok(Self {
+            config,
+            ffmpeg,
+            api_client,
+            merger,
+            tagger,
+            #[cfg(test)]
+            embed_hook,
+        })
     }
 
     /// Create a new Processor with explicit components (for testing)
@@ -214,19 +230,20 @@ impl Processor {
         config: Config,
         ffmpeg: Arc<FFmpeg>,
         api_client: Option<MetadataSource>,
-        tagger: Arc<dyn TaggerOps>,
     ) -> Self {
         let merger = Merger::new(ffmpeg.clone());
-        // The chapter-embed failure path is injected through `chapter_embedder`
-        // (the `tagger` argument); every other operation runs against the real
-        // production [`Tagger`].
+        let tagger = Tagger::new();
+        #[cfg(test)]
+        let embed_hook = None;
+
         Self {
             config,
             ffmpeg,
             api_client,
             merger,
-            tagger: Arc::new(Tagger::new()),
-            chapter_embedder: tagger,
+            tagger,
+            #[cfg(test)]
+            embed_hook,
         }
     }
 
@@ -524,7 +541,14 @@ impl Processor {
         // read from the inputs, or chapters generated from the input tracks, so
         // they are applied even when no provider metadata was available.
         if !chapters.is_empty() {
-            if let Err(e) = self.chapter_embedder.embed_chapters(&merged_path, &chapters) {
+            #[cfg(test)]
+            let embed_result = match &self.embed_hook {
+                Some(hook) => hook(&merged_path, &chapters),
+                None => self.tagger.embed_chapters(&merged_path, &chapters),
+            };
+            #[cfg(not(test))]
+            let embed_result = self.tagger.embed_chapters(&merged_path, &chapters);
+            if let Err(e) = embed_result {
                 // The pre-merge guard probes the ffprobe duration, but mp4ameta
                 // validates chapters against the container's mvhd duration, which
                 // can be shorter. A failed embed would otherwise ship a
@@ -1460,79 +1484,27 @@ mod tests {
         }
     }
 
-    /// A no-op tagger whose `embed_chapters` fails, so a chapter-embed failure
-    /// can be tested without driving the real [`Tagger`] down the failure path.
-    struct MockTagger {
-        /// The path handed to `embed_chapters`, for asserting which file was
-        /// about to be (but must not) left behind.
-        embed_path: std::sync::Mutex<Option<PathBuf>>,
-    }
-
-    impl MockTagger {
-        fn new() -> Self {
-            Self { embed_path: std::sync::Mutex::new(None) }
-        }
-
-        fn embedded_into(&self) -> Option<PathBuf> {
-            self.embed_path.lock().unwrap().clone()
-        }
-    }
-
-    impl TaggerOps for MockTagger {
-        fn write_metadata(&self, _: &Path, _: &BookMetadata) -> crate::tagging::Result<()> {
-            Ok(())
-        }
-
-        fn embed_cover<'a>(
-            &'a self,
-            _: &'a Path,
-            _: &'a str,
-        ) -> std::pin::Pin<
-            Box<dyn core::future::Future<Output = crate::tagging::Result<()>> + Send + 'a>,
-        > {
-            Box::pin(async move { Ok(()) })
-        }
-
-        fn embed_chapters(
-            &self,
-            file_path: &Path,
-            _: &[crate::metadata::Chapter],
-        ) -> crate::tagging::Result<()> {
-            *self.embed_path.lock().unwrap() = Some(file_path.to_path_buf());
-            Err(TaggingError::Mp4Meta("mock chapter embed failure".to_string()))
-        }
-
-        fn write_chapters_txt(&self, _: &Path, _: &BookMetadata) -> crate::tagging::Result<()> {
-            Ok(())
-        }
-
-        fn write_chapters_txt_with(
-            &self,
-            _: &Path,
-            _: &str,
-            _: Option<&str>,
-            _: &[crate::metadata::Chapter],
-        ) -> crate::tagging::Result<()> {
-            Ok(())
-        }
-
-        fn move_completed_files(
-            &self,
-            _: &[PathBuf],
-            _: &Path,
-        ) -> crate::tagging::Result<Vec<PathBuf>> {
-            Ok(Vec::new())
-        }
-    }
-
     #[tokio::test]
     async fn test_process_group_embed_failure_discards_output() {
         let temp_dir = TempDir::new().unwrap();
         let api_url = spawn_metadata_api();
         let config = api_test_config(&temp_dir, &api_url);
         let ffmpeg = Arc::new(FFmpeg::discover().unwrap());
-        let tagger = Arc::new(MockTagger::new());
-        let processor = Processor::with_components(config, ffmpeg, None, tagger.clone());
+
+        // Test hook standing in for `Tagger::embed_chapters`: records the path
+        // it is handed (which must be the merged output), then fails, so a
+        // chapter-embed failure can be tested without a real file.
+        let recorded = Arc::new(std::sync::Mutex::new(None));
+        let recorded_in_hook = recorded.clone();
+        let processor = {
+            let mut processor = Processor::with_components(config, ffmpeg, None);
+            processor.embed_hook =
+                Some(Arc::new(move |file_path: &Path, _: &[crate::metadata::Chapter]| {
+                    *recorded_in_hook.lock().unwrap() = Some(file_path.to_path_buf());
+                    Err(TaggingError::Mp4Meta("mock chapter embed failure".to_string()))
+                }));
+            processor
+        };
 
         let book_dir = temp_dir.path().join("Book [xyz987uvw654]");
         let input = create_test_m4b(&book_dir, 10);
@@ -1543,8 +1515,8 @@ mod tests {
         };
 
         // Chapters are generated from the input tracks (no API client), and
-        // in range, so the ffprobe guard passes — but the mock tagger makes
-        // the actual embed fail.
+        // in range, so the ffprobe guard passes — but the hook makes the
+        // actual embed fail.
         let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
 
         assert!(
@@ -1556,7 +1528,7 @@ mod tests {
         // book with no chapters.
         let expected = temp_dir.path().join("output/Book [xyz987uvw654].m4b");
         assert_eq!(
-            tagger.embedded_into().as_ref(),
+            recorded.lock().unwrap().as_ref(),
             Some(&expected),
             "embed must have targeted the merged output"
         );

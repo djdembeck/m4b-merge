@@ -165,36 +165,6 @@ fn validate_and_sort_chapters(chapters: &mut [crate::metadata::Chapter]) -> Resu
     Ok(())
 }
 
-/// The tagging operations the processor applies to a merged output.
-///
-/// `Processor` holds this trait object so tests can substitute a mock and
-/// verify failure behavior (for example, that a failed chapter embed fails
-/// the book) without driving a real [`Tagger`] down the failure path.
-pub trait TaggerOps: Send + Sync {
-    fn write_metadata(&self, file_path: &Path, metadata: &BookMetadata) -> Result<()>;
-
-    fn embed_cover<'a>(
-        &'a self,
-        file_path: &'a Path,
-        cover_url: &'a str,
-    ) -> std::pin::Pin<Box<dyn core::future::Future<Output = Result<()>> + Send + 'a>>;
-
-    fn embed_chapters(&self, file_path: &Path, chapters: &[crate::metadata::Chapter])
-    -> Result<()>;
-
-    fn write_chapters_txt(&self, output_path: &Path, metadata: &BookMetadata) -> Result<()>;
-
-    fn write_chapters_txt_with(
-        &self,
-        output_path: &Path,
-        album: &str,
-        artist: Option<&str>,
-        chapters: &[crate::metadata::Chapter],
-    ) -> Result<()>;
-
-    fn move_completed_files(&self, files: &[PathBuf], dest_dir: &Path) -> Result<Vec<PathBuf>>;
-}
-
 /// Handles metadata tagging and file operations for audiobooks
 #[derive(Debug, Clone)]
 pub struct Tagger {
@@ -974,46 +944,6 @@ impl Tagger {
 
         info!("Completed post-processing for: {}", output.display());
         Ok(())
-    }
-}
-
-impl TaggerOps for Tagger {
-    fn write_metadata(&self, file_path: &Path, metadata: &BookMetadata) -> Result<()> {
-        self.write_metadata(file_path, metadata)
-    }
-
-    fn embed_cover<'a>(
-        &'a self,
-        file_path: &'a Path,
-        cover_url: &'a str,
-    ) -> std::pin::Pin<Box<dyn core::future::Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(self.embed_cover(file_path, cover_url))
-    }
-
-    fn embed_chapters(
-        &self,
-        file_path: &Path,
-        chapters: &[crate::metadata::Chapter],
-    ) -> Result<()> {
-        self.embed_chapters(file_path, chapters)
-    }
-
-    fn write_chapters_txt(&self, output_path: &Path, metadata: &BookMetadata) -> Result<()> {
-        self.write_chapters_txt(output_path, metadata)
-    }
-
-    fn write_chapters_txt_with(
-        &self,
-        output_path: &Path,
-        album: &str,
-        artist: Option<&str>,
-        chapters: &[crate::metadata::Chapter],
-    ) -> Result<()> {
-        self.write_chapters_txt_with(output_path, album, artist, chapters)
-    }
-
-    fn move_completed_files(&self, files: &[PathBuf], dest_dir: &Path) -> Result<Vec<PathBuf>> {
-        self.move_completed_files(files, dest_dir)
     }
 }
 
