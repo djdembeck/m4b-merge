@@ -172,7 +172,8 @@ pub struct Processor {
     ffmpeg: Arc<FFmpeg>,
     api_client: Option<MetadataSource>,
     merger: Merger,
-    tagger: Arc<dyn TaggerOps>,
+    tagger: Arc<Tagger>,
+    chapter_embedder: Arc<dyn TaggerOps>,
 }
 
 impl Processor {
@@ -202,8 +203,9 @@ impl Processor {
 
         let merger = Merger::new(ffmpeg.clone());
         let tagger = Arc::new(Tagger::new());
+        let chapter_embedder: Arc<dyn TaggerOps> = tagger.clone();
 
-        Ok(Self { config, ffmpeg, api_client, merger, tagger })
+        Ok(Self { config, ffmpeg, api_client, merger, tagger, chapter_embedder })
     }
 
     /// Create a new Processor with explicit components (for testing)
@@ -215,8 +217,17 @@ impl Processor {
         tagger: Arc<dyn TaggerOps>,
     ) -> Self {
         let merger = Merger::new(ffmpeg.clone());
-
-        Self { config, ffmpeg, api_client, merger, tagger }
+        // The chapter-embed failure path is injected through `chapter_embedder`
+        // (the `tagger` argument); every other operation runs against the real
+        // production [`Tagger`].
+        Self {
+            config,
+            ffmpeg,
+            api_client,
+            merger,
+            tagger: Arc::new(Tagger::new()),
+            chapter_embedder: tagger,
+        }
     }
 
     /// Process all input paths
@@ -513,7 +524,7 @@ impl Processor {
         // read from the inputs, or chapters generated from the input tracks, so
         // they are applied even when no provider metadata was available.
         if !chapters.is_empty() {
-            if let Err(e) = self.tagger.embed_chapters(&merged_path, &chapters) {
+            if let Err(e) = self.chapter_embedder.embed_chapters(&merged_path, &chapters) {
                 // The pre-merge guard probes the ffprobe duration, but mp4ameta
                 // validates chapters against the container's mvhd duration, which
                 // can be shorter. A failed embed would otherwise ship a
@@ -823,6 +834,11 @@ impl Processor {
     /// Get the merger
     pub fn merger(&self) -> &Merger {
         &self.merger
+    }
+
+    /// Get the tagger
+    pub fn tagger(&self) -> &Tagger {
+        &self.tagger
     }
 }
 
