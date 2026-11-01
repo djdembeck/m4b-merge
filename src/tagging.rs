@@ -6,8 +6,17 @@ use tracing::{debug, error, info, warn};
 
 use crate::metadata::BookMetadata;
 
-/// Maximum number of characters for chapter titles in embedded chapters (chpl atom limit)
-const CHAPTER_TITLE_MAX_CHARS: usize = 255;
+/// Maximum number of bytes for chapter titles in embedded chapters.
+///
+/// The chpl (Nero chapter list) atom stores each title's length in a single
+/// byte, so titles must be truncated on a UTF-8 char boundary before they are
+/// handed to mp4ameta.
+const CHAPTER_TITLE_MAX_BYTES: usize = 255;
+
+/// Maximum number of chapters representable in a chpl (Nero chapter list) atom.
+///
+/// The atom stores the entry count in a single byte; larger counts wrap around.
+pub(crate) const CHAPTER_LIST_MAX_CHAPTERS: usize = u8::MAX as usize;
 
 /// Errors that can occur during tagging operations
 #[derive(Error, Debug)]
@@ -52,9 +61,41 @@ pub enum OverwriteBehavior {
     Force,
 }
 
+/// Truncate a chapter title to the chpl atom's byte limit on a char boundary.
+///
+/// mp4ameta slices title bytes at `min(len, 255)` before writing the chpl atom,
+/// which panics when that index falls inside a multi-byte UTF-8 character.
+/// Passing an already-short-enough title keeps the dependency's slice at a char
+/// boundary.
+fn truncate_chapter_title(title: &str) -> String {
+    if title.len() <= CHAPTER_TITLE_MAX_BYTES {
+        return title.to_string();
+    }
+
+    // `str::floor_char_boundary` is not stable yet, so walk back to the nearest
+    // boundary at or below the byte limit.
+    let mut end = CHAPTER_TITLE_MAX_BYTES;
+    while !title.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    title[..end].to_string()
+}
+
+/// The prefix of `chapters` that a Nero `chpl` atom can represent.
+///
+/// The atom stores its entry count in a single byte, so a longer list wraps the
+/// count and readers see an empty or truncated chapter list. The QuickTime
+/// chapter track has no such limit, so callers writing that representation must
+/// use the full list rather than this prefix.
+fn chpl_chapters(chapters: &[mp4ameta::Chapter]) -> &[mp4ameta::Chapter] {
+    &chapters[..chapters.len().min(CHAPTER_LIST_MAX_CHAPTERS)]
+}
+
 /// Convert metadata chapters to mp4ameta chapters
 ///
 /// Sorts chapters by start_time and converts each to mp4ameta::Chapter.
+/// Titles are truncated to the chpl atom limit (255 bytes) on a char boundary.
 /// The mp4ameta crate handles duration calculation internally based on chapter start times.
 fn convert_chapters_for_embedding(chapters: &[crate::metadata::Chapter]) -> Vec<mp4ameta::Chapter> {
     let mut metadata_chapters = chapters.to_vec();
@@ -65,10 +106,7 @@ fn convert_chapters_for_embedding(chapters: &[crate::metadata::Chapter]) -> Vec<
     let mut result = Vec::with_capacity(metadata_chapters.len());
 
     for chapter in metadata_chapters.iter() {
-        // Truncate title to 255 characters (chpl atom limit)
-        // Use character-aware truncation to safely handle multi-byte UTF-8 characters
-        let title: String = chapter.title.chars().take(CHAPTER_TITLE_MAX_CHARS).collect();
-
+        let title = truncate_chapter_title(&chapter.title);
         result.push(mp4ameta::Chapter::new(chapter.start_time, &title));
     }
 
@@ -522,6 +560,15 @@ impl Tagger {
         let mut chapters_vec = chapters.to_vec();
         validate_and_sort_chapters(&mut chapters_vec)?;
 
+        if chapters_vec.len() > CHAPTER_LIST_MAX_CHAPTERS {
+            warn!(
+                "Nero chapter list is limited to {} entries; omitting {} chapter(s) from: {}",
+                CHAPTER_LIST_MAX_CHAPTERS,
+                chapters_vec.len() - CHAPTER_LIST_MAX_CHAPTERS,
+                path.display()
+            );
+        }
+
         info!("Embedding {} chapters into: {}", chapters_vec.len(), path.display());
 
         // Read existing tag
@@ -531,9 +578,11 @@ impl Tagger {
         // Clear existing chapters
         tag.chapter_list_mut().clear();
 
-        // Convert to mp4ameta chapters and add to tag
+        // Convert to mp4ameta chapters and write the chpl representation. The
+        // chpl atom cannot represent more than 255 entries; other chapter
+        // representations (the QuickTime chapter track) use the full list.
         let mp4_chapters = convert_chapters_for_embedding(&chapters_vec);
-        tag.chapter_list_mut().extend(mp4_chapters);
+        tag.chapter_list_mut().extend_from_slice(chpl_chapters(&mp4_chapters));
 
         // Write back to file
         tag.write_to_path(path)
@@ -640,6 +689,28 @@ impl Tagger {
         output_path: P,
         metadata: &BookMetadata,
     ) -> Result<()> {
+        let artist =
+            if metadata.authors.is_empty() { None } else { Some(metadata.authors.join(", ")) };
+
+        self.write_chapters_txt_with(
+            output_path,
+            &metadata.title,
+            artist.as_deref(),
+            &metadata.chapters,
+        )
+    }
+
+    /// Write chapters to a chapters.txt file using explicit header values.
+    ///
+    /// Used when chapters were resolved without provider metadata (generated
+    /// from the input tracks), where there is no [`BookMetadata`] to export.
+    pub fn write_chapters_txt_with<P: AsRef<Path>>(
+        &self,
+        output_path: P,
+        album: &str,
+        artist: Option<&str>,
+        chapters: &[crate::metadata::Chapter],
+    ) -> Result<()> {
         let path = output_path.as_ref();
 
         debug!("Writing chapters.txt to: {}", path.display());
@@ -647,14 +718,15 @@ impl Tagger {
         // Build chapters content
         let mut content = String::new();
 
-        // Add metadata headers
-        if !metadata.authors.is_empty() {
-            content.push_str(&format!("## artist: {}\n", metadata.authors.join(", ")));
+        // Add headers
+        if let Some(artist) = artist.filter(|artist| !artist.is_empty()) {
+            content.push_str(&format!("## artist: {}\n", artist));
         }
-        content.push_str(&format!("## album: {}\n", metadata.title));
+        content.push_str(&format!("## album: {}\n", album));
 
         // Add total duration if available
-        if let Some(duration) = metadata.total_duration() {
+        let total_duration = chapters.iter().map(|chapter| chapter.end_time()).max();
+        if let Some(duration) = total_duration {
             content.push_str(&format!("## total-duration: {}\n", format_duration(duration)));
         }
 
@@ -662,7 +734,7 @@ impl Tagger {
         content.push('\n');
 
         // Add chapters
-        for chapter in &metadata.chapters {
+        for chapter in chapters {
             let timestamp = format_duration(chapter.start_time);
             content.push_str(&format!("{} {}\n", timestamp, chapter.title));
         }
@@ -1275,6 +1347,29 @@ mod tests {
     }
 
     #[test]
+    fn test_write_chapters_txt_without_artist() {
+        let temp_dir = TempDir::new().unwrap();
+        let chapters_path = temp_dir.path().join("audiobook.chapters.txt");
+
+        // Generated chapters have no provider metadata: no artist header, and the
+        // album falls back to the output name.
+        let chapters = vec![
+            Chapter::new("Chapter 01", Duration::from_secs(0), Duration::from_secs(5)),
+            Chapter::new("Chapter 02", Duration::from_secs(5), Duration::from_secs(5)),
+        ];
+
+        let tagger = Tagger::new();
+        tagger.write_chapters_txt_with(&chapters_path, "audiobook", None, &chapters).unwrap();
+
+        let content = std::fs::read_to_string(&chapters_path).unwrap();
+        assert!(!content.contains("## artist:"));
+        assert!(content.contains("## album: audiobook"));
+        assert!(content.contains("## total-duration: 00:00:10.000"));
+        assert!(content.contains("00:00:00.000 Chapter 01"));
+        assert!(content.contains("00:00:05.000 Chapter 02"));
+    }
+
+    #[test]
     fn test_move_completed_files() {
         let temp_dir = TempDir::new().unwrap();
         let source_dir = temp_dir.path().join("source");
@@ -1649,18 +1744,80 @@ mod tests {
 
     #[test]
     fn test_convert_chapters_for_embedding_utf8_safe_truncation() {
-        // Test that multi-byte UTF-8 characters are handled safely without panicking
-        // Each emoji is 4 bytes in UTF-8, so 300 emojis would be 1200 bytes
+        // Titles must be cut on a char boundary within the 255-byte chpl limit;
+        // mp4ameta slices at a raw byte index and panics mid-character.
         let emoji_title = "😀".repeat(300);
         let chapters =
             vec![Chapter::new(emoji_title.clone(), Duration::ZERO, Duration::from_secs(60))];
 
         let mp4_chapters = convert_chapters_for_embedding(&chapters);
         assert_eq!(mp4_chapters.len(), 1);
-        // Should have exactly 255 characters (not bytes)
-        assert_eq!(mp4_chapters[0].title.chars().count(), 255);
-        // Verify the title starts with the emoji character
-        assert!(mp4_chapters[0].title.starts_with('😀'));
+        // Each emoji is 4 bytes, so 63 whole emoji (252 bytes) fit under 255.
+        assert_eq!(mp4_chapters[0].title, "😀".repeat(63));
+        assert!(mp4_chapters[0].title.len() <= CHAPTER_TITLE_MAX_BYTES);
+    }
+
+    #[test]
+    fn test_convert_chapters_for_embedding_truncates_three_byte_chars() {
+        // 'é' is 2 bytes: 127 chars fit in 254 bytes, while 128 need 256.
+        let title = "é".repeat(200);
+        let chapters = vec![Chapter::new(title, Duration::ZERO, Duration::from_secs(60))];
+
+        let mp4_chapters = convert_chapters_for_embedding(&chapters);
+        assert_eq!(mp4_chapters[0].title, "é".repeat(127));
+        assert!(mp4_chapters[0].title.len() <= CHAPTER_TITLE_MAX_BYTES);
+    }
+
+    #[test]
+    fn test_truncate_chapter_title_keeps_short_titles() {
+        assert_eq!(truncate_chapter_title(""), "");
+        assert_eq!(truncate_chapter_title("Chapter 1"), "Chapter 1");
+
+        // Exactly at the limit is unchanged, including multibyte text.
+        let at_limit = "é".repeat(127) + "a";
+        assert_eq!(at_limit.len(), CHAPTER_TITLE_MAX_BYTES);
+        assert_eq!(truncate_chapter_title(&at_limit), at_limit);
+    }
+
+    #[test]
+    fn test_convert_chapters_for_embedding_keeps_all_entries() {
+        // Conversion is representation-agnostic; only the chpl write site caps.
+        let chapters: Vec<Chapter> = (0..CHAPTER_LIST_MAX_CHAPTERS + 1)
+            .map(|i| {
+                Chapter::new(
+                    format!("Ch{}", i),
+                    Duration::from_secs(i as u64 * 60),
+                    Duration::from_secs(60),
+                )
+            })
+            .collect();
+
+        let mp4_chapters = convert_chapters_for_embedding(&chapters);
+        assert_eq!(mp4_chapters.len(), CHAPTER_LIST_MAX_CHAPTERS + 1);
+        assert_eq!(mp4_chapters.last().unwrap().title, "Ch255");
+    }
+
+    #[test]
+    fn test_chpl_chapters_caps_at_representable_count() {
+        // A 256-entry chapter list would wrap the chpl entry count byte.
+        let chapters: Vec<Chapter> = (0..CHAPTER_LIST_MAX_CHAPTERS + 1)
+            .map(|i| {
+                Chapter::new(
+                    format!("Ch{}", i),
+                    Duration::from_secs(i as u64 * 60),
+                    Duration::from_secs(60),
+                )
+            })
+            .collect();
+
+        let mp4_chapters = convert_chapters_for_embedding(&chapters);
+        let chpl = chpl_chapters(&mp4_chapters);
+        assert_eq!(chpl.len(), CHAPTER_LIST_MAX_CHAPTERS);
+        assert_eq!(chpl.last().unwrap().title, "Ch254");
+
+        // Lists that already fit are returned unchanged.
+        assert_eq!(chpl_chapters(&mp4_chapters[..3]).len(), 3);
+        assert!(chpl_chapters(&[]).is_empty());
     }
 
     #[test]

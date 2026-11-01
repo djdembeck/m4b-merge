@@ -284,6 +284,142 @@ fn test_chapter_read_from_file_without_chapters() {
 }
 
 #[test]
+fn test_chapter_embed_caps_count_at_chpl_limit() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("test.m4b");
+    create_test_m4b(&m4b_path, 10);
+
+    // 256 chapters would wrap the chpl atom's one-byte entry count.
+    let chapters: Vec<m4b_merge::metadata::Chapter> = (0..=255)
+        .map(|i| {
+            m4b_merge::metadata::Chapter::new(
+                format!("Chapter {}", i),
+                Duration::from_millis(i as u64 * 10),
+                Duration::from_millis(10),
+            )
+        })
+        .collect();
+
+    let tagger = m4b_merge::tagging::Tagger::new();
+    tagger.embed_chapters(&m4b_path, &chapters).expect("embed truncated chapter list");
+
+    let tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read back chapters");
+    assert_eq!(tag.chapter_list().len(), 255, "chpl atom holds at most 255 chapters");
+    assert_eq!(tag.chapter_list()[0].title, "Chapter 0");
+    assert_eq!(tag.chapter_list()[254].title, "Chapter 254");
+}
+
+#[test]
+fn test_chapter_embed_multibyte_title_does_not_panic() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("test.m4b");
+    create_test_m4b(&m4b_path, 10);
+
+    // 400 bytes of 2-byte characters; byte 255 falls inside a character.
+    let title = "é".repeat(200);
+    let chapters =
+        vec![m4b_merge::metadata::Chapter::new(title, Duration::ZERO, Duration::from_secs(10))];
+
+    let tagger = m4b_merge::tagging::Tagger::new();
+    tagger.embed_chapters(&m4b_path, &chapters).expect("embed multibyte chapter title");
+
+    let tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read back chapters");
+    let embedded = &tag.chapter_list()[0].title;
+    assert_eq!(embedded, &"é".repeat(127), "title truncated on a char boundary under 255 bytes");
+}
+
+#[test]
+fn test_chapter_read_prefers_track_when_chpl_list_is_truncated() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("test.m4b");
+    create_test_m4b(&m4b_path, 30);
+
+    // Reproduce the post-#464 shape: the QuickTime track holds all chapters
+    // while the Nero `chpl` list is capped at the one-byte entry count.
+    let mut tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag");
+    tag.chapter_list_mut().clear();
+    tag.chapter_track_mut().clear();
+    let all: Vec<mp4ameta::Chapter> = (0..257)
+        .map(|i| {
+            mp4ameta::Chapter::new(Duration::from_millis(i as u64 * 100), format!("Chapter {}", i))
+        })
+        .collect();
+    tag.chapter_list_mut().extend(all[..255].iter().cloned());
+    tag.chapter_track_mut().extend(all);
+    tag.write_to_path(&m4b_path).expect("write chapters");
+
+    let read_back =
+        m4b_merge::chapters::read_chapters(&m4b_path, None).expect("Failed to read chapters");
+
+    assert_eq!(read_back.len(), 257, "the full chapter track must win over the truncated list");
+    assert_eq!(read_back[0].title, "Chapter 0");
+    assert_eq!(read_back[256].title, "Chapter 256");
+    assert_eq!(read_back[256].start_time, 25_600);
+}
+
+#[test]
+fn test_chapter_read_ignores_stale_track_after_replacement() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let m4b_path = temp_dir.path().join("test.m4b");
+    create_test_m4b(&m4b_path, 30);
+
+    // Seed a 10-chapter QuickTime track, as a file from another tool would have.
+    let mut tag = mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag");
+    tag.chapter_track_mut().clear();
+    tag.chapter_track_mut().extend(
+        (0..10)
+            .map(|i| mp4ameta::Chapter::new(Duration::from_secs(i), format!("Old chapter {}", i))),
+    );
+    tag.write_to_path(&m4b_path).expect("write chapter track");
+    assert_eq!(
+        mp4ameta::Tag::read_from_path(&m4b_path).expect("read tag").chapter_track().len(),
+        10
+    );
+
+    // Replace them through the public API. `embed_chapters` writes the list and
+    // leaves the pre-existing track untouched, so the track is now stale.
+    let chapters = vec![
+        m4b_merge::metadata::Chapter::new("New one", Duration::ZERO, Duration::from_secs(10)),
+        m4b_merge::metadata::Chapter::new(
+            "New two",
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+        ),
+        m4b_merge::metadata::Chapter::new(
+            "New three",
+            Duration::from_secs(20),
+            Duration::from_secs(10),
+        ),
+    ];
+    let tagger = m4b_merge::tagging::Tagger::new();
+    tagger.embed_chapters(&m4b_path, &chapters).expect("embed chapters");
+
+    let read_back =
+        m4b_merge::chapters::read_chapters(&m4b_path, None).expect("Failed to read chapters");
+
+    assert_eq!(read_back.len(), 3, "readback must follow the replacement, not the stale track");
+    assert_eq!(read_back[0].title, "New one");
+    assert_eq!(read_back[2].title, "New three");
+    assert_eq!(read_back[2].start_time, 20_000);
+}
+
+#[test]
 fn test_chapter_long_duration() {
     if !ffmpeg_available() {
         return;

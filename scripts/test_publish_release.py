@@ -41,7 +41,14 @@ response = responses.get(json.dumps(command))
 if response is None:
     sys.stderr.write('Unexpected adapter command: ' + repr(command))
     sys.exit(99)
-sys.stdout.write(response.get('stdout', ''))
+# docker cp writes the (possibly partial) file before honoring the exit code.
+if len(command) == 4 and command[1] == 'cp':
+    target = pathlib.Path(sys.argv[3])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(response.get('stdout', ''))
+    target.chmod(0o755)
+if command[1] != 'cp':
+    sys.stdout.write(response.get('stdout', ''))
 sys.stderr.write(response.get('stderr', ''))
 sys.exit(response.get('code', 0))
 """)
@@ -54,6 +61,8 @@ sys.exit(response.get('code', 0))
         self.args = argparse.Namespace(image=IMAGE, sha=SHA, version=VERSION,
                                        arch="amd64", required=False, amd64=AMD, arm64=ARM,
                                        repo="owner/repo", tag=VERSION,
+                                       asset=["m4b-merge-linux", "m4b-merge-macos",
+                                              "m4b-merge-windows.exe"],
                                        artifacts=str(self.root / "artifacts"))
 
     def response(self, command, value=None, code=0, error=""):
@@ -77,7 +86,9 @@ sys.exit(response.get('code', 0))
         self.inspect(ref, error=f"ERROR: {ref}: not found")
 
     def called(self):
-        return [json.loads(line) for line in self.calls.read_text().splitlines()]
+        if not self.calls.exists():
+            return []
+        return [json.loads(line) for line in self.calls.read_text().splitlines() if line]
 
     def prepare_manifest(self):
         for arch, value in (("amd64", AMD), ("arm64", ARM)):
@@ -150,9 +161,12 @@ sys.exit(response.get('code', 0))
             publisher.manifest(self.args)
         self.assertFalse(any("create" in cmd for cmd in self.called()))
 
-    def prepare_assets(self):
+    def prepare_assets(self, names=("m4b-merge-linux", "m4b-merge-macos",
+                                    "m4b-merge-windows.exe")):
+        # Individual cases opt in to wider historical inventories explicitly.
+        self.args.asset = list(names)
         self.asset_list = []
-        for number, name in enumerate(("m4b-merge-linux", "m4b-merge-macos", "m4b-merge-windows.exe")):
+        for number, name in enumerate(names):
             path = Path(self.args.artifacts) / name / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(name.encode())
@@ -283,39 +297,307 @@ sys.exit(response.get('code', 0))
             publisher.assets(self.args)
         self.assertFalse(any("upload" in cmd for cmd in self.called()))
 
-    def test_main_dispatches_stage_and_manifest_by_canonical_flags(self):
+    def test_cli_dispatches_with_repeated_asset_flags(self):
         import sys
-        dispatched = []
+
+        def assets(args):
+            self.assertListEqual(args.asset, ["m4b-merge-linux", "m4b-merge-linux-arm64",
+                                              "m4b-merge-macos", "m4b-merge-windows.exe"])
+
+        with patch.object(publisher, "assets", assets):
+            with patch.object(sys, "argv", ["publish_release.py", "assets",
+                                            "--repo", "owner/repo", "--tag", VERSION,
+                                            "--sha", SHA, "--artifacts", "artifacts",
+                                            "--asset", "m4b-merge-linux",
+                                            "--asset", "m4b-merge-linux-arm64",
+                                            "--asset", "m4b-merge-macos",
+                                            "--asset", "m4b-merge-windows.exe"]):
+                publisher.main()
+
+    def test_cli_dispatches_stage_and_manifest(self):
+        import sys
 
         def stage(args):
-            dispatched.append(("stage", args))
+            self.assertEqual(args.image, IMAGE)
+            self.assertEqual(args.sha, SHA)
+            self.assertEqual(args.version, VERSION)
+            self.assertEqual(args.arch, "amd64")
+            self.assertFalse(args.required)
 
         def manifest(args):
-            dispatched.append(("manifest", args))
+            self.assertEqual(args.image, IMAGE)
+            self.assertEqual(args.sha, SHA)
+            self.assertEqual(args.version, VERSION)
+            self.assertEqual(args.amd64, AMD)
+            self.assertEqual(args.arm64, ARM)
 
         with patch.object(publisher, "stage", stage), \
-                patch.object(publisher, "manifest", manifest):
+             patch.object(publisher, "manifest", manifest):
             with patch.object(sys, "argv", ["publish_release.py", "stage",
-                                            "--image", IMAGE, "--sha", SHA, "--version", VERSION,
+                                            "--image", IMAGE, "--sha", SHA,
+                                            "--version", VERSION,
                                             "--arch", "amd64"]):
                 publisher.main()
             with patch.object(sys, "argv", ["publish_release.py", "manifest",
-                                            "--image", IMAGE, "--sha", SHA, "--version", VERSION,
+                                            "--image", IMAGE, "--sha", SHA,
+                                            "--version", VERSION,
                                             "--amd64", AMD, "--arm64", ARM]):
                 publisher.main()
-        self.assertEqual([name for name, _ in dispatched], ["stage", "manifest"])
-        staged = dispatched[0][1]
-        self.assertEqual(staged.image, IMAGE)
-        self.assertEqual(staged.sha, SHA)
-        self.assertEqual(staged.version, VERSION)
-        self.assertEqual(staged.arch, "amd64")
-        self.assertFalse(staged.required)
-        manifested = dispatched[1][1]
-        self.assertEqual(manifested.image, IMAGE)
-        self.assertEqual(manifested.sha, SHA)
-        self.assertEqual(manifested.version, VERSION)
-        self.assertEqual(manifested.amd64, AMD)
-        self.assertEqual(manifested.arm64, ARM)
+
+    def test_cli_dispatches_extract(self):
+        import sys
+
+        def extract(args):
+            self.assertEqual(args.image, IMAGE)
+            self.assertEqual(args.digest, AMD)
+            self.assertEqual(args.sha, SHA)
+            self.assertEqual(args.version, VERSION)
+            self.assertEqual(args.arch, "arm64")
+            self.assertEqual(args.output, "artifacts/m4b-merge-linux-arm64")
+
+        with patch.object(publisher, "extract", extract):
+            with patch.object(sys, "argv", ["publish_release.py", "extract",
+                                            "--image", IMAGE,
+                                            "--digest", AMD,
+                                            "--sha", SHA,
+                                            "--version", VERSION,
+                                            "--arch", "arm64",
+                                            "--output", "artifacts/m4b-merge-linux-arm64"]):
+                publisher.main()
+
+    def test_cli_rejects_invented_asset_name(self):
+        import sys
+        with patch.object(sys, "argv", ["publish_release.py", "assets",
+                                        "--repo", "owner/repo", "--tag", VERSION,
+                                        "--sha", SHA, "--artifacts", "artifacts",
+                                        "--asset", "m4b-merge-linux-gnu"]):
+            with self.assertRaises(SystemExit):
+                publisher.main()
+
+    def test_cli_requires_at_least_one_asset(self):
+        import sys
+        with patch.object(sys, "argv", ["publish_release.py", "assets",
+                                        "--repo", "owner/repo", "--tag", VERSION,
+                                        "--sha", SHA, "--artifacts", "artifacts"]):
+            with self.assertRaises(SystemExit):
+                publisher.main()
+
+    def test_missing_arm64_artifact_prevents_upload(self):
+        self.prepare_assets(names=("m4b-merge-linux", "m4b-merge-linux-musl",
+                                   "m4b-merge-linux-arm64", "m4b-merge-macos",
+                                   "m4b-merge-windows.exe"))
+        self.asset_list.pop()
+        self.release_response()
+        (Path(self.args.artifacts) / "m4b-merge-linux-arm64" / "m4b-merge-linux-arm64").unlink()
+        with self.assertRaisesRegex(ValueError, "Expected exactly one built artifact "
+                                                "m4b-merge-linux-arm64"):
+            publisher.assets(self.args)
+        self.assertFalse(any("upload" in cmd for cmd in self.called()))
+
+    def test_duplicate_expected_names_prevent_upload(self):
+        self.prepare_assets()
+        self.args.asset = self.args.asset + ["m4b-merge-linux"]
+        self.release_response()
+        with self.assertRaisesRegex(ValueError, "Duplicate asset name"):
+            publisher.assets(self.args)
+        self.assertFalse(any("upload" in cmd for cmd in self.called()))
+
+    def test_duplicate_artifact_matches_prevent_upload(self):
+        self.prepare_assets()
+        self.release_response()
+        duplicate = Path(self.args.artifacts) / "copy" / "m4b-merge-linux"
+        duplicate.parent.mkdir(parents=True)
+        duplicate.write_bytes(b"other")
+        with self.assertRaisesRegex(ValueError, "Expected exactly one built artifact "
+                                                "m4b-merge-linux"):
+            publisher.assets(self.args)
+        self.assertFalse(any("upload" in cmd for cmd in self.called()))
+
+    def test_symlinked_artifact_is_rejected(self):
+        self.prepare_assets()
+        self.release_response()
+        path = Path(self.args.artifacts) / "m4b-merge-linux" / "m4b-merge-linux"
+        target = self.root / "m4b-merge-linux-target"
+        target.write_bytes(b"linked bytes")
+        path.unlink()
+        path.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, "Invalid built artifact m4b-merge-linux"):
+            publisher.assets(self.args)
+        self.assertFalse(any("upload" in cmd for cmd in self.called()))
+
+    def test_historical_five_name_inventory_adds_only_absent_files(self):
+        names = ("m4b-merge-linux", "m4b-merge-linux-musl", "m4b-merge-linux-arm64",
+                 "m4b-merge-macos", "m4b-merge-windows.exe")
+        self.prepare_assets(names=names)
+        # The two new backfill assets are absent from the historical release.
+        self.asset_list.pop(2)
+        self.asset_list.pop(1)
+        self.release_response()
+        uploads = []
+        for name in ("m4b-merge-linux-musl", "m4b-merge-linux-arm64"):
+            path = Path(self.args.artifacts) / name / name
+            label = publisher.asset_label(SHA, VERSION,
+                                          "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest())
+            uploads.append(["gh", "release", "upload", VERSION, f"{path}#{label}",
+                            "--repo", "owner/repo"])
+        for command in uploads:
+            self.response(command)
+        publisher.assets(self.args)
+        self.assertEqual([cmd for cmd in self.called() if "upload" in cmd], uploads)
+
+    def create_container(self, cid):
+        self.native(f"{IMAGE}@{AMD}", AMD)
+        command = ["docker", "create", "--entrypoint", "/usr/local/bin/m4b-merge",
+                   f"{IMAGE}@{AMD}"]
+        self.response(command, "")
+        # docker create prints the raw id, not JSON.
+        self.responses[json.dumps(command)]["stdout"] = cid
+        self.state.write_text(json.dumps(self.responses))
+
+    def extract_cp(self, cid, payload, code=0):
+        command = ["docker", "cp", f"{cid}:/usr/local/bin/m4b-merge",
+                   str(self.root / "out" / "m4b-merge-linux-musl")]
+        self.response(command, "")
+        # docker cp copies raw bytes, not JSON.
+        self.responses[json.dumps(command)]["stdout"] = payload
+        if code:
+            self.responses[json.dumps(command)]["code"] = code
+        self.state.write_text(json.dumps(self.responses))
+
+    def extract_args(self, output):
+        return argparse.Namespace(image=IMAGE, digest=AMD, sha=SHA, version=VERSION,
+                                  arch="amd64", output=output)
+
+    def test_extract_rejects_existing_output_before_validation(self):
+        output = self.root / "out" / "m4b-merge-linux-musl"
+        output.parent.mkdir(parents=True)
+        output.write_bytes(b"pre-existing")
+        with self.assertRaisesRegex(ValueError, "Refusing to use existing output path"):
+            publisher.extract(self.extract_args(output))
+        self.assertEqual(output.read_bytes(), b"pre-existing")
+        self.assertEqual(self.called(), [])
+
+    def test_extract_rejects_dangling_symlink_output(self):
+        output = self.root / "out" / "m4b-merge-linux-musl"
+        output.parent.mkdir(parents=True)
+        output.symlink_to(self.root / "nowhere")
+        with self.assertRaisesRegex(ValueError, "Refusing to use existing output path"):
+            publisher.extract(self.extract_args(output))
+        self.assertTrue(output.is_symlink())
+        self.assertEqual(self.called(), [])
+
+    def test_extract_wrong_provenance_never_touches_output(self):
+        (self.root / "out").mkdir()
+        output = self.root / "out" / "m4b-merge-linux-musl"
+        # Provenance label mismatch: image exists at the digest, wrong revision.
+        self.native(f"{IMAGE}@{AMD}", AMD, sha="b" * 40)
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            publisher.extract(self.extract_args(output))
+        self.assertFalse(output.exists())
+        self.assertFalse(any("create" in cmd for cmd in self.called()))
+
+    def test_extract_digest_mismatch_never_touches_output(self):
+        output = self.root / "out" / "m4b-merge-linux-musl"
+        self.native(f"{IMAGE}@{AMD}", ARM)
+        with self.assertRaisesRegex(ValueError, "digest mismatch"):
+            publisher.extract(self.extract_args(output))
+        self.assertFalse(output.exists())
+
+    def test_extract_missing_image_fails_closed_before_output(self):
+        output = self.root / "out" / "m4b-merge-linux-musl"
+        self.missing(f"{IMAGE}@{AMD}")
+        with self.assertRaises(subprocess.CalledProcessError):
+            publisher.extract(self.extract_args(output))
+        self.assertFalse(output.exists())
+        # Provenance inspection ran, but no container was created for it.
+        self.assertFalse(any("create" in cmd or "cp" in cmd
+                             for cmd in self.called()))
+
+    def test_successful_extract_copies_verified_bytes_and_removes_container(self):
+        output = self.root / "out" / "m4b-merge-linux-musl"
+        self.create_container("cid-1")
+        self.extract_cp("cid-1", "extracted binary")
+        self.response(["docker", "rm", "cid-1"])
+        publisher.extract(self.extract_args(output))
+        self.assertEqual(output.read_bytes(), b"extracted binary")
+        self.assertTrue(os.access(output, os.X_OK))
+        # No tag fallback: the container was created from the digest-pinned ref.
+        self.assertIn(["docker", "create", "--entrypoint", "/usr/local/bin/m4b-merge",
+                       f"{IMAGE}@{AMD}"], self.called())
+
+    def test_failed_extract_cp_leaves_no_output_and_removes_container(self):
+        output = self.root / "out" / "m4b-merge-linux-musl"
+        self.create_container("cid-2")
+        self.extract_cp("cid-2", "partial bytes", code=1)
+        self.response(["docker", "rm", "cid-2"])
+        with self.assertRaises(subprocess.CalledProcessError):
+            publisher.extract(self.extract_args(output))
+        self.assertFalse(output.exists())
+        self.assertIn(["docker", "rm", "cid-2"], self.called())
+
+    def extract_post_cp(self, cid, mode=None, size=1):
+        # Emulate a docker cp that writes the target, then (optionally)
+        # restates the post-copy file shape the publisher must validate.
+        command = ["docker", "cp", f"{cid}:/usr/local/bin/m4b-merge",
+                   str(self.root / "out" / "m4b-merge-linux-musl")]
+        self.response(command, "")
+        # The post-copy restatement runs inside the cp block, after
+        # docker cp has written the target.
+        restater = (
+            f"    target.write_bytes(b'x' * {size})\n"
+            if size else "") + (
+            f"    target.chmod(0o{mode:03o})\n" if mode is not None else "")
+        self.generic_adapter(restater)
+        self.state.write_text(json.dumps(self.responses))
+
+    def generic_adapter(self, cp_body):
+        adapter = self.root / "docker"
+        adapter.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, sys
+command = [pathlib.Path(sys.argv[0]).name, *sys.argv[1:]]
+with open(os.environ['PUBLISH_CALLS'], 'a') as stream:
+    stream.write(json.dumps(command) + '\\n')
+responses = json.loads(pathlib.Path(os.environ['PUBLISH_RESPONSES']).read_text())
+response = responses.get(json.dumps(command))
+if response is None:
+    sys.stderr.write('Unexpected adapter command: ' + repr(command))
+    sys.exit(99)
+if len(command) == 4 and command[1] == 'cp':
+    target = pathlib.Path(sys.argv[3])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(response.get('stdout', ''))
+""" + cp_body + """
+if command[1] != 'cp':
+    sys.stdout.write(response.get('stdout', ''))
+sys.stderr.write(response.get('stderr', ''))
+sys.exit(response.get('code', 0))
+""")
+        adapter.chmod(0o755)
+
+    def test_extract_non_executable_target_fails_and_removes_container(self):
+        # Post-copy validation: the copied bytes lack the exec bit, so
+        # the publish refuses the asset even though docker cp succeeded.
+        output = self.root / "out" / "m4b-merge-linux-musl"
+        self.create_container("cid-3")
+        self.extract_post_cp("cid-3", mode=0o644)
+        self.response(["docker", "rm", "cid-3"])
+        with self.assertRaisesRegex(
+                ValueError, "not a regular executable file"):
+            publisher.extract(self.extract_args(output))
+        self.assertFalse(output.exists())
+        self.assertIn(["docker", "rm", "cid-3"], self.called())
+
+    def test_extract_empty_target_fails_and_removes_container(self):
+        # An empty copy must also be rejected after the copy.
+        output = self.root / "out" / "m4b-merge-linux-musl"
+        self.create_container("cid-4")
+        self.extract_post_cp("cid-4", size=0)
+        self.response(["docker", "rm", "cid-4"])
+        with self.assertRaisesRegex(
+                ValueError, "not a regular executable file"):
+            publisher.extract(self.extract_args(output))
+        self.assertFalse(output.exists())
+        self.assertIn(["docker", "rm", "cid-4"], self.called())
 
 
 if __name__ == "__main__":
