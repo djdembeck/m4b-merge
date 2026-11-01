@@ -174,9 +174,12 @@ sys.exit(response.get('code', 0))
                                     "digest": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()})
         self.release_response()
 
-    def release_response(self):
+    def release_response(self, draft=False, extra=None):
+        # The publisher resolves the draft through the paginated listing, the
+        # same draft-visible surface the release helper uses.
+        records = [{"tag_name": VERSION, "draft": draft, "assets": self.asset_list}] + list(extra or [])
         self.response(["gh", "api", "--hostname", "github.com",
-                       f"repos/owner/repo/releases/tags/{VERSION}"], {"assets": self.asset_list})
+                       f"repos/owner/repo/releases?per_page=100&page=1"], records)
 
     def test_assets_match_and_windows_extension_preserved(self):
         self.prepare_assets()
@@ -253,6 +256,37 @@ sys.exit(response.get('code', 0))
         with self.assertRaises(subprocess.CalledProcessError):
             publisher.manifest(self.args)
         self.assertFalse(any("create" in cmd for cmd in self.called()))
+
+    def test_draft_release_hidden_from_by_tag_lookup_is_found_via_listing(self):
+        # The draft exists only in the paginated listing; the by-tag
+        # published-only lookup would 404. All three assets upload.
+        for name in ("m4b-merge-linux", "m4b-merge-macos", "m4b-merge-windows.exe"):
+            path = Path(self.args.artifacts) / name / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(name.encode())
+        self.asset_list = []
+        self.release_response(draft=True,
+                              extra=[{"tag_name": "v9.9.9", "draft": True, "assets": []}])
+        uploads = []
+        for name in ("m4b-merge-linux", "m4b-merge-macos", "m4b-merge-windows.exe"):
+            path = Path(self.args.artifacts) / name / name
+            digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+            command = ["gh", "release", "upload", VERSION,
+                        f"{path}#{publisher.asset_label(SHA, VERSION, digest)}",
+                        "--repo", "owner/repo"]
+            self.response(command)
+            uploads.append(command)
+        publisher.assets(self.args)
+        self.assertEqual([cmd for cmd in self.called() if "upload" in cmd], uploads)
+
+    def test_duplicate_tag_listing_fails_closed_without_uploads(self):
+        self.prepare_assets()
+        self.release_response(draft=True,
+                              extra=[{"tag_name": VERSION, "draft": False,
+                                      "assets": [], "id": 99}])
+        with self.assertRaisesRegex(ValueError, "Multiple release records share tag"):
+            publisher.assets(self.args)
+        self.assertFalse(any("upload" in cmd for cmd in self.called()))
 
     def test_asset_conflict_prevents_all_uploads(self):
         self.prepare_assets()

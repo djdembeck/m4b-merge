@@ -20,7 +20,7 @@ The tool automates metadata lookup by ASIN or AudiobookDB book ID through [Audio
 
 ### Docker (Fastest Path)
 
-Choose a published `vX.Y.Z` tag or digest from the [release you intend to run](https://github.com/djdembeck/m4b-merge/releases), and set `IMAGE` to its full GHCR reference. The release workflow does not maintain a rolling `latest` alias.
+Choose a published `vX.Y.Z` tag or digest from the [release you intend to run](https://github.com/djdembeck/m4b-merge/releases), and set `IMAGE` to its full GHCR reference. The workflow does not maintain a rolling Docker `latest` alias, so pin an explicit tag. GitHub's *Latest* release label is independent: it tracks the highest published stable version and is not advanced by lower-version delayed completions.
 
 ```bash
 : "${IMAGE:?Set IMAGE to a published GHCR version tag or digest}"
