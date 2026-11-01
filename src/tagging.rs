@@ -410,17 +410,23 @@ impl Tagger {
         // Year
         if let Some(year) = metadata.year {
             tag.set_year(year.to_string());
+        } else {
+            tag.remove_year();
         }
 
         // Comment (description)
         if !metadata.description.is_empty() {
             tag.set_comment(&metadata.description);
+        } else {
+            tag.remove_comments();
         }
 
         // Narrator (composer is the convention used by Prologue, Audiobookshelf,
         // and Audible for audiobook narrators)
         if !metadata.narrators.is_empty() {
             tag.set_composer(metadata.narrators.join(", "));
+        } else {
+            tag.remove_composers();
         }
 
         // Series information. Grouping also carries any unrelated user content,
@@ -1651,6 +1657,41 @@ mod tests {
         Tagger::apply_metadata(&mut tag, &metadata);
 
         assert_eq!(tag.composer(), None);
+    }
+
+    #[test]
+    fn test_apply_metadata_removes_stale_year_comment_composer_when_absent() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "").add_author("Author");
+
+        let mut tag = mp4ameta::Tag::default();
+        tag.set_year("2019");
+        tag.set_comment("Old description");
+        tag.set_composer("Old Narrator");
+
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.year(), None, "retagging must not keep a stale year");
+        assert_eq!(tag.comment(), None, "retagging must not keep a stale comment");
+        assert_eq!(tag.composer(), None, "retagging must not keep a stale composer");
+    }
+
+    #[test]
+    fn test_apply_metadata_keeps_present_year_comment_composer() {
+        let metadata = BookMetadata::new("B08XYZ1234", "Test Book", "New description")
+            .add_author("Author")
+            .add_narrator("Narrator One")
+            .with_year(2020);
+
+        let mut tag = mp4ameta::Tag::default();
+        tag.set_year("2019");
+        tag.set_comment("Old description");
+        tag.set_composer("Old Narrator");
+
+        Tagger::apply_metadata(&mut tag, &metadata);
+
+        assert_eq!(tag.year(), Some("2020"));
+        assert_eq!(tag.comment(), Some("New description"));
+        assert_eq!(tag.composer(), Some("Narrator One"));
     }
 
     #[test]

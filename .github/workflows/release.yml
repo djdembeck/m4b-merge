@@ -433,6 +433,7 @@ jobs:
         env:
           GNU_TARGET: ${{ matrix.gnu-target }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/gnu-baseline-target
+          M4B_MERGE_VERSION: ${{ needs.check.outputs.version }}
         run: |
           set -euo pipefail
           rustup target add "$GNU_TARGET"
