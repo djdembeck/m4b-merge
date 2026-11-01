@@ -201,9 +201,9 @@ publishes that exact SHA:
 - `manifest`: assembles the multi-arch `vX.Y.Z` image **only** from the
   per-arch images of the same SHA. Neither `Release` nor CI publishes a
   mutable `latest` Docker alias — the Release workflow's tag set is only
-  the immutable `sha-<sha>-<arch>` staging tags and the `vX.Y.Z` version
-  tags, and CI's Docker pusher sets a `latest=false` metadata flavor — so
-  run from an explicit `vX.Y.Z` version tag.
+  the immutable `sha-<sha>-<arch>` staging tags, the per-arch
+  `vX.Y.Z-{arch}` version tags, and the multi-arch `vX.Y.Z` version tag,
+  and CI's Docker pusher sets a `latest=false` metadata flavor.
 - `upload`: fills in missing release assets (`m4b-merge-linux`,
   `m4b-merge-linux-arm64`, `m4b-merge-macos`, `m4b-merge-windows.exe`);
   existing assets are never overwritten, replaced, or renamed.
