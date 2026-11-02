@@ -1,19 +1,7 @@
-# Trusted "Release policy" status producer for promotion PRs into main.
-#
-# Runs on pull_request_target, so it always executes with the BASE branch's
-# code. It checks out ONLY the trusted base SHA, then runs the base-owned helper
-# `scripts/release.py policy` with --report-status. The helper validates the
-# frozen promotion shape (two-parent merge, tree exactly equal to frozen
-# develop, fresh prepared version) against LIVE refs and posts a literal
-# "Release policy" status on the PR head SHA.
-#
-# Trust bootstrap: this workflow only proves anything once it and the helper
-# are merged to main. Do not require the "Release policy" check before that
-# initial promotion PR is merged by a human (with review), and never relax
-# native strict base freshness as a substitute.
-#
-# Security: the PR head is fetched as objects only. It is never checked out
-# and no code from the fork/PR is executed.
+# Trusted base-owned guard for direct same-repository develop -> main PRs.
+# Fetch head objects only; never execute PR code with this status-write token.
+# Main freshness stays unchanged until isolated platform proof and separate apply.
+# Required-check trust must be bound to this producer, not merely its context name.
 
 name: Release Policy
 
@@ -49,5 +37,5 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Verify frozen promotion and report status
+      - name: Verify direct develop promotion and report status
         run: python3 scripts/release.py policy --event "$GITHUB_EVENT_PATH" --report-status

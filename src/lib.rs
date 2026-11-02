@@ -1,3 +1,5 @@
+pub const VERSION: &str = env!("M4B_MERGE_APP_VERSION");
+
 pub mod api;
 pub mod audio;
 pub mod chapters;

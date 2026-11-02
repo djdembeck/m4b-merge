@@ -1,0 +1,9 @@
+# actionlint v1.7.12 (latest as of 2026-10) predates the GitHub `concurrency.queue`
+# key (GitHub changelog, 2026-05-07) and syntax-flags it as an unexpected key,
+# while GitHub accepts it. Upstream support is open (rhysd/actionlint#654, #657).
+# Pin this ignore to the full message and remove it once a supporting
+# actionlint release is pinned in ci.yml.
+paths:
+  ".github/workflows/**/*.{yml,yaml}":
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section. expected one of "cancel-in-progress", "group"'

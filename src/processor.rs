@@ -5,12 +5,12 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use crate::api::{MetadataError, MetadataSource};
-use crate::audio::ffmpeg::FFmpeg;
+use crate::audio::ffmpeg::{FFmpeg, FFmpegError};
 use crate::config::Config;
 use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
 use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
-use crate::tagging::{Tagger, TaggingError};
+use crate::tagging::{Tagger, TaggingError, describe_out_of_range_chapters, format_duration};
 
 /// Static metadata ID regex compiled once at startup
 static METADATA_ID_REGEX: OnceLock<regex::Regex> = OnceLock::new();
@@ -21,6 +21,8 @@ static METADATA_ID_REGEX: OnceLock<regex::Regex> = OnceLock::new();
 /// `AudiobookdbClient::looks_like_asin`) or an AudiobookDB internal id (12
 /// alphanumeric characters). A bracketed word whose content is neither 10 nor
 /// 12 alphanumeric characters (e.g. `[Unabridged 2020]`) yields no lookup.
+/// The pattern cannot tell a descriptive marker from an ID, so callers must
+/// collect every match and try them in order.
 fn get_metadata_id_regex() -> &'static regex::Regex {
     METADATA_ID_REGEX.get_or_init(|| {
         regex::Regex::new(r"\[([A-Za-z0-9]{10}|[A-Za-z0-9]{12})\]")
@@ -57,6 +59,18 @@ pub enum ProcessorError {
 
     #[error("Processing failed for {path}: {reason}")]
     ProcessingFailed { path: PathBuf, reason: String },
+
+    #[error(
+        "Refusing to embed chapters for {path}: {count} chapter(s) start at or past the {playlength} playlength ({details})"
+    )]
+    ChaptersOutOfRange { path: PathBuf, count: usize, playlength: String, details: String },
+
+    #[error("Could not determine duration of {path}; refusing to tag chapters: {source}")]
+    ProbeFailed {
+        path: PathBuf,
+        #[source]
+        source: FFmpegError,
+    },
 
     #[error("Cleanup failed: {0}")]
     CleanupFailed(String),
@@ -157,6 +171,16 @@ pub struct Processor {
     api_client: Option<MetadataSource>,
     merger: Merger,
     tagger: Tagger,
+    /// Test-only substitute for [`Tagger::embed_chapters`], so the
+    /// chapter-embed failure path can be exercised without a real file.
+    #[cfg(test)]
+    embed_hook: Option<
+        Arc<
+            dyn Fn(&std::path::Path, &[crate::metadata::Chapter]) -> crate::tagging::Result<()>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 impl Processor {
@@ -186,8 +210,18 @@ impl Processor {
 
         let merger = Merger::new(ffmpeg.clone());
         let tagger = Tagger::new();
+        #[cfg(test)]
+        let embed_hook = None;
 
-        Ok(Self { config, ffmpeg, api_client, merger, tagger })
+        Ok(Self {
+            config,
+            ffmpeg,
+            api_client,
+            merger,
+            tagger,
+            #[cfg(test)]
+            embed_hook,
+        })
     }
 
     /// Create a new Processor with explicit components (for testing)
@@ -199,8 +233,18 @@ impl Processor {
     ) -> Self {
         let merger = Merger::new(ffmpeg.clone());
         let tagger = Tagger::new();
+        #[cfg(test)]
+        let embed_hook = None;
 
-        Self { config, ffmpeg, api_client, merger, tagger }
+        Self {
+            config,
+            ffmpeg,
+            api_client,
+            merger,
+            tagger,
+            #[cfg(test)]
+            embed_hook,
+        }
     }
 
     /// Process all input paths
@@ -323,14 +367,22 @@ impl Processor {
 
         // Stage 2: API Lookup (optional - only if metadata ID is provided or can be inferred)
         // Skipped in dry-run mode to avoid unnecessary network calls
-        let metadata = if self.config.dry_run {
+        let mut metadata = if self.config.dry_run {
             None
         } else if let Some(client) = &self.api_client {
-            let extracted_id = self.extract_metadata_id(group);
+            let candidate_ids = self.extract_metadata_ids(group);
 
-            let id = self.config.metadata_id.as_deref().or(extracted_id.as_deref());
+            // An explicit --metadata-id wins; otherwise try every bracketed
+            // candidate in name order. A descriptive marker such as
+            // `[Unabridged]` is ASIN-shaped, so a failure falls through to the
+            // next token instead of dropping a real ASIN listed after it.
+            let ids: Vec<&str> = match self.config.metadata_id.as_deref() {
+                Some(id) => vec![id],
+                None => candidate_ids.iter().map(String::as_str).collect(),
+            };
 
-            if let Some(id) = id {
+            let mut metadata = None;
+            for (index, id) in ids.iter().enumerate() {
                 progress_handler.on_progress(ProcessingProgress {
                     stage: ProcessingStage::ApiLookup,
                     current_file: Some(input_paths[0].clone()),
@@ -342,49 +394,22 @@ impl Processor {
                 match client.fetch_book(id).await {
                     Ok(book_metadata) => {
                         info!("Successfully fetched metadata for: {}", book_metadata.title);
-                        Some(book_metadata)
+                        metadata = Some(book_metadata);
+                        break;
                     }
                     Err(e) => {
-                        warn!("Failed to fetch metadata for ID {}: {}", id, e);
-                        None
-                    }
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Extract chapters from input file if API didn't provide them
-        let metadata = if let Some(mut meta) = metadata {
-            if meta.chapters.is_empty() && !group.files.is_empty() {
-                // Try to read chapters from the first input file
-                match crate::chapters::read_chapters(
-                    &group.files[0].path,
-                    self.ffmpeg.ffprobe_path().to_str(),
-                ) {
-                    Ok(file_chapters) if !file_chapters.is_empty() => {
-                        info!("Extracted {} chapters from input file", file_chapters.len());
-                        // Convert file chapters to metadata chapters
-                        meta.chapters = file_chapters
-                            .into_iter()
-                            .map(|ch| {
-                                crate::metadata::Chapter::new(
-                                    ch.title,
-                                    std::time::Duration::from_millis(ch.start_time),
-                                    std::time::Duration::from_millis(ch.duration),
-                                )
-                            })
-                            .collect();
-                    }
-                    Ok(_) => {} // No chapters found
-                    Err(e) => {
-                        warn!("Failed to extract chapters from input file: {}", e);
+                        if index + 1 < ids.len() {
+                            debug!(
+                                "Metadata ID '{}' did not resolve ({}); trying next candidate",
+                                id, e
+                            );
+                        } else {
+                            warn!("Failed to fetch metadata for ID {}: {}", id, e);
+                        }
                     }
                 }
             }
-            Some(meta)
+            metadata
         } else {
             None
         };
@@ -424,6 +449,20 @@ impl Processor {
             });
         }
 
+        // Resolve chapters: provider chapters when present, otherwise chapters read
+        // from the inputs, and finally one generated chapter per input track for
+        // chapterless groups so the merged output always carries chapter markers.
+        let chapters = if let Some(meta) = metadata.as_ref().filter(|m| !m.chapters.is_empty()) {
+            meta.chapters.clone()
+        } else {
+            let resolved = self.input_chapters(group);
+            // Keep provider metadata in sync so chapters.txt matches the embedding.
+            if let Some(meta) = metadata.as_mut() {
+                meta.chapters.clone_from(&resolved);
+            }
+            resolved
+        };
+
         // Stage 3: Merge
         progress_handler.on_progress(ProcessingProgress {
             stage: ProcessingStage::Merging,
@@ -438,6 +477,37 @@ impl Processor {
         let merged_path = self.merger.merge(&merge_job).map_err(ProcessorError::Merge)?;
 
         info!("Successfully merged to: {}", merged_path.display());
+
+        // Reject chapters that start at or beyond the merged file's duration.
+        // mp4ameta writes start times verbatim, so embedding them would create
+        // unplayable entries; dropping them would silently shorten the chapter
+        // list, so fail the book and name every offending chapter. The merged
+        // output is removed first: a failed book must not look complete to
+        // anything scanning the output directory.
+        if !chapters.is_empty() {
+            let duration = match self.ffmpeg.get_duration(&merged_path) {
+                Ok(duration) => duration,
+                Err(e) => {
+                    warn!(
+                        "Could not determine duration of {}; refusing to tag chapters: {}",
+                        merged_path.display(),
+                        e
+                    );
+                    Self::discard_output(&merged_path);
+                    return Err(ProcessorError::ProbeFailed { path: merged_path, source: e });
+                }
+            };
+
+            if let Some((count, details)) = describe_out_of_range_chapters(&chapters, duration) {
+                Self::discard_output(&merged_path);
+                return Err(ProcessorError::ChaptersOutOfRange {
+                    path: merged_path,
+                    count,
+                    playlength: format_duration(duration),
+                    details,
+                });
+            }
+        }
 
         // Stage 4: Tagging
         progress_handler.on_progress(ProcessingProgress {
@@ -461,26 +531,55 @@ impl Processor {
                     }
                 }
 
-                // Embed chapters into M4B file
-                if !meta.chapters.is_empty() {
-                    if let Err(e) = self.tagger.embed_chapters(&merged_path, &meta.chapters) {
-                        warn!("Failed to embed chapters: {}", e);
-                    } else {
-                        info!("Successfully embedded {} chapters", meta.chapters.len());
-                    }
-                }
-
-                // Write chapters.txt next to the output file
-                let chapters_txt_path = merged_path.with_extension("chapters.txt");
-                if let Err(e) = self.tagger.write_chapters_txt(&chapters_txt_path, meta) {
-                    warn!("Failed to write chapters.txt: {}", e);
-                }
-
                 true
             }
         } else {
             false
         };
+
+        // Embed chapters into the M4B file. These are provider chapters, chapters
+        // read from the inputs, or chapters generated from the input tracks, so
+        // they are applied even when no provider metadata was available.
+        if !chapters.is_empty() {
+            #[cfg(test)]
+            let embed_result = match &self.embed_hook {
+                Some(hook) => hook(&merged_path, &chapters),
+                None => self.tagger.embed_chapters(&merged_path, &chapters),
+            };
+            #[cfg(not(test))]
+            let embed_result = self.tagger.embed_chapters(&merged_path, &chapters);
+            if let Err(e) = embed_result {
+                // The pre-merge guard probes the ffprobe duration, but mp4ameta
+                // validates chapters against the container's mvhd duration, which
+                // can be shorter. A failed embed would otherwise ship a
+                // "successful" book with no chapters, so discard the merged
+                // output and fail the book.
+                Self::discard_output(&merged_path);
+                return Err(ProcessorError::Tagging(e));
+            } else {
+                info!("Successfully embedded {} chapters", chapters.len());
+            }
+        }
+
+        // Write chapters.txt next to the output file. Generated chapters have no
+        // provider metadata to source headers from, so fall back to the output
+        // stem as the album name.
+        let chapters_txt_path = merged_path.with_extension("chapters.txt");
+        if let Some(meta) = &metadata {
+            if let Err(e) = self.tagger.write_chapters_txt(&chapters_txt_path, meta) {
+                warn!("Failed to write chapters.txt: {}", e);
+            }
+        } else if !chapters.is_empty() {
+            let album = merged_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if let Err(e) =
+                self.tagger.write_chapters_txt_with(&chapters_txt_path, &album, None, &chapters)
+            {
+                warn!("Failed to write chapters.txt: {}", e);
+            }
+        }
 
         // Stage 5: Move source files
         let files_moved = if let Some(completed_dir) = &self.config.completed_directory {
@@ -514,6 +613,16 @@ impl Processor {
         })
     }
 
+    /// Remove a merged output that failed post-merge validation.
+    ///
+    /// The output keeps its final name once merged, so leaving it behind makes a
+    /// rejected book look like a finished one. Source files are never touched.
+    fn discard_output(path: &std::path::Path) {
+        if let Err(e) = std::fs::remove_file(path) {
+            warn!("Failed to remove rejected output {}: {}", path.display(), e);
+        }
+    }
+
     /// Discover audio files from input paths
     fn discover_files(&self, inputs: &[PathBuf]) -> Result<Vec<AudioGroup>> {
         let groups = match discover_and_group(inputs) {
@@ -527,6 +636,70 @@ impl Processor {
             }
         };
         Ok(groups)
+    }
+
+    /// Resolve chapters for a group from its input files.
+    ///
+    /// Prefers chapters embedded in the first input, which keeps a single M4B's
+    /// own chapters. When the group carries no chapters at all — the usual case
+    /// for split MP3s — a chapter is generated per input track, matching the old
+    /// m4b-tool `ChaptersFromFileTracks` behavior, so the merged M4B still has
+    /// chapter markers. Reading chapters from every input is tracked separately.
+    fn input_chapters(&self, group: &AudioGroup) -> Vec<crate::metadata::Chapter> {
+        if let Some(first) = group.files.first() {
+            match crate::chapters::read_chapters(&first.path, self.ffmpeg.ffprobe_path().to_str()) {
+                Ok(file_chapters) if !file_chapters.is_empty() => {
+                    info!("Read {} chapters from input file", file_chapters.len());
+                    return file_chapters
+                        .into_iter()
+                        .map(|ch| {
+                            crate::metadata::Chapter::new(
+                                ch.title,
+                                std::time::Duration::from_millis(ch.start_time),
+                                std::time::Duration::from_millis(ch.duration),
+                            )
+                        })
+                        .collect();
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    debug!("No chapters read from {}: {}", first.path.display(), e);
+                }
+            }
+        }
+
+        // Every track duration is needed: a missing one would shift all later
+        // chapter start times, so skip generation instead of emitting wrong times.
+        let mut durations = Vec::with_capacity(group.files.len());
+        for file in &group.files {
+            match self.ffmpeg.get_duration(&file.path) {
+                Ok(duration) => durations.push(duration.as_millis() as u64),
+                Err(e) => {
+                    warn!(
+                        "Cannot generate chapters, failed to read duration of {}: {}",
+                        file.path.display(),
+                        e
+                    );
+                    return Vec::new();
+                }
+            }
+        }
+
+        let generated = crate::chapters::generate_chapters_from_durations(&durations);
+        if !generated.is_empty() {
+            info!("Generated {} chapters from {} input tracks", generated.len(), durations.len());
+        }
+
+        generated
+            .into_iter()
+            .map(|ch| {
+                crate::metadata::Chapter::new(
+                    ch.title,
+                    std::time::Duration::from_millis(ch.start_time),
+                    std::time::Duration::from_millis(ch.duration),
+                )
+            })
+            .collect()
     }
 
     /// Determine output path for a group of files
@@ -653,15 +826,23 @@ impl Processor {
         result
     }
 
-    /// Extract metadata ID from audio group (folder name, existing metadata, etc.)
-    fn extract_metadata_id(&self, group: &AudioGroup) -> Option<String> {
+    /// Extract metadata ID candidates from the audio group name (folder name),
+    /// in the order they appear. Every bracketed token of an accepted shape is
+    /// returned: the regex cannot distinguish a descriptive marker such as
+    /// `[Unabridged]` (10 alphanumeric characters) from an ASIN, so the caller
+    /// tries them until one resolves.
+    fn extract_metadata_ids(&self, group: &AudioGroup) -> Vec<String> {
         let re = get_metadata_id_regex();
-        if let Some(captures) = re.captures(&group.name) {
+        let mut ids: Vec<String> = Vec::new();
+        for captures in re.captures_iter(&group.name) {
             if let Some(capture) = captures.get(1) {
-                return Some(capture.as_str().to_string());
+                let id = capture.as_str();
+                if !ids.iter().any(|existing| existing == id) {
+                    ids.push(id.to_string());
+                }
             }
         }
-        None
+        ids
     }
 
     /// Get the FFmpeg instance
@@ -689,7 +870,9 @@ impl Processor {
 mod tests {
     use super::*;
     use crate::api::{MetadataRegion, MetadataSourceKind};
-    use std::io::Write;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::path::Path;
     use tempfile::TempDir;
 
     /// Build a test `Config` with the standard dry-run defaults
@@ -729,6 +912,111 @@ mod tests {
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(content).unwrap();
         path
+    }
+
+    /// Build a non-dry-run `Config` whose metadata source is a local stub API.
+    fn api_test_config(temp_dir: &TempDir, api_url: &str) -> Config {
+        Config::new(
+            vec![],
+            Some(temp_dir.path().join("output")),
+            Some(api_url.to_string()),
+            MetadataSourceKind::Audiobookdb,
+            MetadataRegion::Us,
+            Some(temp_dir.path().join("completed")),
+            1,
+            "info".to_string(),
+            "{author}/{title}".to_string(),
+            false,
+            None,
+        )
+    }
+
+    /// Create a real M4B of `seconds` duration using FFmpeg.
+    fn create_test_m4b(dir: &std::path::Path, seconds: u32) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join("audio.m4b");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", &seconds.to_string()])
+            .args(["-c:a", "aac", "-b:a", "64k", "-y"])
+            .arg(&path)
+            .status()
+            .expect("run ffmpeg");
+        assert!(status.success(), "ffmpeg failed to create test audio");
+        path
+    }
+
+    /// Spawn a local AudiobookDB stub.
+    ///
+    /// Books with id `abc123def456` return a chapter past the audio duration;
+    /// every other id returns a single in-range chapter.
+    fn spawn_metadata_api() -> String {
+        fn respond(stream: &mut std::net::TcpStream, body: serde_json::Value) {
+            let body = body.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_err() {
+                    continue;
+                }
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                        break;
+                    }
+                }
+
+                let path = request_line.split_whitespace().nth(1).unwrap_or_default();
+                let id = path
+                    .strip_prefix("/books/")
+                    .or_else(|| path.strip_prefix("/releases/rel-"))
+                    .and_then(|rest| rest.split(['?', '/']).next());
+
+                let Some(id) = id else { continue };
+                let book = || {
+                    serde_json::json!({
+                        "id": id,
+                        "title": format!("Book {id}"),
+                        "matchedReleaseId": format!("rel-{id}"),
+                        "people": [{"role": {"name": "author"}, "person": {"name": "Test Author"}}],
+                    })
+                };
+                let first = serde_json::json!({
+                    "title": "Intro", "ordinal": 1, "startOffsetMs": 0, "lengthMs": 10_000
+                });
+                let body = if path.starts_with("/books/") {
+                    book()
+                } else if id == "abc123def456" {
+                    serde_json::json!({
+                        "id": format!("rel-{id}"),
+                        "chapterDetail": {"chapters": [
+                            first,
+                            {"title": "End Credits", "ordinal": 2, "startOffsetMs": 20_000, "lengthMs": 30_000},
+                        ]},
+                    })
+                } else {
+                    serde_json::json!({
+                        "id": format!("rel-{id}"),
+                        "chapterDetail": {"chapters": [first]},
+                    })
+                };
+                respond(&mut stream, body);
+            }
+        });
+
+        url
     }
 
     #[test]
@@ -1032,31 +1320,219 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_metadata_id() {
+    fn test_extract_metadata_ids() {
         let temp_dir = TempDir::new().unwrap();
         let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
 
         // Exactly two shapes are extracted: 10 alphanumeric (ASIN, any case,
         // mirroring the API clients' validators) and 12 alphanumeric
-        // (AudiobookDB internal id). Other bracketed words are not.
-        let cases = [
-            ("Book [B08XYZ1234]", Some("B08XYZ1234")), // ASIN: 10 uppercase alphanumeric
-            ("Book [b08xyz1234]", Some("b08xyz1234")), // lowercase 10-char: accepted like the clients
-            ("Book [abc123def456]", Some("abc123def456")), // 12-char AudiobookDB internal id
+        // (AudiobookDB internal id). Other bracketed words are not. All
+        // accepted matches are returned in name order, because a descriptive
+        // marker can be ASIN-shaped and must not mask a later real ID.
+        let cases: [(&str, &[&str]); 13] = [
+            ("Book [B08XYZ1234]", &["B08XYZ1234"]), // ASIN: 10 uppercase alphanumeric
+            ("Book [b08xyz1234]", &["b08xyz1234"]), // lowercase 10-char: accepted like the clients
+            ("Book [abc123def456]", &["abc123def456"]), // 12-char AudiobookDB internal id
             // "Unabridged" is 10 ASCII alphanumeric characters, so the
-            // case-insensitive 10-char alternative now extracts it (the API
-            // lookup for it fails locally as an unknown id).
-            ("Book [Unabridged]", Some("Unabridged")), // 10-char alphanumeric word: ASIN-shaped
-            ("Book [Complete2024Set]", None),          // 15-char word
-            ("Book [ABCDEF12345]", None),              // 11 chars: neither shape
-            ("Book [abcdefghijk12]", None),            // 13 chars: neither shape
-            ("Book [B08XYZ123]", None),                // 9 chars
-            ("Book [ABCD_12345]", None),
-            ("Book No Tag", None),
+            // case-insensitive 10-char alternative extracts it as a candidate;
+            // the lookup then falls through to the real ASIN beside it.
+            ("Book [Unabridged]", &["Unabridged"]),
+            ("Book [Unabridged] [B08XYZ1234]", &["Unabridged", "B08XYZ1234"]),
+            ("Book [B08XYZ1234] [Unabridged]", &["B08XYZ1234", "Unabridged"]),
+            ("Book [B08XYZ1234] [b08xyz1234]", &["B08XYZ1234", "b08xyz1234"]),
+            ("Book [B08XYZ1234] [B08XYZ1234]", &["B08XYZ1234"]), // duplicates collapse
+            ("Book [Complete2024Set]", &[]),                     // 15-char word
+            ("Book [ABCDEF12345]", &[]),                         // 11 chars: neither shape
+            ("Book [abcdefghijk12]", &[]),                       // 13 chars: neither shape
+            ("Book [B08XYZ123]", &[]),                           // 9 chars
+            ("Book [ABCD_12345]", &[]),
         ];
         for (name, expected) in cases {
             let group = AudioGroup { name: name.to_string(), files: vec![], disc_number: None };
-            assert_eq!(processor.extract_metadata_id(&group).as_deref(), expected, "name {name:?}");
+            assert_eq!(processor.extract_metadata_ids(&group), expected, "name {name:?}");
         }
+        let group =
+            AudioGroup { name: "Book No Tag".to_string(), files: vec![], disc_number: None };
+        assert!(processor.extract_metadata_ids(&group).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_group_rejects_out_of_range_chapters_before_tagging_or_move() {
+        let temp_dir = TempDir::new().unwrap();
+        let api_url = spawn_metadata_api();
+        let processor = Processor::new(api_test_config(&temp_dir, &api_url)).unwrap();
+
+        let book_dir = temp_dir.path().join("Bad Book [abc123def456]");
+        let input = create_test_m4b(&book_dir, 10);
+        let group = AudioGroup {
+            name: "Bad Book [abc123def456]".to_string(),
+            files: vec![AudioFile::new(input.clone()).unwrap()],
+            disc_number: None,
+        };
+
+        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+
+        match &err {
+            ProcessorError::ChaptersOutOfRange { count, playlength, details, .. } => {
+                assert_eq!(*count, 1);
+                assert_eq!(playlength, "00:00:10.000");
+                assert!(details.contains("End Credits"), "{details}");
+            }
+            other => panic!("expected ChaptersOutOfRange, got {other:?}"),
+        }
+
+        // The check runs before tagging, so nothing was tagged or written, and the
+        // rejected merge is removed rather than left looking like a finished book.
+        let output = temp_dir.path().join("output/Test Author/Book abc123def456.m4b");
+        assert!(!output.exists(), "rejected output must not be left behind");
+        assert!(!output.with_extension("chapters.txt").exists());
+
+        // And before the source files are moved.
+        assert!(input.exists(), "source file must not be moved after a failed check");
+        let completed = temp_dir.path().join("completed");
+        let moved = std::fs::read_dir(&completed).map(|entries| entries.count()).unwrap_or(0);
+        assert_eq!(moved, 0);
+    }
+
+    #[tokio::test]
+    async fn test_process_group_rejects_out_of_range_source_chapters_without_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        // No API lookup: chapters come from the input file itself.
+        let processor = Processor::new(create_test_config(&temp_dir)).unwrap();
+
+        let book_dir = temp_dir.path().join("Source Book");
+        let input = create_test_m4b(&book_dir, 10);
+        let mut tag = mp4ameta::Tag::read_from_path(&input).unwrap();
+        tag.chapter_list_mut().extend([
+            mp4ameta::Chapter::new(std::time::Duration::ZERO, "Intro"),
+            mp4ameta::Chapter::new(std::time::Duration::from_secs(20), "End Credits"),
+        ]);
+        tag.write_to_path(&input).unwrap();
+
+        let group = AudioGroup {
+            name: "Source Book".to_string(),
+            files: vec![AudioFile::new(input).unwrap()],
+            disc_number: None,
+        };
+
+        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+
+        match &err {
+            ProcessorError::ChaptersOutOfRange { details, .. } => {
+                assert!(details.contains("End Credits"), "{details}");
+            }
+            other => panic!("expected ChaptersOutOfRange, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_group_fails_when_duration_probe_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let api_url = spawn_metadata_api();
+        let processor = Processor::new(api_test_config(&temp_dir, &api_url)).unwrap();
+
+        // Garbage M4B: the native single-file copy succeeds, but ffprobe cannot
+        // read the merged output, so the range check must fail closed.
+        let book_dir = temp_dir.path().join("Bad Probe [abc123def456]");
+        std::fs::create_dir_all(&book_dir).unwrap();
+        let input = book_dir.join("audio.m4b");
+        std::fs::write(&input, b"not audio").unwrap();
+        let group = AudioGroup {
+            name: "Bad Probe [abc123def456]".to_string(),
+            files: vec![AudioFile::new(input).unwrap()],
+            disc_number: None,
+        };
+
+        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+        let message = err.to_string();
+
+        match &err {
+            ProcessorError::ProbeFailed { path, .. } => {
+                assert!(path.to_string_lossy().ends_with("Book abc123def456.m4b"));
+            }
+            other => panic!("expected ProbeFailed, got {other:?}"),
+        }
+        assert!(message.contains("refusing to tag chapters"), "{message}");
+
+        // The unprobeable merge must not be left behind either.
+        let output = temp_dir.path().join("output/Test Author/Book abc123def456.m4b");
+        assert!(!output.exists(), "unprobeable output must not be left behind");
+    }
+
+    #[tokio::test]
+    async fn test_batch_continues_after_a_group_fails_chapter_validation() {
+        let temp_dir = TempDir::new().unwrap();
+        let api_url = spawn_metadata_api();
+        let processor = Processor::new(api_test_config(&temp_dir, &api_url)).unwrap();
+
+        let bad_dir = temp_dir.path().join("Bad Book [abc123def456]");
+        create_test_m4b(&bad_dir, 10);
+        let good_dir = temp_dir.path().join("Good Book [xyz987uvw654]");
+        create_test_m4b(&good_dir, 10);
+
+        let result =
+            processor.process_with_progress(vec![bad_dir, good_dir], &NoOpProgressHandler).await;
+
+        match result {
+            Err(ProcessorError::PartialFailure { results, detail }) => {
+                assert_eq!(results.len(), 1, "only the valid group should complete");
+                assert!(detail.contains("Refusing to embed chapters"), "{detail}");
+                let tag = mp4ameta::Tag::read_from_path(&results[0].output_file).unwrap();
+                assert_eq!(tag.chapter_list()[0].title, "Intro");
+            }
+            other => panic!("expected PartialFailure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_group_embed_failure_discards_output() {
+        let temp_dir = TempDir::new().unwrap();
+        let api_url = spawn_metadata_api();
+        let config = api_test_config(&temp_dir, &api_url);
+        let ffmpeg = Arc::new(FFmpeg::discover().unwrap());
+
+        // Test hook standing in for `Tagger::embed_chapters`: records the path
+        // it is handed (which must be the merged output), then fails, so a
+        // chapter-embed failure can be tested without a real file.
+        let recorded = Arc::new(std::sync::Mutex::new(None));
+        let recorded_in_hook = recorded.clone();
+        let processor = {
+            let mut processor = Processor::with_components(config, ffmpeg, None);
+            processor.embed_hook =
+                Some(Arc::new(move |file_path: &Path, _: &[crate::metadata::Chapter]| {
+                    *recorded_in_hook.lock().unwrap() = Some(file_path.to_path_buf());
+                    Err(TaggingError::Mp4Meta("mock chapter embed failure".to_string()))
+                }));
+            processor
+        };
+
+        let book_dir = temp_dir.path().join("Book [xyz987uvw654]");
+        let input = create_test_m4b(&book_dir, 10);
+        let group = AudioGroup {
+            name: "Book [xyz987uvw654]".to_string(),
+            files: vec![AudioFile::new(input.clone()).unwrap()],
+            disc_number: None,
+        };
+
+        // Chapters are generated from the input tracks (no API client), and
+        // in range, so the ffprobe guard passes — but the hook makes the
+        // actual embed fail.
+        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+
+        assert!(
+            matches!(err, ProcessorError::Tagging(TaggingError::Mp4Meta(_))),
+            "a failed chapter embed must fail the book, got {err:?}",
+        );
+
+        // The merged output must be discarded, not shipped as a "successful"
+        // book with no chapters.
+        let expected = temp_dir.path().join("output/Book [xyz987uvw654].m4b");
+        assert_eq!(
+            recorded.lock().unwrap().as_ref(),
+            Some(&expected),
+            "embed must have targeted the merged output"
+        );
+        assert!(!expected.exists(), "embed failure must not leave the output behind");
+        assert!(input.exists(), "source file must not be moved after a failed embed");
     }
 }

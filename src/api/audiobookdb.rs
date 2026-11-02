@@ -23,8 +23,11 @@ pub const DEFAULT_API_URL: &str = "https://audiobookdb.org/api";
 /// Upper bound (seconds) for a parsed `Retry-After` wait; longer waits are
 /// clamped so a malformed or hostile header cannot stall the client.
 const RETRY_AFTER_MAX_SECS: u64 = 60;
-const USER_AGENT: &str =
-    concat!("m4b-merge/", env!("CARGO_PKG_VERSION"), " (https://github.com/djdembeck/m4b-merge)");
+const USER_AGENT: &str = concat!(
+    "m4b-merge/",
+    env!("M4B_MERGE_APP_VERSION"),
+    " (https://github.com/djdembeck/m4b-merge)"
+);
 const BOOK_INCLUDE: &str = "people,releases,series,genres,images";
 
 #[derive(Debug, Error)]

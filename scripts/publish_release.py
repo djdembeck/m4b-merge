@@ -10,6 +10,22 @@ import subprocess
 
 
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+# 40-hex commit SHA and vN.N.N release version; shared by extract(),
+# assets(), and parse_asset_label() (anchor semantics via fullmatch).
+SHA = re.compile(r"[0-9a-f]{40}")
+VERSION = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
+ASSET_LABEL = re.compile(
+    r"m4b-publish-v1;sha=(" + SHA.pattern + r");"
+    r"tag=(" + VERSION.pattern + r");sha256=([0-9a-f]{64})")
+
+
+# Basename allowlist for --asset. Individual publication calls name their
+# expected set explicitly; this is not a default release inventory.
+ASSET_NAMES = ("m4b-merge-linux",
+               "m4b-merge-linux-musl",
+               "m4b-merge-linux-arm64",
+               "m4b-merge-macos",
+               "m4b-merge-windows.exe")
 
 
 def run(*args):
@@ -64,6 +80,41 @@ def stage(args):
         print(output, end="")
 
 
+def extract(args):
+    """Copy the exact /usr/local/bin/m4b-merge bytes out of a digest-pinned,
+    provenance-verified image. All validation happens before the local
+    output is created; the helper-owned container is always removed."""
+    digest_value = digest(args.digest)
+    if not SHA.fullmatch(args.sha):
+        raise ValueError(f"Invalid source SHA: {args.sha!r}")
+    if not VERSION.fullmatch(args.version):
+        raise ValueError(f"Invalid release version: {args.version!r}")
+    output = Path(args.output)
+    if output.exists() or output.is_symlink():
+        raise ValueError(f"Refusing to use existing output path: {output}")
+    ref = f"{args.image}@{digest_value}"
+    value = image(args.image, ref, args.sha, args.version, args.arch)
+    if value != digest_value:
+        raise ValueError(f"Image digest mismatch at {ref}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    # The id in creation stdout is a single word; strip the remaining
+    # whitespace before embedding it in the docker cp source address.
+    cid = run("docker", "create", "--entrypoint", "/usr/local/bin/m4b-merge", ref)
+    cid = cid.decode().strip()
+    try:
+        run("docker", "cp", f"{cid}:/usr/local/bin/m4b-merge", str(output))
+        if not output.is_file() or not os.access(output, os.X_OK):
+            raise ValueError(f"Extracted binary is not a regular executable file: {output}")
+    except BaseException:
+        # Remove only the partial output this invocation started; a
+        # pre-existing path was rejected above, and cleanup must not mask
+        # the original failure.
+        output.unlink(missing_ok=True)
+        raise
+    finally:
+        subprocess.run(["docker", "rm", cid], check=False, capture_output=True)
+
+
 def manifest(args):
     expected = {}
     # Validate both captured immutable build digests before writing any version tag.
@@ -100,7 +151,7 @@ def asset_label(sha, tag, asset_digest):
 
 
 def parse_asset_label(label):
-    match = re.fullmatch(r"m4b-publish-v1;sha=([0-9a-f]{40});tag=(v[0-9]+\.[0-9]+\.[0-9]+);sha256=([0-9a-f]{64})", label)
+    match = ASSET_LABEL.fullmatch(label)
     if match is None:
         raise ValueError(f"Invalid release asset provenance label: {label!r}")
     return match.groups()
@@ -118,13 +169,60 @@ def asset_digest(asset, repo):
     return actual
 
 
+def release_listing(repo, tag):
+    """Complete authenticated release listing; drafts included, errors propagate.
+
+    GET releases/tags/{tag} is a published-release lookup only, so a draft's
+    assets must be reconciled through the paginated listing instead."""
+    records, page = [], 1
+    while True:
+        batch = json.loads(run("gh", "api", "--hostname", "github.com",
+                               f"repos/{repo}/releases?per_page=100&page={page}"))
+        if not isinstance(batch, list):
+            raise ValueError(f"Unexpected release listing response on page {page}")
+        records.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    matches = [record for record in records if record.get("tag_name") == tag]
+    if len(matches) > 1:
+        raise ValueError(f"Multiple release records share tag {tag}; failing closed")
+    if not matches:
+        raise ValueError(f"No release record for tag {tag} after a complete listing; the draft is missing")
+    return matches[0]
+
+
+def artifacts(root, names):
+    """Resolve an explicit, ordered asset inventory to exactly one regular,
+    non-symlink file per name. Missing, duplicated, or unreadable matches
+    fail before any upload; the directory layout is artifacts/<artifact>/
+    <filename>, where only the filename row is matched."""
+    paths = []
+    for name in names:
+        matches = sorted(Path(root).glob(f"*/{name}"))
+        if len(matches) != 1:
+            raise ValueError(f"Expected exactly one built artifact {name}")
+        path = matches[0]
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"Invalid built artifact {name}")
+        paths.append(path)
+    return paths
+
+
 def assets(args):
-    if not re.fullmatch(r"[0-9a-f]{40}", args.sha):
+    if not SHA.fullmatch(args.sha):
         raise ValueError(f"Invalid source SHA: {args.sha!r}")
-    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", args.tag):
+    if not VERSION.fullmatch(args.tag):
         raise ValueError(f"Invalid release tag: {args.tag!r}")
-    release = json.loads(run("gh", "api", "--hostname", "github.com",
-                             f"repos/{args.repo}/releases/tags/{args.tag}"))
+    expected = list(getattr(args, "asset", None) or [])
+    if not expected:
+        raise ValueError("Expected at least one --asset name")
+    if any(name not in ASSET_NAMES for name in expected):
+        first = next(name for name in expected if name not in ASSET_NAMES)
+        raise ValueError(f"Invalid asset name: {first}")
+    if len(set(expected)) != len(expected):
+        raise ValueError("Duplicate asset name in --asset list")
+    release = release_listing(args.repo, args.tag)
     existing = {}
     for asset in release["assets"]:
         if asset["name"] in existing:
@@ -133,15 +231,11 @@ def assets(args):
     pending = []
     # Validate all existing assets before uploading anything. On older releases
     # without GitHub's digest field, hash the actual downloaded asset bytes.
-    for name in ("m4b-merge-linux", "m4b-merge-macos", "m4b-merge-windows.exe"):
-        matches = list(Path(args.artifacts).glob(f"*/{name}"))
-        if len(matches) != 1:
-            raise ValueError(f"Expected exactly one built artifact {name}")
-        path = matches[0]
-        expected = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    for name, path in zip(expected, artifacts(args.artifacts, expected)):
+        expected_digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
         asset = existing.get(name)
         if asset is None:
-            pending.append((path, asset_label(args.sha, args.tag, expected)))
+            pending.append((path, asset_label(args.sha, args.tag, expected_digest)))
             continue
         label = asset.get("label") or ""
         if label:
@@ -153,7 +247,7 @@ def assets(args):
                 raise ValueError(f"Existing asset digest differs from provenance label: {name}")
             continue
         actual = asset_digest(asset, args.repo)
-        if actual != expected:
+        if actual != expected_digest:
             raise ValueError(f"Existing asset differs from tested build: {name}")
     for path, label in pending:
         run("gh", "release", "upload", args.tag, f"{path}#{label}", "--repo", args.repo)
@@ -178,8 +272,18 @@ def main():
     command.add_argument("--tag", required=True)
     command.add_argument("--sha", required=True)
     command.add_argument("--artifacts", required=True)
+    command.add_argument("--asset", action="append", dest="asset",
+                         choices=ASSET_NAMES, required=True)
+    command = commands.add_parser("extract")
+    command.add_argument("--image", required=True)
+    command.add_argument("--digest", required=True)
+    command.add_argument("--sha", required=True)
+    command.add_argument("--version", required=True)
+    command.add_argument("--arch", required=True, choices=("amd64", "arm64"))
+    command.add_argument("--output", required=True)
     args = parser.parse_args()
-    {"stage": stage, "manifest": manifest, "assets": assets}[args.command](args)
+    {"stage": stage, "manifest": manifest, "assets": assets,
+     "extract": extract}[args.command](args)
 
 
 if __name__ == "__main__":

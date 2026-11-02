@@ -23,6 +23,14 @@ impl Chapter {
     pub fn end_time(&self) -> Duration {
         self.start_time + self.duration
     }
+
+    /// Whether this chapter starts at or beyond `file_duration`.
+    ///
+    /// Such a chapter cannot be represented in the chapter track. Callers
+    /// should report it instead of silently truncating the chapter list.
+    pub fn is_out_of_range(&self, file_duration: Duration) -> bool {
+        self.start_time >= file_duration
+    }
 }
 
 /// Complete metadata for an audiobook
@@ -114,11 +122,16 @@ impl BookMetadata {
         self
     }
 
-    /// Get the full display title (title + subtitle if available)
+    /// Get the full display title (`title - subtitle` when a non-blank
+    /// subtitle is available).
+    ///
+    /// The `" - "` separator is the documented title separator: it matches what
+    /// the pre-Rust pipeline wrote to `©nam`, so libraries that group books by
+    /// title keep working across the rewrite.
     pub fn full_title(&self) -> String {
-        match &self.subtitle {
-            Some(subtitle) => format!("{}: {}", self.title, subtitle),
-            None => self.title.clone(),
+        match self.subtitle.as_deref().map(str::trim) {
+            Some(subtitle) if !subtitle.is_empty() => format!("{} - {}", self.title, subtitle),
+            _ => self.title.clone(),
         }
     }
 
@@ -211,10 +224,13 @@ mod tests {
     fn test_full_title() {
         let metadata_with_subtitle =
             BookMetadata::new("A1", "Title", "Desc").with_subtitle("The Sequel");
-        assert_eq!(metadata_with_subtitle.full_title(), "Title: The Sequel");
+        assert_eq!(metadata_with_subtitle.full_title(), "Title - The Sequel");
 
         let metadata_no_subtitle = BookMetadata::new("A1", "Title", "Desc");
         assert_eq!(metadata_no_subtitle.full_title(), "Title");
+
+        let metadata_blank_subtitle = BookMetadata::new("A1", "Title", "Desc").with_subtitle("   ");
+        assert_eq!(metadata_blank_subtitle.full_title(), "Title");
     }
 
     #[test]
@@ -235,5 +251,27 @@ mod tests {
 
         let empty_metadata = BookMetadata::new("A1", "Title", "Desc");
         assert_eq!(empty_metadata.total_duration(), None);
+    }
+
+    #[test]
+    fn test_chapter_is_out_of_range() {
+        let intro = Chapter::new("Intro", Duration::ZERO, Duration::from_secs(60));
+        let end_credits =
+            Chapter::new("End Credits", Duration::from_secs(180), Duration::from_secs(30));
+
+        assert!(!intro.is_out_of_range(Duration::from_secs(120)));
+        assert!(end_credits.is_out_of_range(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn test_chapter_out_of_range_boundaries() {
+        // A chapter starting exactly at the file duration has no playable range.
+        let at_end = Chapter::new("Last", Duration::from_secs(120), Duration::from_secs(10));
+        assert!(at_end.is_out_of_range(Duration::from_secs(120)));
+
+        // A chapter starting one millisecond before the end is in range.
+        let before_end =
+            Chapter::new("Last", Duration::from_millis(119_999), Duration::from_secs(10));
+        assert!(!before_end.is_out_of_range(Duration::from_secs(120)));
     }
 }

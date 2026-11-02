@@ -72,6 +72,37 @@ fn generate_test_m4a(path: &Path, duration_secs: u32) {
     assert!(status.success(), "FFmpeg failed to generate test M4A");
 }
 
+/// Read chapter titles from an M4B file using ffprobe
+fn read_output_chapters(path: &Path) -> Vec<String> {
+    let output = Command::new("ffprobe")
+        .args(["-v", "quiet", "-print_format", "json", "-show_chapters"])
+        .arg(path)
+        .output()
+        .expect("Failed to run ffprobe");
+
+    assert!(output.status.success(), "ffprobe failed on {}", path.display());
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ffprobe output should be JSON");
+
+    json.get("chapters")
+        .and_then(|c| c.as_array())
+        .map(|chapters| {
+            chapters
+                .iter()
+                .map(|chapter| {
+                    chapter
+                        .get("tags")
+                        .and_then(|t| t.get("title"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[test]
 fn test_cli_help() {
     let output = Command::new(bin_path()).arg("--help").output().expect("Failed to run m4b-merge");
@@ -90,7 +121,7 @@ fn test_cli_version() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
+    assert_eq!(stdout.trim(), format!("m4b-merge {}", m4b_merge::VERSION));
 }
 
 #[test]
@@ -291,6 +322,23 @@ fn test_multiple_mp3_merge() {
         .collect();
 
     assert!(!output_files.is_empty(), "Output M4B file should be created");
+
+    // Chapterless inputs get one generated chapter per input track.
+    let chapters = read_output_chapters(&output_files[0].path());
+    assert_eq!(chapters.len(), 3, "One generated chapter per input track");
+    assert_eq!(chapters[0], "Chapter 01");
+    assert_eq!(chapters[1], "Chapter 02");
+    assert_eq!(chapters[2], "Chapter 03");
+
+    // The chapters.txt sidecar is exported even without provider metadata.
+    let sidecar = output_files[0].path().with_extension("chapters.txt");
+    assert!(sidecar.exists(), "chapters.txt should be written next to the output");
+    let sidecar_content = std::fs::read_to_string(&sidecar).unwrap();
+    assert!(sidecar_content.contains("## album: audiobook"), "{}", sidecar_content);
+    assert!(sidecar_content.contains("## total-duration: 00:00:09.0"), "{}", sidecar_content);
+    assert!(sidecar_content.contains("00:00:00.000 Chapter 01"), "{}", sidecar_content);
+    assert!(sidecar_content.contains("Chapter 02"), "{}", sidecar_content);
+    assert!(sidecar_content.contains("Chapter 03"), "{}", sidecar_content);
 }
 
 #[test]
@@ -577,21 +625,68 @@ fn test_region_option_reaches_audnexus_request() {
 }
 
 #[test]
+fn test_descriptive_marker_does_not_mask_real_metadata_id() {
+    if !ffmpeg_available() {
+        return;
+    }
+    // "Unabridged" is 10 alphanumeric characters, so it is ASIN-shaped. A
+    // group named `Book [Unabridged] [B08XYZ1234]` must fall through to the
+    // real ASIN instead of looking up the marker and merging without metadata.
+    let temp_dir = TempDir::new().unwrap();
+    let group_dir = temp_dir.path().join("Book [Unabridged] [B08XYZ1234]");
+    std::fs::create_dir_all(&group_dir).unwrap();
+    generate_test_mp3(&group_dir.join("chapter1.mp3"), 2);
+
+    // Both candidates 404 (a localized metadata failure, no retry), so the
+    // recorded URIs prove the lookup order and the merge still completes.
+    let (base, server) = audnexus_mock("HTTP/1.1 404 Not Found", "not found");
+
+    let output = Command::new(bin_path())
+        .args([
+            "-i",
+            group_dir.to_str().unwrap(),
+            "-o",
+            temp_dir.path().to_str().unwrap(),
+            "--metadata-source",
+            "audnexus",
+            "--api-url",
+            &base,
+        ])
+        .output()
+        .expect("Failed to run m4b-merge");
+
+    let uris = server.join().expect("mock server join");
+    assert_eq!(
+        uris,
+        vec!["/books/Unabridged?region=us".to_string(), "/books/B08XYZ1234?region=us".to_string()],
+        "the descriptive marker must not mask the real ASIN"
+    );
+    assert!(
+        output.status.success(),
+        "a localized metadata failure must not fail the merge, stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
 fn test_non_us_region_warns_for_audiobookdb() {
     if !ffmpeg_available() {
         return;
     }
-    // A group named after the id: discovery infers the metadata ID from
-    // `[B08XYZ1234]` in the group name, so the lookup targets the mock
-    // (a 404 → IdNotFound → localized metadata failure, no retry).
+    // The id lives in the group directory name, so discovery extracts it and
+    // the lookup actually reaches the mock (a 404 → IdNotFound → localized
+    // metadata failure, no retry). The request list is asserted so the test
+    // cannot pass while the mock receives nothing.
     let run = |region: &str| {
         let (base, server) = audnexus_mock("HTTP/1.1 404 Not Found", "not found");
         let dir = TempDir::new().unwrap();
-        generate_test_mp3(&dir.path().join("book [B08XYZ1234].mp3"), 2);
+        let group_dir = dir.path().join("book [B08XYZ1234]");
+        std::fs::create_dir_all(&group_dir).unwrap();
+        generate_test_mp3(&group_dir.join("chapter1.mp3"), 2);
         let output = Command::new(bin_path())
             .args([
                 "-i",
-                dir.path().to_str().unwrap(),
+                group_dir.to_str().unwrap(),
                 "-o",
                 dir.path().to_str().unwrap(),
                 "--api-url",
@@ -601,7 +696,12 @@ fn test_non_us_region_warns_for_audiobookdb() {
             ])
             .output()
             .expect("Failed to run m4b-merge");
-        let _ = server.join();
+        let uris = server.join().expect("mock server join");
+        assert!(!uris.is_empty(), "no request reached the audnexus mock");
+        assert!(
+            uris.iter().all(|uri| uri.contains("B08XYZ1234")),
+            "every lookup must target the group's metadata id, got: {uris:?}"
+        );
         output
     };
 

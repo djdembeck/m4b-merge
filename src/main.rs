@@ -10,7 +10,7 @@ use m4b_merge::processor::{ProcessingProgress, ProcessingStage, Processor, Progr
 #[derive(Parser, Debug)]
 #[command(name = "m4b-merge")]
 #[command(author = "djdembeck")]
-#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(version = m4b_merge::VERSION)]
 #[command(about = "A CLI tool which outputs consistently sorted, tagged, single m4b files", long_about = None)]
 struct Args {
     /// Input files or directories to process (required)
