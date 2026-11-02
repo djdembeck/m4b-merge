@@ -26,8 +26,9 @@ All notable changes to this project will be documented in this file. See [standa
   uploads no longer attach a `m4b-publish-v1;…` display label, which the
   GitHub web UI rendered as the asset name and made the release page show
   long, unreadable names. Existing labeled assets (v2.0.0 and v2.0.1) are
-  reconciled as before and are replaced with identically named,
-  identically sized, identically digested unlabeled assets.
+  reconciled by provenance as before; their labels were cleared by a
+  one-time manual API cleanup, and no code path re-uploads or relabels
+  them.
 - Release titles are the bare version (`vX.Y.Z`) instead of `Release vX.Y.Z`.
 
 ### Changed

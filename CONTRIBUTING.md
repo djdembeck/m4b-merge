@@ -240,12 +240,19 @@ publishes that exact SHA:
   (no display label); the release page shows the exact asset name. An
   existing asset is reused only via one of two paths: a labeled asset must
   have a provenance label bound to this publication (same SHA and tag)
-  whose digest also matches, and an unlabeled legacy asset is reused only
-  when its content digest matches the freshly built artifact. Labeled
-  assets are historical (the v2.0.0 and v2.0.1 assets predate the plain
-  naming); new uploads never create labels. Malformed labels and conflicting
-  bindings/digests fail before any upload (see
-  `scripts/publish_release.py`).
+  whose digest also matches, and an unlabeled asset (every plain-named new
+  upload, plus unlabeled legacy assets) is reused only when its content
+  digest matches the freshly built artifact. Labeled assets are historical
+  (the v2.0.0 and v2.0.1 assets predate the plain naming); new uploads
+  never create labels. Malformed labels and conflicting bindings/digests
+  fail before any upload (see `scripts/publish_release.py`). Because
+  macOS and Windows release relinks are not byte-reproducible, a
+  partial-upload retry that rebuilds an already-uploaded plain-named asset
+  to different bytes fails the run before uploading, and the stale asset
+  must be resolved out of band before re-running — a deliberate tradeoff
+  for keeping the release page showing clean asset names (the `gh release
+  upload` `#label` provenance suffix renders as the asset name in the web
+  UI).
 - No mutable `latest` Docker alias exists to roll back: CI's
   `latest=false` flavor on its Docker pusher keeps CI clear of it and the
   Release workflow's tag set (SHA staging tags plus the version tag)

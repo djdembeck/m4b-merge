@@ -204,6 +204,23 @@ sys.exit(response.get('code', 0))
         publisher.assets(self.args)
         self.assertEqual([cmd for cmd in self.called() if "upload" in cmd], [upload])
 
+    def test_unlabeled_asset_differs_from_rebuild_fails_before_upload(self):
+        # Strict resume contract: a new upload is unlabeled, so a retry must
+        # reuse it only when its content digest equals the freshly built
+        # artifact. A same-source rebuild that differs in bytes (macOS/Windows
+        # relinks are not reproducible) fails before any upload; the operator
+        # must resolve it out of band, matching the historical labeled path.
+        self.prepare_assets()
+        canonical = b"previous runner's canonical linux binary"
+        linux = self.asset_list[0]
+        linux["digest"] = "sha256:" + hashlib.sha256(canonical).hexdigest()
+        (Path(self.args.artifacts) / linux["name"] / linux["name"]).write_bytes(b"different rebuild bytes")
+        self.asset_list.pop()  # Windows upload was the point of interruption.
+        self.release_response()
+        with self.assertRaisesRegex(ValueError, "differs from tested build"):
+            publisher.assets(self.args)
+        self.assertFalse(any("upload" in cmd for cmd in self.called()))
+
     def test_labeled_asset_wrong_source_or_digest_fails_before_upload(self):
         for label, digest in (
                 (publisher.asset_label("b" * 40, VERSION, "sha256:" + "1" * 64),
