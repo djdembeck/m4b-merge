@@ -76,7 +76,8 @@ class LocalGitHub(release.Repository):
                 if record is not None:
                     raise release.ReleaseError(f"gh release create: release {tag} already exists")
                 self.release_commands.append("create")
-                self.releases[tag] = {"tag_name": tag, "draft": "--draft" in args}
+                self.releases[tag] = {"tag_name": tag, "draft": "--draft" in args,
+                                      "name": args[args.index("--title") + 1]}
                 return ""
             self.release_commands.append("edit")
             if "--draft=false" in args:
@@ -214,6 +215,8 @@ class ReleaseBehavior(unittest.TestCase):
         self.assertEqual(self.repo.release_commands, ["create"])
         draft = self.repo.releases["v1.10.0"]
         self.assertTrue(draft["draft"])
+        # The release title is the bare version, not a "Release ..." prefix.
+        self.assertEqual(draft["name"], "v1.10.0")
         self.repo.release("v1.10.0", self.source)
         self.assertEqual(self.repo.release_commands, ["create"])
         self.assertIs(self.repo.releases["v1.10.0"], draft)

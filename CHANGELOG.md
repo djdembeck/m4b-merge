@@ -20,7 +20,15 @@ All notable changes to this project will be documented in this file. See [standa
 ### Fixed
 - Chapterless input groups (split MP3/M4A without embedded chapters and without provider chapters) now get one generated chapter per input track, titled `Chapter 01`, `Chapter 02`, … and embedded in the merged M4B, matching the pre-rewrite `ChaptersFromFileTracks` behaviour. Chapters and the `chapters.txt` sidecar are written even when no provider metadata was available.
 - Audnexus lookups now fetch chapter markers from `/books/{asin}/chapters` (the book endpoint never returns them), honor `isAccurate`, and carry the configured region on both requests.
-- Chapter embedding now writes the QuickTime chapter text track (`chap` reference) alongside the Nero `chpl` list via mp4ameta, so Apple/AVFoundation players see chapter markers.
+- Chapter embedding now writes the QuickTime chapter track (`chap` reference) alongside the Nero `chpl` list via mp4ameta, so Apple/AVFoundation players see chapter markers.
+- Release assets are uploaded with their plain file names (`m4b-merge-linux`,
+  `m4b-merge-linux-arm64`, `m4b-merge-macos`, `m4b-merge-windows.exe`). New
+  uploads no longer attach a `m4b-publish-v1;…` display label, which the
+  GitHub web UI rendered as the asset name and made the release page show
+  long, unreadable names. Existing labeled assets (v2.0.0 and v2.0.1) are
+  reconciled as before and are replaced with identically named,
+  identically sized, identically digested unlabeled assets.
+- Release titles are the bare version (`vX.Y.Z`) instead of `Release vX.Y.Z`.
 
 ### Changed
 - **Breaking (Linux):** release Linux assets are now static-musl binaries.

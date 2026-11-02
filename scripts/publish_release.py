@@ -235,7 +235,7 @@ def assets(args):
         expected_digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
         asset = existing.get(name)
         if asset is None:
-            pending.append((path, asset_label(args.sha, args.tag, expected_digest)))
+            pending.append(path)
             continue
         label = asset.get("label") or ""
         if label:
@@ -249,8 +249,12 @@ def assets(args):
         actual = asset_digest(asset, args.repo)
         if actual != expected_digest:
             raise ValueError(f"Existing asset differs from tested build: {name}")
-    for path, label in pending:
-        run("gh", "release", "upload", args.tag, f"{path}#{label}", "--repo", args.repo)
+    for path in pending:
+        # The asset name is the plain file name; provenance is enforced at
+        # reconciliation (label on old assets, digest on unlabelled ones), so
+        # no metadata suffix is sent. gh's `#label` display name renders as the
+        # visible asset name on the release page.
+        run("gh", "release", "upload", args.tag, str(path), "--repo", args.repo)
 
 
 def main():

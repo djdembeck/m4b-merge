@@ -197,10 +197,9 @@ sys.exit(response.get('code', 0))
         self.asset_list.pop()  # Windows upload was the point of interruption.
         self.release_response()
         windows = Path(self.args.artifacts) / "m4b-merge-windows.exe" / "m4b-merge-windows.exe"
-        digest = "sha256:" + hashlib.sha256(windows.read_bytes()).hexdigest()
-        label = publisher.asset_label(SHA, VERSION, digest)
-        upload = ["gh", "release", "upload", VERSION, f"{windows}#{label}",
-                  "--repo", "owner/repo"]
+        # The new upload carries no label suffix: the asset name is the plain
+        # file name, and the existing labeled asset is reused by provenance.
+        upload = ["gh", "release", "upload", VERSION, str(windows), "--repo", "owner/repo"]
         self.response(upload)
         publisher.assets(self.args)
         self.assertEqual([cmd for cmd in self.called() if "upload" in cmd], [upload])
@@ -228,9 +227,7 @@ sys.exit(response.get('code', 0))
         self.asset_list.pop()
         self.release_response()
         path = Path(self.args.artifacts) / "m4b-merge-windows.exe" / "m4b-merge-windows.exe"
-        label = publisher.asset_label(SHA, VERSION,
-                                     "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest())
-        upload = ["gh", "release", "upload", VERSION, f"{path}#{label}", "--repo", "owner/repo"]
+        upload = ["gh", "release", "upload", VERSION, str(path), "--repo", "owner/repo"]
         self.response(upload)
         publisher.assets(self.args)
         self.assertEqual([cmd for cmd in self.called() if "upload" in cmd], [upload])
@@ -270,10 +267,8 @@ sys.exit(response.get('code', 0))
         uploads = []
         for name in ("m4b-merge-linux", "m4b-merge-macos", "m4b-merge-windows.exe"):
             path = Path(self.args.artifacts) / name / name
-            digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-            command = ["gh", "release", "upload", VERSION,
-                        f"{path}#{publisher.asset_label(SHA, VERSION, digest)}",
-                        "--repo", "owner/repo"]
+            command = ["gh", "release", "upload", VERSION, str(path),
+                       "--repo", "owner/repo"]
             self.response(command)
             uploads.append(command)
         publisher.assets(self.args)
@@ -436,9 +431,7 @@ sys.exit(response.get('code', 0))
         uploads = []
         for name in ("m4b-merge-linux-musl", "m4b-merge-linux-arm64"):
             path = Path(self.args.artifacts) / name / name
-            label = publisher.asset_label(SHA, VERSION,
-                                          "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest())
-            uploads.append(["gh", "release", "upload", VERSION, f"{path}#{label}",
+            uploads.append(["gh", "release", "upload", VERSION, str(path),
                             "--repo", "owner/repo"])
         for command in uploads:
             self.response(command)

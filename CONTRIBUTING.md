@@ -236,11 +236,14 @@ publishes that exact SHA:
   those digests, never a later mutable-tag lookup. Mismatches and registry
   authentication/transport errors fail without overwriting existing images.
 - Release assets (including `m4b-merge-windows.exe`) are never overwritten.
-  Missing assets are uploaded on re-run; an existing asset is reused only
-  via one of two paths: a labeled asset must have a provenance label bound
-  to this publication (same SHA and tag) whose digest also matches, and an
-  unlabeled legacy asset is reused only when its content digest matches the
-  freshly built artifact. Malformed labels and conflicting
+  Missing assets are uploaded on re-run as plain, correctly named assets
+  (no display label); the release page shows the exact asset name. An
+  existing asset is reused only via one of two paths: a labeled asset must
+  have a provenance label bound to this publication (same SHA and tag)
+  whose digest also matches, and an unlabeled legacy asset is reused only
+  when its content digest matches the freshly built artifact. Labeled
+  assets are historical (the v2.0.0 and v2.0.1 assets predate the plain
+  naming); new uploads never create labels. Malformed labels and conflicting
   bindings/digests fail before any upload (see
   `scripts/publish_release.py`).
 - No mutable `latest` Docker alias exists to roll back: CI's
