@@ -205,7 +205,7 @@ class Repository:
         require(len(existing) <= 1, f"Multiple release records share tag {tag}; failing closed")
         if not existing:
             require(not publish, "Cannot finalize a missing draft release")
-            self.run("gh", "release", "create", tag, "--repo", repository, "--verify-tag", "--draft", "--title", f"Release {tag}", "--notes", "")
+            self.run("gh", "release", "create", tag, "--repo", repository, "--verify-tag", "--draft", "--title", tag, "--notes", "")
             return
         existing = existing[0]
         if publish:
