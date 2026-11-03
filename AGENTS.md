@@ -165,7 +165,7 @@ Include context and actionable remediation in error messages.
 Tag, path, and exit-code behavior is contractual with downstream consumers (e.g., Bragibooks): the canonical contracts are the README "Embedded Tags", "Path Format Variables", and "Exit Codes" sections, and the implementation lives in `src/tagging.rs` (atom layout, chapter guards) and `src/processor.rs` (pipeline ordering). Changes touching chapter or metadata embedding must preserve:
 
 - **UTF-8 chapter-title byte boundaries** — the Nero `chpl` atom stores each title length in one byte; titles must be truncated on a UTF-8 char boundary at the byte limit before mp4ameta slices them, or mp4ameta panics mid-character.
-- **Representable chapter counts** — the `chpl` entry count is a single byte; chapter lists must be truncated to the representable prefix, never wrapped.
+- **Representable chapter counts** — the `chpl` entry count is a single byte; the `chpl` list must be truncated to the representable prefix, never wrapped, while the QuickTime chapter track keeps the full list.
 - **Chapter times strictly before duration** — a chapter at or past the file playlength is refused (`ChaptersOutOfRange`), because mp4ameta writes start times verbatim.
 
 ## Performance
