@@ -18,9 +18,8 @@ Every change must improve the codebase. Never introduce regressions, technical d
 
 1. **No new warnings** — All compiler/linter warnings must be resolved
 2. **100% test coverage** — Critical paths require unit tests
-3. **Typing everywhere** — No `any`, no implicit types
-4. **No commented-out code** — Delete it or use feature flags
-5. **No debug statements** — Remove `println!`, `console.log`, etc.
+3. **No commented-out code** — Delete it or use feature flags
+4. **No temporary debugging** — Remove throwaway `dbg!`, `eprintln!`, and `println!` used to inspect state; preserve the CLI's intentional user-facing output.
 
 ### Code Review Checklist
 
@@ -50,6 +49,8 @@ enforced in code review.
 ---
 
 ## Git Workflow
+
+For release or promotion changes, read [CONTRIBUTING.md](CONTRIBUTING.md); keep its release/tag policy intact.
 
 ### Branch Naming
 
@@ -159,22 +160,19 @@ Include context and actionable remediation in error messages.
 
 ---
 
+## Media Output Constraints
+
+Tag, path, and exit-code behavior is contractual with downstream consumers (e.g., Bragibooks): the canonical contracts are the README "Embedded Tags", "Path Format Variables", and "Exit Codes" sections, and the implementation lives in `src/tagging.rs` (atom layout, chapter guards) and `src/processor.rs` (pipeline ordering). Changes touching chapter or metadata embedding must preserve:
+
+- **UTF-8 chapter-title byte boundaries** — the Nero `chpl` atom stores each title length in one byte; titles must be truncated on a UTF-8 char boundary at the byte limit before mp4ameta slices them, or mp4ameta panics mid-character.
+- **Representable chapter counts** — the `chpl` entry count is a single byte; chapter lists must be truncated to the representable prefix, never wrapped.
+- **Chapter times strictly before duration** — a chapter at or past the file playlength is refused (`ChaptersOutOfRange`), because mp4ameta writes start times verbatim.
+
 ## Performance
 
 ### Benchmarks
 
-All hot paths must have benchmarks:
-
-```rust
-use criterion::{Criterion, criterion_group, criterion_main};
-
-fn bench_merge_large_files(c: &mut Criterion) {
-    c.benchmark_function("merge_large_files", |b| b.iter(|| merge_large_files()));
-}
-
-criterion_group!(benches, bench_merge_large_files);
-criterion_main!(benches);
-```
+All hot paths must have benchmarks.
 
 ### Performance Budgets
 
@@ -239,7 +237,7 @@ Document all public items per [rustdoc conventions](https://doc.rust-lang.org/ru
 |---------|-----|
 | `unsafe { ... }` without comment | Security risk |
 | `unwrap()` on user input | Panic on invalid input |
-| `println!()` in production | Log instead |
+| `println!()` used for temporary debugging | Remove it, or route it through `tracing`/the CLI's intentional output paths |
 | Global mutable state | Hard to test/debug |
 | Magic numbers | Unclear intent |
 | Deep nesting (>3 levels) | Hard to read |
