@@ -6,41 +6,27 @@ All notable changes to this project will be documented in this file. See [standa
 
 
 ### Added
-- `--job-preview`: a non-mutating preview for `--job` runs. It resolves the
-  effective metadata exactly as execution does (a supplied job performs no
-  catalog request) and resolves the same parsed template with the same
-  resolver, printing the exact sanitized relative output path plus the
-  effective values as JSON. It creates no output/completed directories,
-  writes no media, reserves no names, and makes no execution success
-  promise. A provider preview that refetches at execution is advisory
-  unless the caller captures the supplied resolved metadata; supplied-mode
-  previews are exact.
-- `--machine` (job mode): stable machine-readable execution results as JSON
-  on stdout only (all logs and progress go to stderr). The document
-  enumerates every produced output and sidecar (`chapters.txt`,
-  `cover.txt`), per-group identity/outcome, and diagnosed errors; artifact
+- `--job-preview`: a non-mutating preview for `--job` runs that prints the
+  exact sanitized relative output path (plus the effective metadata)
+  resolved by the same parsed template and resolver execution uses. It
+  creates no directories, writes no media, reserves no names, and makes no
+  execution success promise.
+- `--machine` (job mode): stable execution results as JSON on stdout only
+  (logs and progress go to stderr), enumerating every produced output and
+  sidecar with per-group identity/outcome and diagnosed errors; artifact
   paths are relative to the job's `output_root` and validated to lie inside
-  it (no absolute-path fallback), so callers can contain-check every
-  artifact against their own staging tree. `status` is
-  `succeeded`/`partial_failure`/`failed` and never claims success for a
-  failed group; partial or total failure exits 1 after the document is
-  printed. Setup and run-level failures (missing FFmpeg, discovery
-  failure) emit a `failed` document with a top-level `error`, so stdout
-  always parses. A job run is one book: one group named `"job"`;
-  `partial_failure` is reserved for multi-group library consumers.
+  it. Partial or total failure exits 1; setup/run-level failures emit a
+  `failed` document with a top-level `error`, so stdout always parses.
 - Engine-side no-clobber for `--job` runs: the resolved output name is
-  claimed with `O_CREAT|O_EXCL` before any write, the created parent
-  directories are re-validated against the canonical output root at claim
-  time, and the produced file is re-validated after the merge (regular file
-  inside the canonical root; same claimed inode on Unix) so a parent swapped
-  for a symlink during the write cannot redirect the accepted output outside
-  the root. No silent suffixing, no exists-then-rename race, no overwrite
-  rename; a collision
-  is a diagnosed failure that leaves the existing file untouched and
-  produces no falsely successful output, and a failed merge removes its
-  claimed placeholder so a retry is not blocked by a false collision.
-  Staging containment is documented as not protecting a final shared
-  publication, which remains the caller's race-safe gate.
+  claimed with `O_CREAT|O_EXCL` before any write, parents are re-validated
+  against the canonical root at claim time, and the produced file is
+  re-validated after the merge (regular, non-empty file inside the canonical
+  root), so a parent swapped for a symlink during the write cannot redirect
+  the accepted output outside the root. A collision is a diagnosed failure
+  that leaves the existing file untouched; a failed merge removes its
+  claimed placeholder so a retry is not blocked. Staging containment does
+  not protect a final shared publication; that remains the caller's
+  race-safe gate.
 - One parsed-template output-path resolver for `--job` runs (`resolver_version`
   from `--capabilities`): only template separators create directories; a
   token's value is sanitized as component data so it cannot introduce

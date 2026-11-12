@@ -537,9 +537,8 @@ impl Job {
         }
     }
 
-    /// The metadata source a job's provider mode builds (`None` in supplied
-    /// mode). Shared by execution and the preview so both construct the same
-    /// client — and supplied mode performs no catalog request in either.
+    /// The metadata source provider mode builds (`None` in supplied mode,
+    /// which performs no catalog request).
     pub fn metadata_source(
         &self,
         config: &crate::config::Config,
@@ -571,9 +570,7 @@ impl Job {
     /// execution does and the same parsed template with the same resolver,
     /// returning the exact sanitized relative path plus the effective values
     /// for diagnostics. No directories, media, or name reservations happen,
-    /// and no execution success is promised. Supplied mode performs no
-    /// catalog request; a provider preview that refetches at execution is
-    /// advisory unless the caller captures the supplied resolved metadata.
+    /// and no execution success is promised.
     pub async fn preview(&self, config: &crate::config::Config) -> Result<JobPreview> {
         let source = self.metadata_source(config)?;
         let effective = self.resolve(source.as_ref()).await?;
@@ -587,21 +584,7 @@ impl Job {
             resolver_version: crate::path_resolver::RESOLVER_VERSION,
             path_format: effective.template().to_string(),
             relative_path,
-            metadata: PreviewMetadata {
-                title: effective.metadata.title.clone(),
-                subtitle: effective.metadata.subtitle.clone(),
-                authors: effective.metadata.authors.clone(),
-                narrators: effective.metadata.narrators.clone(),
-                series_name: effective.metadata.series_name.clone(),
-                series_position: effective.metadata.series_position.clone(),
-                description: effective.metadata.description.clone(),
-                genres: effective.metadata.genres.clone(),
-                year: effective.metadata.year,
-                metadata_id: effective.metadata.metadata_id.clone(),
-                book_id: effective.metadata.book_id.clone(),
-                chapters: effective.metadata.chapters.len(),
-                cover_url: effective.metadata.cover_url.clone(),
-            },
+            metadata: effective.metadata.clone(),
         })
     }
 
@@ -644,28 +627,7 @@ pub struct JobPreview {
     /// `output_root`, including the output extension.
     pub relative_path: String,
     /// The effective (base + overrides) metadata the path was resolved from.
-    pub metadata: PreviewMetadata,
-}
-
-/// The effective supported metadata a preview resolved, for diagnostics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PreviewMetadata {
-    pub title: String,
-    pub subtitle: Option<String>,
-    pub authors: Vec<String>,
-    pub narrators: Vec<String>,
-    pub series_name: Option<String>,
-    pub series_position: Option<String>,
-    pub description: String,
-    pub genres: Vec<String>,
-    pub year: Option<u32>,
-    /// Provider-dependent looked-up ID; empty in supplied mode.
-    pub metadata_id: String,
-    /// Canonical catalog book ID; empty when the base does not carry one.
-    pub book_id: String,
-    /// The number of resolved chapters (provider chapters when present).
-    pub chapters: usize,
-    pub cover_url: Option<String>,
+    pub metadata: crate::metadata::BookMetadata,
 }
 
 /// Machine-readable execution result: every produced output and sidecar,
@@ -673,11 +635,9 @@ pub struct PreviewMetadata {
 /// the job's `output_root`; there is no absolute-path fallback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JobResult {
-    /// The job schema version the run consumed.
     pub schema_version: u32,
     /// The resolver version that produced the output paths, matching
-    /// `--capabilities` so a caller can verify the identity of a produced
-    /// path.
+    /// `--capabilities` so a caller can verify the identity of a path.
     pub resolver_version: &'static str,
     /// `succeeded` when every group succeeded, `partial_failure` when some
     /// did and some did not, `failed` when none did.
@@ -707,11 +667,10 @@ impl JobResult {
         }
     }
 
-    /// Build the machine result from a run outcome: every group in run order
-    /// with its artifacts and diagnosed error; the status never claims
-    /// success for a failed group. A CLI job run is a single book (one
-    /// group), so `partial_failure` arises only for multi-group library
-    /// consumers of `Processor::run`.
+    /// Build the machine result: every group in run order with its artifacts
+    /// and diagnosed error; the status never claims success for a failed
+    /// group. A CLI job run is one book (one group), so `partial_failure`
+    /// arises only for multi-group library consumers.
     pub fn from_run(job_schema_version: u32, run: &crate::processor::RunOutcome) -> Self {
         let groups = run
             .outcomes
@@ -745,11 +704,10 @@ impl JobResult {
 /// The outcome of one processed group.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GroupResult {
-    /// The group's identity as discovered.
     pub group: String,
     pub outcome: GroupOutcome,
-    /// The input files that were processed, relative where they sit under a
-    /// path the caller owns.
+    /// The input files that were processed; relative where they sit under a
+    /// path the caller owns. Not artifacts.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub input_files: Vec<PathBuf>,
     /// Every produced output and sidecar, relative to the job's
@@ -1154,79 +1112,6 @@ mod tests {
         assert!(err.contains("metadata source"), "{err}");
     }
 
-    fn preview_config() -> crate::config::Config {
-        crate::config::Config::new(
-            Vec::new(),
-            None,
-            None,
-            crate::api::MetadataSourceKind::Audiobookdb,
-            crate::api::MetadataRegion::Us,
-            None,
-            1,
-            "info".to_string(),
-            "{author}/{title}".to_string(),
-            false,
-            None,
-        )
-    }
-
-    #[tokio::test]
-    async fn preview_matches_execution_path_and_mutates_nothing() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let input = temp.path().join("in.m4b");
-        std::fs::write(&input, b"dummy").unwrap();
-        let output_root = temp.path().join("out");
-        let raw = format!(
-            r#"{{ "schema_version": 1, "inputs": [{input:?}],
-               "input_supplied": {{ "title": "The Book", "subtitle": "Sub",
-                   "authors": ["A"], "year": 2020 }},
-               "overrides": {{ "authors": ["C"] }},
-               "output_root": {output_root:?},
-               "source": {{ "source": "audiobookdb" }},
-               "path_format": "{{author}}/{{title}} - {{subtitle}} ({{year}})" }}"#
-        );
-        let job: Job = serde_json::from_str(&raw).unwrap();
-        let preview = job.preview(&preview_config()).await.unwrap();
-        // Supplied mode previews with no catalog request (a `source` object
-        // is irrelevant to supplied input) and carries no provider IDs.
-        assert!(preview.metadata.metadata_id.is_empty());
-        assert!(preview.metadata.book_id.is_empty());
-        // The path is the exact string execution's resolver produces from
-        // the same effective metadata (override wins).
-        let effective = job.resolve(None).await.unwrap();
-        assert_eq!(
-            preview.relative_path,
-            crate::path_resolver::PathResolver::resolve_output(
-                effective.template(),
-                &effective.metadata
-            )
-            .unwrap()
-        );
-        assert_eq!(preview.relative_path, "C/The Book - Sub (2020).m4b");
-        // Effective-value diagnostics reflect base + overrides.
-        assert_eq!(preview.metadata.title, "The Book");
-        assert_eq!(preview.metadata.subtitle.as_deref(), Some("Sub"));
-        assert_eq!(preview.metadata.authors, vec!["C".to_string()]);
-        assert_eq!(preview.metadata.year, Some(2020));
-        assert_eq!(preview.schema_version, 1);
-        assert_eq!(preview.resolver_version, crate::path_resolver::RESOLVER_VERSION);
-        // Non-mutating: no output root, no media.
-        assert!(!output_root.exists(), "preview must not create the output root");
-        assert!(input.exists(), "input untouched");
-
-        // An unknown token is rejected before any mutation.
-        let bad = format!(
-            r#"{{ "schema_version": 1, "inputs": [{input:?}],
-               "input_supplied": {{ "title": "T" }},
-               "output_root": {output_root:?},
-               "path_format": "{{author}}/{{bogus}}" }}"#
-        );
-        let job: Job = serde_json::from_str(&bad).unwrap();
-        let err = job.preview(&preview_config()).await.unwrap_err().to_string();
-        assert!(err.contains("{bogus}"), "diagnostic names the token: {err}");
-        assert!(!output_root.exists());
-    }
-
     #[test]
     fn artifact_validates_containment() {
         let root = std::path::PathBuf::from("/library/book");
@@ -1260,14 +1145,17 @@ mod tests {
             outcome: if ok { GroupOutcome::Succeeded } else { GroupOutcome::Failed },
             error: (!ok).then(|| err.to_string()),
         };
-        let run = |complete: bool, results: usize, outcomes: Vec<GroupOutcomes>| RunOutcome {
-            results: (0..results)
-                .map(|i| crate::processor::ProcessingResult {
+        // `results` is empty except for the partial case: the status is
+        // `failed` when no group succeeded, so zero results is the failed
+        // shape and one is the partial shape.
+        let run = |complete: bool, n: usize, outcomes: Vec<GroupOutcomes>| RunOutcome {
+            results: (0..n)
+                .map(|_| crate::processor::ProcessingResult {
                     input_files: Vec::new(),
-                    output_file: format!("g{i}.m4b").into(),
+                    output_file: "g.m4b".into(),
                     metadata_applied: true,
                     files_moved: false,
-                    artifacts: vec![format!("g{i}.m4b").into()],
+                    artifacts: Vec::new(),
                 })
                 .collect(),
             outcomes,

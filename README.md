@@ -211,17 +211,16 @@ m4b-merge --job job.json --job-preview
 ```
 
 It resolves the effective metadata exactly as execution does (base +
-overrides; a supplied job performs **no catalog request**) and resolves the
-same parsed template with the same resolver, printing the exact sanitized
-relative output path (plus the effective values for diagnostics) as JSON. It
-creates no output or completed directories, writes no media, and reserves no
-names, and it makes no execution success promise: collisions, media errors,
-and filesystem failures are execution-time. Because the preview and the run
-share one resolver and one effective-metadata resolution, the previewed
-relative path is the path execution produces — provided the metadata is the
-same. A **provider** preview that refetches at execution is therefore
-**advisory** unless the caller captures the supplied resolved metadata
-(supplied mode has no fetch, so its preview is exact).
+overrides; a supplied job performs **no catalog request**) and the same
+parsed template with the same resolver, printing the exact sanitized
+relative output path (plus the effective metadata) as JSON. It creates no
+output or completed directories, writes no media, and reserves no names, and
+makes no execution success promise: collisions, media errors, and filesystem
+failures are execution-time. The previewed path is the path execution
+produces, provided the metadata is the same — so a **provider** preview that
+refetches at execution is **advisory** unless the caller captures the
+supplied resolved metadata (supplied mode has no fetch, so its preview is
+exact).
 
 #### Machine results (`--machine`)
 
@@ -235,48 +234,39 @@ Stable JSON on **stdout only** — all logs and progress go to stderr, so the
 document parses cleanly on success and on failure:
 
 ```json
-{
-  "status": "succeeded | partial_failure | failed",
-  "groups": [
-    {
-      "group": "job", "outcome": "succeeded",
-      "input_files": ["track1.m4b"], "files_moved": false,
-      "artifacts": [
-        { "relative_path": "Author/Title.m4b", "kind": "audio", "exists": true },
-        { "relative_path": "Author/Title.chapters.txt", "kind": "sidecar", "exists": true }
-      ]
-    }
-  ]
-}
+{ "status": "succeeded | partial_failure | failed",
+  "groups": [{ "group": "job", "outcome": "succeeded",
+    "input_files": ["track1.m4b"],
+    "artifacts": [
+      { "relative_path": "Author/Title.m4b", "kind": "audio", "exists": true },
+      { "relative_path": "Author/Title.chapters.txt", "kind": "sidecar", "exists": true } ] } ] }
 ```
 
 Every produced output and sidecar is enumerated; artifact paths are
-**relative to the job's `output_root`** and validated to lie inside it —
-no absolute-path fallback. `input_files` are the job's input paths, not
+**relative to the job's `output_root`** and validated to lie inside it (no
+absolute-path fallback). `input_files` are the job's input paths, not
 artifacts. `status` never claims success for a failed group; a partial or
 total failure exits 1 after the document is printed, and setup/run-level
-failures (missing FFmpeg, discovery failure) emit a `failed` document with
-a top-level `error` and empty `groups`. A **job run is one book**: all
-discovered files form a single group named `"job"`, so `partial_failure`
-cannot occur from `--machine --job`; it is reserved for multi-group
-library consumers of `Processor::run`.
+failures (missing FFmpeg, discovery failure) emit a `failed` document with a
+top-level `error` and empty `groups`. A **job run is one book**: one group
+named `"job"`, so `partial_failure` cannot occur from `--machine --job`; it
+is reserved for multi-group library consumers of `Processor::run`.
 
 #### No-clobber
 
 Job execution claims the exact resolved output name with
 `O_CREAT|O_EXCL` before any write: no silent suffixing, no
-exists-then-rename race, and no overwrite rename. If the path already exists
-(as a file or directory), the run fails with a diagnosed collision and the
-existing file is left untouched; a failed group leaves no falsely successful
-partial output and never destroys its source files. Created parent
-directories are re-validated against the output root at claim time, and the
-produced file is re-validated after the merge: it must be a regular file
-inside the canonical output root (and, on Unix, the same inode the claim
-created), so a parent swapped for a symlink during the write cannot redirect
-the accepted output outside the root. This protects the job's staging area
-only: publishing a staged output into a shared, externally-owned destination
-still needs the caller's own race-safe no-replace publication — staging
-alone does not protect that path.
+exists-then-rename race, and no overwrite rename. A pre-existing file or
+directory at the path fails the run with a diagnosed collision, untouched; a
+failed group leaves no falsely successful partial output, removes its claimed
+placeholder on merge failure, and never destroys its source files. Created
+parent directories are re-validated against the output root at claim time,
+and the produced file is re-validated after the merge: it must be a regular,
+non-empty file inside the canonical output root, so a parent swapped for a
+symlink during the write cannot redirect the accepted output outside the
+root. This protects the job's staging area only: publishing a staged output
+into a shared, externally-owned destination still needs the caller's own
+race-safe no-replace publication — staging alone does not protect that path.
 
 ### Verify Environment
 

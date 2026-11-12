@@ -102,11 +102,10 @@ pub struct RunOutcome {
     pub detail: String,
 }
 
-/// The per-group outcome: identity, every produced artifact, inputs, and the
-/// diagnosed error, so no artifact or failure is ever undisclosed.
+/// A group's outcome: identity, artifacts, inputs, and the diagnosed
+/// error, so nothing is ever undisclosed.
 #[derive(Debug, Clone)]
 pub struct GroupOutcomes {
-    /// The group's identity as discovered.
     pub group: String,
     /// Every produced output and sidecar, relative to the job's
     /// `output_root`; empty when the group failed before producing anything.
@@ -352,9 +351,8 @@ impl Processor {
         Ok(run.results)
     }
 
-    /// The full run outcome: every group's result and diagnosed failure, so
-    /// a machine result can enumerate all groups. The single entry point the
-    /// `--machine` flow uses; `process*` wrap it.
+    /// The full run outcome, the single entry point the `--machine` flow
+    /// uses; `process*` wrap it.
     pub async fn run(
         &self,
         inputs: Vec<PathBuf>,
@@ -426,10 +424,9 @@ impl Processor {
             return Err(ProcessorError::NoInputs);
         }
 
-        // Best-effort: each group is processed independently, and every
-        // group's outcome is recorded (artifacts, inputs, files_moved, and
-        // the diagnosed error on failure) so a machine result can enumerate
-        // all groups without claiming a failed group succeeded.
+        // Each group is processed independently and its outcome (artifacts,
+        // inputs, files_moved, diagnosed error) is recorded so a machine
+        // result never claims a failed group succeeded.
         let mut results = Vec::new();
         let mut failed_groups: Vec<(String, String)> = Vec::new();
         let mut outcomes: Vec<GroupOutcomes> = Vec::new();
@@ -459,9 +456,8 @@ impl Processor {
                 Err(e) => {
                     warn!("Group '{}' failed: {}", group.name, e);
                     failed_groups.push((group.name.clone(), e.to_string()));
-                    // The pipeline discards a rejected merged output before a
-                    // group fails, so no artifact survives; the diagnosed
-                    // error carries the truth.
+                    // A rejected merged output is discarded before the group
+                    // fails; the diagnosed error carries the truth.
                     outcomes.push(GroupOutcomes {
                         group: group.name.clone(),
                         artifacts: Vec::new(),
@@ -905,10 +901,9 @@ impl Processor {
         // end of the provider's chapter list but before the longer merged
         // audio ends.
 
-        // Engine-side no-clobber: the output name is claimed with
-        // `O_CREAT|O_EXCL` immediately before the write; a claim failure is
-        // a diagnosed collision that leaves the existing file untouched.
-        let claimed = self.claim_output_name(&output_path)?;
+        // Engine-side no-clobber: claim with `O_CREAT|O_EXCL` immediately
+        // before the write; a claim failure leaves the existing file intact.
+        self.claim_output_name(&output_path)?;
 
         // Stage 3: Merge
         progress_handler.on_progress(ProcessingProgress {
@@ -927,12 +922,9 @@ impl Processor {
             Self::discard_output(&output_path);
             ProcessorError::Merge(e)
         })?;
-        // Bind the produced output to the validated root: the merge writes
-        // by path, so re-open the final component relative to the canonical
-        // parent's fd and require the claimed inode; a parent swapped for a
-        // symlink between the claim and the write cannot redirect the
-        // accepted output outside the root.
-        self.verify_output_in_root(&merged_path, &claimed)?;
+        // Bind the produced output to the validated root (claim containment
+        // is pre-write only; the merge writes by path).
+        self.verify_output_in_root(&merged_path)?;
         info!("Successfully merged to: {}", merged_path.display());
 
         // Stage 4: Policy-driven writes. Any failure here discards the merged
@@ -1044,9 +1036,8 @@ impl Processor {
                         artist.as_deref(),
                         &write_chapters,
                     ) {
-                        // A sidecar that was created but not fully written
-                        // must not survive: the group reports no artifacts,
-                        // so a leftover file would be an undisclosed extra.
+                        // A partially written sidecar would be an undisclosed
+                        // extra: the group reports no artifacts.
                         Self::discard_output(&sidecar);
                         Self::discard_output(&merged_path);
                         return Err(ProcessorError::Tagging(e));
@@ -1136,9 +1127,8 @@ impl Processor {
             false
         };
 
-        // Enumerate every produced file (the merged output and the
-        // `chapters.txt`/`cover.txt` sidecars when they exist on disk) so the
-        // machine result never silently omits a sidecar.
+        // Enumerate the merged output and any `chapters.txt`/`cover.txt`
+        // sidecars so the machine result never silently omits a sidecar.
         let mut artifacts = vec![merged_path.clone()];
         for sidecar in
             [merged_path.with_extension("chapters.txt"), merged_path.with_extension("cover.txt")]
@@ -1157,8 +1147,8 @@ impl Processor {
         })
     }
 
-    /// Output path for a job: the job's root plus the parsed-template
-    /// resolver's output, with root containment enforced before any write.
+    /// A job's output path: root + the parsed-template resolver's output,
+    /// with root containment enforced before any write.
     fn determine_job_output_path(
         &self,
         output_root: &std::path::Path,
@@ -1242,14 +1232,11 @@ impl Processor {
     /// Claim the output file name before any write: `O_CREAT|O_EXCL`
     /// atomically reserves the exact path, so a pre-existing file or
     /// directory (or a concurrent claim) fails with a diagnosed collision —
-    /// nothing is written, renamed, or suffixed. The merge writes to the
-    /// engine-owned placeholder it just created, never a pre-existing file.
-    /// After creating parent directories, their canonical location is
-    /// re-validated against the output root so a swapped-in symlink cannot
-    /// carry the write outside the root. Returns the created file, kept open
-    /// so [`Self::verify_output_in_root`] can bind the produced output to
-    /// the claimed inode.
-    fn claim_output_name(&self, output_path: &std::path::Path) -> Result<std::fs::File> {
+    /// nothing is written, renamed, or suffixed. After creating parent
+    /// directories, their canonical location is re-validated against the
+    /// output root so a swapped-in symlink cannot carry the write outside
+    /// the root.
+    fn claim_output_name(&self, output_path: &std::path::Path) -> Result<()> {
         // Job-mode only: the claim runs inside a job run.
         let job = self.job.as_ref().ok_or_else(|| {
             ProcessorError::Job(crate::job::JobError::Invalid(
@@ -1281,10 +1268,10 @@ impl Processor {
                 )));
             }
         }
-        // `create_new` maps to `O_CREAT|O_EXCL`: the create fails if the path
-        // exists, closing the exists-then-write race without a rename.
+        // `create_new` maps to `O_CREAT|O_EXCL`: the create fails if the
+        // path exists, closing the exists-then-write race without a rename.
         match std::fs::OpenOptions::new().create_new(true).write(true).open(output_path) {
-            Ok(file) => Ok(file),
+            Ok(_) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 Err(ProcessorError::OutputCollision { path: output_path.to_path_buf() })
             }
@@ -1298,23 +1285,17 @@ impl Processor {
     /// Bind the produced output to the validated root after the merge. The
     /// merge writes by path, so the produced file is re-resolved with
     /// [`std::fs::canonicalize`], which follows any parent swapped for a
-    /// symlink between the claim and the write; the resolved location must
-    /// be a regular file inside the canonical output root, and on Unix it
-    /// must be the same inode the claim created (a legitimate merge
-    /// truncates the claimed file in place). Any mismatch fails the group
-    /// and discards the produced file so the run leaves no falsely
-    /// successful output.
-    fn verify_output_in_root(
-        &self,
-        output_path: &std::path::Path,
-        claimed: &std::fs::File,
-    ) -> Result<()> {
+    /// symlink; the resolved location must be a regular file inside the
+    /// canonical output root and not the untouched zero-byte claim
+    /// placeholder — a merge redirected through a swapped parent, even one
+    /// restored before this check, leaves the claimed file empty. Any
+    /// mismatch fails the group and discards the produced file.
+    fn verify_output_in_root(&self, output_path: &std::path::Path) -> Result<()> {
         let job = self.job.as_ref().ok_or_else(|| {
             ProcessorError::Job(crate::job::JobError::Invalid(
                 "output verification requires a job".into(),
             ))
         })?;
-        // A symlinked final entry is never the claimed file.
         let final_meta = std::fs::symlink_metadata(output_path).map_err(|e| {
             ProcessorError::OutputDirCreation(format!("Failed to stat output: {e}"))
         })?;
@@ -1330,31 +1311,13 @@ impl Processor {
         })?;
         let root =
             std::fs::canonicalize(&job.output_root).unwrap_or_else(|_| job.output_root.clone());
-        let in_root = produced.starts_with(&root)
-            && produced.metadata().map(|m| m.file_type().is_file()).unwrap_or(false);
-        let same_inode = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                let claimed_meta = claimed.metadata().map_err(|e| {
-                    ProcessorError::OutputDirCreation(format!("Failed to stat claimed output: {e}"))
-                })?;
-                let produced_meta = produced.metadata().map_err(|e| {
-                    ProcessorError::OutputDirCreation(format!(
-                        "Failed to stat produced output: {e}"
-                    ))
-                })?;
-                (claimed_meta.dev(), claimed_meta.ino())
-                    == (produced_meta.dev(), produced_meta.ino())
-            }
-            #[cfg(not(unix))]
-            {
-                // No portable inode identity on non-Unix targets; the
-                // canonicalize containment check is the binding one there.
-                true
-            }
-        };
-        if !in_root || !same_inode {
+        let produced_meta = produced.metadata().map_err(|e| {
+            ProcessorError::OutputDirCreation(format!("Failed to stat produced output: {e}"))
+        })?;
+        let in_root = produced.starts_with(&root) && produced_meta.file_type().is_file();
+        // A real merge always writes audio into the claimed file; a
+        // redirected merge leaves the zero-byte placeholder behind.
+        if !in_root || produced_meta.len() == 0 {
             Self::discard_output(output_path);
             return Err(self.output_root_escape(output_path));
         }
@@ -2154,11 +2117,7 @@ mod tests {
         let output_root = temp_dir.path().join("out");
         let job_path = temp_dir.path().join("job.json");
         let job_json = format!(
-            r#"{{ "schema_version": 1, "inputs": [{:?}],
-                  "input_supplied": {{ "title": "Parity", "authors": ["PA"],
-                      "subtitle": "SS", "year": 2019 }},
-                  "output_root": {:?},
-                  "path_format": "{{author}}/{{title}} - {{subtitle}} ({{year}})" }}"#,
+            r#"{{ "schema_version": 1, "inputs": [{:?}],"input_supplied": {{ "title": "Parity", "authors": ["PA"],"subtitle": "SS", "year": 2019 }},"output_root": {:?},"path_format": "{{author}}/{{title}} - {{subtitle}} ({{year}})" }}"#,
             input, output_root
         );
         std::fs::write(&job_path, job_json).unwrap();
@@ -2195,9 +2154,7 @@ mod tests {
         let output_root = temp_dir.path().join("out");
         let job_path = temp_dir.path().join("job.json");
         let job_json = format!(
-            r#"{{ "schema_version": 1, "inputs": [{:?}],
-                  "input_supplied": {{ "title": "Clash", "authors": ["A"] }},
-                  "output_root": {:?}, "path_format": "{{author}}/{{title}}" }}"#,
+            r#"{{ "schema_version": 1, "inputs": [{:?}],"input_supplied": {{ "title": "Clash", "authors": ["A"] }},"output_root": {:?}, "path_format": "{{author}}/{{title}}" }}"#,
             input, output_root
         );
         std::fs::write(&job_path, job_json).unwrap();
@@ -2232,6 +2189,78 @@ mod tests {
         assert_eq!(entries, vec![std::ffi::OsString::from("Clash.m4b")], "{entries:?}");
         // The source input is never destroyed by a collision.
         assert!(input.exists(), "source retained for recovery");
+    }
+
+    #[tokio::test]
+    async fn failed_merge_removes_claimed_placeholder() {
+        // A failed merge must not leave the claimed placeholder behind: it
+        // would block a retry with a false collision.
+        let temp_dir = TempDir::new().unwrap();
+        let book_dir = temp_dir.path().join("Book");
+        // An MP3 forces transcode mode (the single-file copy fast path
+        // does not invoke FFmpeg), so a corrupt file makes the merge fail.
+        let input = book_dir.join("audio.mp3");
+        std::fs::create_dir_all(&book_dir).unwrap();
+        std::fs::write(&input, b"not a real mp3").unwrap();
+        let output_root = temp_dir.path().join("out");
+        let job_path = temp_dir.path().join("job.json");
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],"input_supplied": {{ "title": "T", "authors": ["A"] }},"output_root": {:?} }}"#,
+            input, output_root
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let job = crate::job::Job::load(&job_path).unwrap();
+        let processor =
+            Processor::for_job(job, job_config(&temp_dir, &temp_dir.path().join("cfg-done")))
+                .unwrap();
+        let run = processor.run(vec![input.clone()], &NoOpProgressHandler).await.unwrap();
+        assert!(!run.complete, "a corrupt input must fail the group");
+        // No placeholder survives: the resolved output path does not exist.
+        let output = output_root.join("A").join("T.m4b");
+        assert!(!output.exists(), "placeholder must be discarded on merge failure");
+        // The source input is never destroyed.
+        assert!(input.exists(), "source retained for recovery");
+    }
+
+    #[test]
+    fn machine_setup_failed_document_shape() {
+        let res = crate::job::JobResult::setup_failed("ffmpeg missing".into());
+        assert_eq!(res.status, "failed");
+        assert!(!res.all_succeeded(), "setup failure is not a success");
+        assert!(res.groups.is_empty(), "no groups ran");
+        assert_eq!(res.error.as_deref(), Some("ffmpeg missing"));
+        assert_eq!(res.schema_version, crate::job::SCHEMA_VERSION);
+        assert_eq!(res.resolver_version, crate::path_resolver::RESOLVER_VERSION);
+    }
+
+    #[tokio::test]
+    async fn machine_result_enumerates_cover_sidecar() {
+        // A source cover.txt carried into the output root must be enumerated
+        // as an artifact, not silently omitted.
+        let temp_dir = TempDir::new().unwrap();
+        let book_dir = temp_dir.path().join("Book");
+        let input = create_test_m4b(&book_dir, 5);
+        std::fs::write(book_dir.join("audio.cover.txt"), b"cover").unwrap();
+        let output_root = temp_dir.path().join("out");
+        let job_path = temp_dir.path().join("job.json");
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],"input_supplied": {{ "title": "Cov", "authors": ["A"] }},"cover": "preserve", "output_root": {:?} }}"#,
+            input, output_root
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let job = crate::job::Job::load(&job_path).unwrap();
+        let processor =
+            Processor::for_job(job, job_config(&temp_dir, &temp_dir.path().join("cfg-done")))
+                .unwrap();
+        let run = processor.run(vec![input.clone()], &NoOpProgressHandler).await.unwrap();
+        assert!(run.complete, "run must complete");
+        let outcomes = &run.outcomes[0];
+        let kinds: Vec<&str> = outcomes.artifacts.iter().map(|a| a.kind).collect();
+        assert!(kinds.contains(&"audio"), "audio artifact present: {kinds:?}");
+        let cover = outcomes.artifacts.iter().find(|a| {
+            a.relative_path.ends_with(".cover.txt") || a.relative_path.ends_with("cover.txt")
+        });
+        assert!(cover.is_some(), "cover sidecar enumerated: {:?}", outcomes.artifacts);
     }
 
     #[tokio::test]

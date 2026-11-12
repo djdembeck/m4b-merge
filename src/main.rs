@@ -71,16 +71,15 @@ struct Args {
     pub dry_run: bool,
 
     /// Non-mutating job preview: print the exact sanitized relative output
-    /// path (plus effective values) as JSON, from the same resolver and
-    /// metadata as execution. No directories, media, or name reservations.
-    /// Job mode only; mutually exclusive with `--machine`.
+    /// path (plus effective values) as JSON from the same resolver and
+    /// metadata as execution. Job mode only; exclusive with `--machine`.
     #[arg(long = "job-preview")]
     pub job_preview: bool,
 
-    /// Machine-readable execution results: stable JSON on stdout only (logs
-    /// and progress go to stderr), enumerating every produced output and
-    /// sidecar, per-group outcome, and diagnosed errors. Job mode only;
-    /// exits nonzero on any failure. Mutually exclusive with `--job-preview`.
+    /// Machine-readable execution results: stable JSON on stdout only
+    /// (logs and progress go to stderr), enumerating every produced output
+    /// and sidecar. Job mode only; exits nonzero on failure; exclusive
+    /// with `--job-preview`.
     #[arg(long = "machine")]
     pub machine: bool,
 
@@ -190,8 +189,7 @@ async fn main() {
         match m4b_merge::job::Job::load(job_path) {
             Ok(job) => Some(job),
             Err(e) => {
-                // `--machine` promises a parseable document on every failure
-                // path, including an unreadable or invalid job file.
+                // `--machine` promises a parseable document on every failure path.
                 if args.machine {
                     machine_exit(&m4b_merge::job::JobResult::setup_failed(format!(
                         "failed to load job {}: {e}",
@@ -281,10 +279,8 @@ async fn main() {
         args.metadata_id,
     );
 
-    // Validate configuration. The preview skips this deliberately:
-    // `validate` creates the output and completed directories, and the
-    // preview must mutate nothing (in job mode the CLI paths are unused
-    // anyway; the job file is already validated at load).
+    // The preview skips validation deliberately: `validate` creates the
+    // output and completed directories, and the preview must mutate nothing.
     if !args.job_preview {
         if let Err(e) = config.validate() {
             eprintln!("Error: {}", e);
@@ -308,8 +304,7 @@ async fn main() {
         );
     }
 
-    // --job-preview and --machine are job-mode-only surfaces; both need the
-    // job and are mutually exclusive with each other.
+    // --job-preview and --machine are job-mode-only and mutually exclusive.
     if args.job_preview || args.machine {
         let Some(job) = job.as_ref() else {
             eprintln!("Error: --job-preview/--machine require --job.");
@@ -320,10 +315,7 @@ async fn main() {
             std::process::exit(1);
         }
         if args.job_preview {
-            // Non-mutating: resolves the effective metadata (a supplied job
-            // needs no catalog) and the exact sanitized relative path via the
-            // same resolver execution uses. No output/completed directories,
-            // no media, no name reservation, no success promise.
+            // Non-mutating: same resolver and effective metadata as execution.
             let preview = match job.preview(&config).await {
                 Ok(preview) => preview,
                 Err(e) => {
@@ -334,10 +326,8 @@ async fn main() {
             println!("{}", serde_json::to_string_pretty(&preview).expect("preview serializes"));
             std::process::exit(0);
         }
-        // --machine: stable JSON on stdout only; progress goes to stderr via
-        // StderrProgressHandler. Every failure path — setup, the run itself,
-        // and any group failure — prints a truthful document before the
-        // nonzero exit.
+        // --machine: JSON on stdout, progress on stderr; every failure path
+        // (setup, run, group) prints a truthful document before exit(1).
         let processor = match Processor::for_job(job.clone(), config) {
             Ok(processor) => processor,
             Err(e) => {

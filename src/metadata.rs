@@ -6,7 +6,7 @@ pub fn is_valid_metadata_id(id: &str) -> bool {
 }
 
 /// Chapter information for audiobooks
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Chapter {
     pub title: String,
     pub start_time: Duration,
@@ -34,7 +34,7 @@ impl Chapter {
 }
 
 /// Complete metadata for an audiobook
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BookMetadata {
     /// The provider-dependent id the book was looked up by (an ASIN for
     /// audnexus, the resolved catalog id for audiobookdb). Empty for supplied
