@@ -673,6 +673,12 @@ pub struct PreviewMetadata {
 /// the job's `output_root`; there is no absolute-path fallback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JobResult {
+    /// The job schema version the run consumed.
+    pub schema_version: u32,
+    /// The resolver version that produced the output paths, matching
+    /// `--capabilities` so a caller can verify the identity of a produced
+    /// path.
+    pub resolver_version: &'static str,
     /// `succeeded` when every group succeeded, `partial_failure` when some
     /// did and some did not, `failed` when none did.
     pub status: &'static str,
@@ -692,7 +698,13 @@ impl JobResult {
     /// A diagnosed failure before any group ran (e.g. processor setup or
     /// discovery), so a machine run always emits a parseable document.
     pub fn setup_failed(error: String) -> Self {
-        Self { status: "failed", groups: Vec::new(), error: Some(error) }
+        Self {
+            schema_version: SCHEMA_VERSION,
+            resolver_version: crate::path_resolver::RESOLVER_VERSION,
+            status: "failed",
+            groups: Vec::new(),
+            error: Some(error),
+        }
     }
 
     /// Build the machine result from a run outcome: every group in run order
@@ -700,7 +712,7 @@ impl JobResult {
     /// success for a failed group. A CLI job run is a single book (one
     /// group), so `partial_failure` arises only for multi-group library
     /// consumers of `Processor::run`.
-    pub fn from_run(run: &crate::processor::RunOutcome) -> Self {
+    pub fn from_run(job_schema_version: u32, run: &crate::processor::RunOutcome) -> Self {
         let groups = run
             .outcomes
             .iter()
@@ -720,7 +732,13 @@ impl JobResult {
         } else {
             "partial_failure"
         };
-        Self { status, groups, error: None }
+        Self {
+            schema_version: job_schema_version,
+            resolver_version: crate::path_resolver::RESOLVER_VERSION,
+            status,
+            groups,
+            error: None,
+        }
     }
 }
 
@@ -1257,26 +1275,24 @@ mod tests {
             detail: String::new(),
         };
 
-        let res = JobResult::from_run(&run(
-            true,
-            2,
-            vec![outcome("g1", true, ""), outcome("g2", true, "")],
-        ));
+        let res = JobResult::from_run(
+            1,
+            &run(true, 2, vec![outcome("g1", true, ""), outcome("g2", true, "")]),
+        );
         assert!(res.all_succeeded(), "all groups succeeded");
         assert_eq!(res.status, "succeeded");
         assert_eq!(res.groups.len(), 2);
 
-        let res = JobResult::from_run(&run(
-            false,
+        let res = JobResult::from_run(
             1,
-            vec![outcome("g1", true, ""), outcome("g2", false, "boom")],
-        ));
+            &run(false, 1, vec![outcome("g1", true, ""), outcome("g2", false, "boom")]),
+        );
         assert!(!res.all_succeeded(), "partial must not claim full success");
         assert_eq!(res.status, "partial_failure");
         assert_eq!(res.groups.len(), 2, "every group is enumerated");
         assert_eq!(res.groups[1].error.as_deref(), Some("boom"));
 
-        let res = JobResult::from_run(&run(false, 0, vec![outcome("g1", false, "nope")]));
+        let res = JobResult::from_run(1, &run(false, 0, vec![outcome("g1", false, "nope")]));
         assert_eq!(res.status, "failed");
         assert!(!res.all_succeeded());
     }

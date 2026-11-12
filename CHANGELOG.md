@@ -29,10 +29,13 @@ All notable changes to this project will be documented in this file. See [standa
   always parses. A job run is one book: one group named `"job"`;
   `partial_failure` is reserved for multi-group library consumers.
 - Engine-side no-clobber for `--job` runs: the resolved output name is
-  claimed with `O_CREAT|O_EXCL` before any write, and the created parent
-  directories are re-validated against the canonical output root so a
-  swapped-in symlink cannot carry the write outside the root. No silent
-  suffixing, no exists-then-rename race, no overwrite rename; a collision
+  claimed with `O_CREAT|O_EXCL` before any write, the created parent
+  directories are re-validated against the canonical output root at claim
+  time, and the produced file is re-validated after the merge (regular file
+  inside the canonical root; same claimed inode on Unix) so a parent swapped
+  for a symlink during the write cannot redirect the accepted output outside
+  the root. No silent suffixing, no exists-then-rename race, no overwrite
+  rename; a collision
   is a diagnosed failure that leaves the existing file untouched and
   produces no falsely successful output, and a failed merge removes its
   claimed placeholder so a retry is not blocked by a false collision.

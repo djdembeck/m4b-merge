@@ -190,6 +190,14 @@ async fn main() {
         match m4b_merge::job::Job::load(job_path) {
             Ok(job) => Some(job),
             Err(e) => {
+                // `--machine` promises a parseable document on every failure
+                // path, including an unreadable or invalid job file.
+                if args.machine {
+                    machine_exit(&m4b_merge::job::JobResult::setup_failed(format!(
+                        "failed to load job {}: {e}",
+                        job_path.display()
+                    )));
+                }
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -344,7 +352,7 @@ async fn main() {
                 machine_exit(&m4b_merge::job::JobResult::setup_failed(e.to_string()));
             }
         };
-        machine_exit(&m4b_merge::job::JobResult::from_run(&run));
+        machine_exit(&m4b_merge::job::JobResult::from_run(job.schema_version, &run));
     }
 
     info!("m4b-merge starting with {} input(s)", run_inputs.len());

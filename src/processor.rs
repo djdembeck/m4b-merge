@@ -908,7 +908,7 @@ impl Processor {
         // Engine-side no-clobber: the output name is claimed with
         // `O_CREAT|O_EXCL` immediately before the write; a claim failure is
         // a diagnosed collision that leaves the existing file untouched.
-        self.claim_output_name(&output_path)?;
+        let claimed = self.claim_output_name(&output_path)?;
 
         // Stage 3: Merge
         progress_handler.on_progress(ProcessingProgress {
@@ -927,6 +927,12 @@ impl Processor {
             Self::discard_output(&output_path);
             ProcessorError::Merge(e)
         })?;
+        // Bind the produced output to the validated root: the merge writes
+        // by path, so re-open the final component relative to the canonical
+        // parent's fd and require the claimed inode; a parent swapped for a
+        // symlink between the claim and the write cannot redirect the
+        // accepted output outside the root.
+        self.verify_output_in_root(&merged_path, &claimed)?;
         info!("Successfully merged to: {}", merged_path.display());
 
         // Stage 4: Policy-driven writes. Any failure here discards the merged
@@ -1038,6 +1044,10 @@ impl Processor {
                         artist.as_deref(),
                         &write_chapters,
                     ) {
+                        // A sidecar that was created but not fully written
+                        // must not survive: the group reports no artifacts,
+                        // so a leftover file would be an undisclosed extra.
+                        Self::discard_output(&sidecar);
                         Self::discard_output(&merged_path);
                         return Err(ProcessorError::Tagging(e));
                     }
@@ -1236,8 +1246,10 @@ impl Processor {
     /// engine-owned placeholder it just created, never a pre-existing file.
     /// After creating parent directories, their canonical location is
     /// re-validated against the output root so a swapped-in symlink cannot
-    /// carry the write outside the root.
-    fn claim_output_name(&self, output_path: &std::path::Path) -> Result<()> {
+    /// carry the write outside the root. Returns the created file, kept open
+    /// so [`Self::verify_output_in_root`] can bind the produced output to
+    /// the claimed inode.
+    fn claim_output_name(&self, output_path: &std::path::Path) -> Result<std::fs::File> {
         // Job-mode only: the claim runs inside a job run.
         let job = self.job.as_ref().ok_or_else(|| {
             ProcessorError::Job(crate::job::JobError::Invalid(
@@ -1272,7 +1284,7 @@ impl Processor {
         // `create_new` maps to `O_CREAT|O_EXCL`: the create fails if the path
         // exists, closing the exists-then-write race without a rename.
         match std::fs::OpenOptions::new().create_new(true).write(true).open(output_path) {
-            Ok(_) => Ok(()),
+            Ok(file) => Ok(file),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 Err(ProcessorError::OutputCollision { path: output_path.to_path_buf() })
             }
@@ -1281,6 +1293,80 @@ impl Processor {
                 output_path.display()
             ))),
         }
+    }
+
+    /// Bind the produced output to the validated root after the merge. The
+    /// merge writes by path, so the produced file is re-resolved with
+    /// [`std::fs::canonicalize`], which follows any parent swapped for a
+    /// symlink between the claim and the write; the resolved location must
+    /// be a regular file inside the canonical output root, and on Unix it
+    /// must be the same inode the claim created (a legitimate merge
+    /// truncates the claimed file in place). Any mismatch fails the group
+    /// and discards the produced file so the run leaves no falsely
+    /// successful output.
+    fn verify_output_in_root(
+        &self,
+        output_path: &std::path::Path,
+        claimed: &std::fs::File,
+    ) -> Result<()> {
+        let job = self.job.as_ref().ok_or_else(|| {
+            ProcessorError::Job(crate::job::JobError::Invalid(
+                "output verification requires a job".into(),
+            ))
+        })?;
+        // A symlinked final entry is never the claimed file.
+        let final_meta = std::fs::symlink_metadata(output_path).map_err(|e| {
+            ProcessorError::OutputDirCreation(format!("Failed to stat output: {e}"))
+        })?;
+        if final_meta.file_type().is_symlink() {
+            Self::discard_output(output_path);
+            return Err(self.output_root_escape(output_path));
+        }
+        let produced = std::fs::canonicalize(output_path).map_err(|e| {
+            ProcessorError::OutputDirCreation(format!(
+                "Failed to canonicalize produced output {}: {e}",
+                output_path.display()
+            ))
+        })?;
+        let root =
+            std::fs::canonicalize(&job.output_root).unwrap_or_else(|_| job.output_root.clone());
+        let in_root = produced.starts_with(&root)
+            && produced.metadata().map(|m| m.file_type().is_file()).unwrap_or(false);
+        let same_inode = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let claimed_meta = claimed.metadata().map_err(|e| {
+                    ProcessorError::OutputDirCreation(format!("Failed to stat claimed output: {e}"))
+                })?;
+                let produced_meta = produced.metadata().map_err(|e| {
+                    ProcessorError::OutputDirCreation(format!(
+                        "Failed to stat produced output: {e}"
+                    ))
+                })?;
+                (claimed_meta.dev(), claimed_meta.ino())
+                    == (produced_meta.dev(), produced_meta.ino())
+            }
+            #[cfg(not(unix))]
+            {
+                // No portable inode identity on non-Unix targets; the
+                // canonicalize containment check is the binding one there.
+                true
+            }
+        };
+        if !in_root || !same_inode {
+            Self::discard_output(output_path);
+            return Err(self.output_root_escape(output_path));
+        }
+        Ok(())
+    }
+
+    /// Diagnoses an output that escaped the job output root.
+    fn output_root_escape(&self, output_path: &std::path::Path) -> ProcessorError {
+        ProcessorError::OutputDirCreation(format!(
+            "Produced output {} is not the claimed file inside the job output root; refusing",
+            output_path.display()
+        ))
     }
 
     /// The produced artifacts of a result, relative to the job's

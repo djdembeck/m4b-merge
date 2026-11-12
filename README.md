@@ -269,10 +269,14 @@ exists-then-rename race, and no overwrite rename. If the path already exists
 (as a file or directory), the run fails with a diagnosed collision and the
 existing file is left untouched; a failed group leaves no falsely successful
 partial output and never destroys its source files. Created parent
-directories are re-validated against the output root at claim time. This
-protects the job's staging area only: publishing a staged output into a
-shared, externally-owned destination still needs the caller's own race-safe
-no-replace publication — staging alone does not protect that path.
+directories are re-validated against the output root at claim time, and the
+produced file is re-validated after the merge: it must be a regular file
+inside the canonical output root (and, on Unix, the same inode the claim
+created), so a parent swapped for a symlink during the write cannot redirect
+the accepted output outside the root. This protects the job's staging area
+only: publishing a staged output into a shared, externally-owned destination
+still needs the caller's own race-safe no-replace publication — staging
+alone does not protect that path.
 
 ### Verify Environment
 
