@@ -264,14 +264,16 @@ root, so a swapped symlinked parent cannot redirect the accepted output
 outside the root. A rejected output is removed through the parent directory
 pinned at cleanup, so a parent swapped for a symlink cannot redirect the
 removal at an external file. The merge writes a hidden staging sibling
-inside the validated parent, and the final name appears only through a
-publication that moves the staged file with `renameat` relative to the
-pinned, root-validated parent: a swapped final entry is replaced (not
-followed), so the media pipeline's path-based write can never be redirected
-at an external file. The `chapters.txt`/`cover.txt` sidecars are separate,
-unclaimed names written after publication; a local attacker who swaps one of
-those names in the same window can redirect that one write, which is
-documented as a known limitation of the current pipeline. This protects the
+inside the validated parent, and every media mutation (merge, tag, cover,
+chapter embedding) happens on that staging file; the final name appears only
+through a publication that moves the staged file with `renameat` relative to
+the pinned, root-validated parent after all mutations succeed: a swapped
+final entry is replaced (not followed), so no path-based write of the media
+pipeline can be redirected at an external file. The `chapters.txt`/`cover.txt`
+sidecars are separate, unclaimed names written to their final sibling location
+before publication; a local attacker who swaps one of those names in that
+window can redirect that one write, which is documented as a known
+limitation of the current pipeline. This protects the
 job's staging area only; publishing into a shared destination still needs
 the caller's race-safe publication.
 

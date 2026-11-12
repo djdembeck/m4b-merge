@@ -1528,25 +1528,52 @@ fn convert_cover_to_jpeg(image_data: &[u8]) -> Result<Vec<u8>> {
         ))
     })?;
 
-    let temp_dir = tempfile::TempDir::new().map_err(|e| {
-        TaggingError::CoverConversion(format!("Failed to create temp dir for cover: {e}"))
-    })?;
-    let input_path = temp_dir.path().join("cover_input");
-    let output_path = temp_dir.path().join("cover_output.jpg");
-
-    std::fs::write(&input_path, image_data).map_err(|e| {
-        TaggingError::CoverConversion(format!("Failed to write temp cover file: {e}"))
-    })?;
+    use std::io::Write;
 
     // `-frames:v 1` keeps animated inputs to a single still frame. No scaling
-    // filter is applied, so the source dimensions are preserved.
-    let output = std::process::Command::new(ffmpeg.ffmpeg_path())
-        .args(["-hide_banner", "-loglevel", "error", "-i"])
-        .arg(&input_path)
-        .args(["-frames:v", "1", "-c:v", "mjpeg", "-q:v", "2", "-f", "image2", "-y"])
-        .arg(&output_path)
-        .output()
+    // filter is applied, so the source dimensions are preserved. Both image
+    // streams use pipes so FFmpeg diagnostics cannot expose temporary paths.
+    let mut child = std::process::Command::new(ffmpeg.ffmpeg_path())
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-f",
+            "image2",
+            "pipe:1",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| TaggingError::CoverConversion(format!("Failed to run FFmpeg: {e}")))?;
+
+    // Feed stdin concurrently with draining stdout/stderr: an animated image
+    // can produce its first JPEG before FFmpeg consumes all remaining input.
+    // Dropping stdin signals EOF; always reap even if the input write fails.
+    let stdin = child.stdin.take();
+    let (input_result, output) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            stdin
+                .ok_or_else(|| std::io::Error::other("FFmpeg stdin is not available"))
+                .and_then(|mut stdin| stdin.write_all(image_data))
+        });
+        let output = child.wait_with_output();
+        let input_result = writer
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("FFmpeg cover input writer panicked")));
+        (input_result, output)
+    });
+    let output =
+        output.map_err(|e| TaggingError::CoverConversion(format!("Failed to run FFmpeg: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1555,10 +1582,18 @@ fn convert_cover_to_jpeg(image_data: &[u8]) -> Result<Vec<u8>> {
             stderr.trim()
         )));
     }
+    if let Err(e) = input_result {
+        // With `-frames:v 1`, FFmpeg may close its input after decoding the
+        // first frame of a larger animation. A successful decoder exit is
+        // authoritative for that expected broken pipe.
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(TaggingError::CoverConversion(format!(
+                "Failed to pipe cover image to FFmpeg: {e}"
+            )));
+        }
+    }
 
-    let jpeg = std::fs::read(&output_path).map_err(|e| {
-        TaggingError::CoverConversion(format!("Failed to read converted cover: {e}"))
-    })?;
+    let jpeg = output.stdout;
 
     if jpeg.is_empty() {
         return Err(TaggingError::CoverConversion(
@@ -1834,8 +1869,14 @@ mod tests {
 
     #[test]
     fn test_convert_cover_to_jpeg_rejects_non_image() {
-        let result = convert_cover_to_jpeg(b"this is not an image");
-        assert!(matches!(result, Err(TaggingError::CoverConversion(_))));
+        let error = convert_cover_to_jpeg(b"this is not an image")
+            .expect_err("invalid image data must fail conversion");
+        assert!(matches!(&error, TaggingError::CoverConversion(_)));
+        let message = error.to_string();
+        assert!(message.contains("FFmpeg failed to convert cover image"), "{message}");
+        assert!(!message.contains("cover_input"), "{message}");
+        assert!(!message.contains("cover_output"), "{message}");
+        assert!(!message.contains(std::env::temp_dir().to_string_lossy().as_ref()), "{message}");
     }
 
     #[test]
