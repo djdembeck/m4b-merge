@@ -12,6 +12,7 @@ The tool automates metadata lookup by ASIN or AudiobookDB book ID through [Audio
 - [Install](#install)
 - [Usage](#usage)
 - [Path Format Variables](#path-format-variables)
+- [Capabilities](#capabilities)
 - [Exit Codes](#exit-codes)
 - [Contributing](#contributing)
 - [License](#license)
@@ -237,25 +238,59 @@ when the effective metadata lacks them.
 
 ## Path Format Variables
 
-The output path is generated using the `-p` / `--path-format` template.
+The output path is generated from a template. Two template conventions exist:
+
+- **Legacy CLI** (`-p` / `--path-format`): the historical string-replacement
+  behavior. The template is expanded, then split on `/`, and each resulting
+  piece is sanitized.
+- **Job file** (`path_format` on `--job`): a parsed-template resolver
+  (identity: `resolver_version` from `--capabilities`). Only template
+  separators create directories; a token's value is substituted as component
+  data and sanitized in place, so a value can never introduce a directory,
+  re-substitute another token, traverse (`..`), address a drive, or escape
+  `output_root`.
 
 | Variable      | Description                      |
 |---------------|----------------------------------|
-| `{author}`   | Author name                     |
-| `{narrator}`  | Narrator name                   |
-| `{authors}`   | All authors, joined by `, ` (empty: `Unknown`) |
-| `{narrators}` | All narrators, joined by `, ` (empty: `Unknown`) |
+| `{author}`   | First ordered author name (empty: `Unknown`) |
+| `{narrator}`  | First ordered narrator name (empty: `Unknown`) |
+| `{authors}`   | All ordered authors, joined by `, ` (empty: `Unknown`) |
+| `{narrators}` | All ordered narrators, joined by `, ` (empty: `Unknown`) |
 | `{title}`    | Book title                      |
 | `{subtitle}`  | Book subtitle                   |
 | `{series_name}` | Series name                    |
 | `{series_position}` | Series position number    |
 | `{year}`     | Release year                    |
 | `{genre}`      | First genre                     |
-| `{metadata_id}` | Looked-up metadata ID (ASIN or AudiobookDB book ID) |
+| `{metadata_id}` | Provider-dependent looked-up ID (ASIN for audnexus, resolved catalog ID for audiobookdb); empty in supplied mode |
+| `{book_id}`   | Canonical AudiobookDB catalog book ID from the resolved metadata; populated only for AudiobookDB provider lookups, empty for audnexus and supplied mode. Distinct from `{metadata_id}`; job-resolver-only |
 
-A token whose value is missing or empty does not contribute a path segment (empty segments are stripped). The only exceptions are `{author}`, `{authors}`, `{narrator}`, and `{narrators}`, which substitute `Unknown` when no person is known.
+In the table above, `{book_id}` is a **job-resolver-only** token: the legacy
+CLI `-p`/`--path-format` template does not substitute it (an unmatched
+placeholder is left as literal text by the legacy path). All other tokens are
+shared by both conventions.
+
+A token whose value is missing or empty does not contribute a path segment
+(empty segments are stripped). The only exceptions are `{author}`,
+`{authors}`, `{narrator}`, and `{narrators}`, which substitute `Unknown` when
+no person is known. Unknown tokens in a job `path_format` are rejected with
+an actionable diagnostic (the token, its position, and the supported list)
+before any file is touched. A job `path_format` that resolves to no
+components at all (for example `{subtitle}` on a book with no subtitle) fails
+the group with an `EmptyPath` error before any file is touched; the legacy CLI
+path has no such case because it falls back to `output.m4b`.
 
 **Default:** `{author}/{title}`
+
+## Capabilities
+
+`m4b-merge --capabilities` prints the build's machine-readable identity and
+vocabulary as JSON: the accepted `schema_version`, the output-path
+`resolver_version`, the default template, every supported path token with its
+substitution semantics, and the field/cover/chapter policy vocabulary.
+Callers build pickers, examples, and validation from this document instead of
+maintaining their own registry, and reject protocol/resolver versions they do
+not understand. The command is self-contained (no FFmpeg, job, or network).
 
 ## Exit Codes
 

@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file. See [standa
 
 
 ### Added
+- One parsed-template output-path resolver for `--job` runs (`resolver_version`
+  from `--capabilities`): only template separators create directories; a
+  token's value is sanitized as component data so it cannot introduce
+  directories, re-substitute tokens, traverse (`..`), address a drive, or
+  escape `output_root`. Unknown tokens are rejected with the token, its
+  position, and the supported list. The legacy `-p`/`--path-format`
+  string-replacement behavior is unchanged. New tokens: canonical `{book_id}`
+  (distinct from the provider-dependent `{metadata_id}`) and singular/plural
+  first-ordered `{author}`/`{narrator}`.
+- `m4b-merge --capabilities`: machine-readable schema/resolver identity and
+  the full token and field/cover/chapter policy vocabulary, so callers build
+  pickers and validation from the engine instead of their own registry.
 - `--job FILE` processes a book from a versioned JSON job file (schema
   `schema_version: 1`). The job is the single source of truth for the
   metadata base — an explicit catalog id via `input_provider`, or
@@ -71,6 +83,10 @@ All notable changes to this project will be documented in this file. See [standa
 - Release titles are the bare version (`vX.Y.Z`) instead of `Release vX.Y.Z`.
 
 ### Changed
+- `--job` output paths: a `path_format` that resolves to no components (for
+  example `{subtitle}` on a book with no subtitle) now fails the group with an
+  `EmptyPath` error before any file is touched, instead of the legacy
+  `output.m4b` fallback; the legacy `-p`/`--path-format` path is unchanged.
 - **Breaking (Linux):** release Linux assets are now static-musl binaries.
   From the release following v2.0.0, `m4b-merge-linux` is x86-64 static
   musl and `m4b-merge-linux-arm64` is ARM64 static musl; no GNU-linked

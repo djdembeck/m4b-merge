@@ -481,6 +481,9 @@ impl AudiobookdbClient {
                 .filter(|id| !id.is_empty())
                 .unwrap_or(caller_id)
                 .to_string(),
+            // The book's own canonical id when the catalog carries one; an
+            // ASIN-shaped caller id is not a canonical book id.
+            book_id: book.id.as_deref().filter(|id| !id.is_empty()).unwrap_or_default().to_string(),
             title,
             subtitle,
             authors,
@@ -1173,6 +1176,32 @@ mod tests {
             serde_json::from_value(json(r#"{"id": "", "title": "Empty ID Book"}"#)).unwrap();
         let meta = AudiobookdbClient::map_book("caller-1", &empty_id, None);
         assert_eq!(meta.metadata_id, "caller-1");
+    }
+
+    #[test]
+    fn test_book_id_reflects_the_catalog_book_id() {
+        // The catalog carries a book id: it becomes the canonical book_id,
+        // and metadata_id prefers it over the caller's identifier.
+        let with_id: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"id": "575", "title": "Book 575"}"#)).unwrap();
+        let meta = AudiobookdbClient::map_book("B08XYZ1234", &with_id, None);
+        assert_eq!(meta.book_id, "575");
+        assert_eq!(meta.metadata_id, "575");
+
+        // Absent id: book_id stays empty (no path segment) while
+        // metadata_id keeps the caller's identifier.
+        let no_id: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"title": "No ID Book"}"#)).unwrap();
+        let meta = AudiobookdbClient::map_book("B08XYZ1234", &no_id, None);
+        assert!(meta.book_id.is_empty());
+        assert_eq!(meta.metadata_id, "B08XYZ1234");
+
+        // Empty-string id is treated as absent too.
+        let empty_id: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"id": "", "title": "Empty ID Book"}"#)).unwrap();
+        let meta = AudiobookdbClient::map_book("B08XYZ1234", &empty_id, None);
+        assert!(meta.book_id.is_empty());
+        assert_eq!(meta.metadata_id, "B08XYZ1234");
     }
 
     #[test]
