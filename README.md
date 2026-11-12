@@ -99,6 +99,60 @@ m4b-merge -i input/book_folder/ \
   --completed-directory /path/to/done
 ```
 
+### Authoritative Job File
+
+Process a book from a versioned JSON job file. The job is the single source
+of truth for the metadata base, the manual overrides, and the output; it is
+mutually exclusive with `-i`, `-o`, `-p`, `-a`, and `--completed-directory`.
+
+```bash
+m4b-merge --job job.json
+```
+
+The job selects its metadata base exactly one of two ways:
+
+- `input_provider` — an explicit catalog id (`book_id`, plus an exact
+  `release_id` for `audiobookdb`). The catalog is the authority; an
+  unresolvable id, a release the book does not carry, or a missing client
+  fails the job before any file is touched.
+- `input_supplied` — the values are authoritative as-is; no catalog lookup
+  is attempted and the job runs fully offline.
+
+On top of the base, an optional `overrides` object replaces individual
+fields; present non-blank values win over the base.
+
+```json
+{
+  "schema_version": 1,
+  "inputs": ["/data/book/track1.m4a", "/data/book/track2.m4a"],
+  "input_supplied": {
+    "title": "The Great Gatsby",
+    "authors": ["F. Scott Fitzgerald"]
+  },
+  "output_root": "/library",
+  "path_format": "{author}/{title}"
+}
+```
+
+Field semantics:
+
+- `inputs` (required, non-empty) — the audio files to merge.
+- `output_root` (required) — the output directory root; created if missing.
+- `path_format` (optional) — output template inside the root; default
+  `{author}/{title}` (see Path Format Variables).
+- `source` (optional) — `{"source": "audiobookdb" | "audnexus",
+  "api_url": "…", "region": "…"}`; defaults to the CLI defaults when omitted
+  in provider mode, and is irrelevant in supplied mode.
+- `overrides` (optional) — same shape as `input_supplied`.
+
+The output path is `output_root` + the (sanitized) template, so the same job
+against the same book always lands on the same path — no worker-time catalog
+rematching is needed by callers. Every supported scalar metadata field is
+written from the effective metadata; the provider cover URL (when present) is
+embedded, and the resolved chapters are embedded with a `chapters.txt`
+sidecar. Per-field write policies and cover/chapter policies build on this
+schema in follow-up work.
+
 ### Verify Environment
 
 Check FFmpeg installation and version.

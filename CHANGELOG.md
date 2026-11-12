@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file. See [standa
 
 
 ### Added
+- `--job FILE` processes a book from a versioned JSON job file (schema
+  `schema_version: 1`). The job is the single source of truth for the
+  metadata base — an explicit catalog id via `input_provider`, or
+  authoritative `input_supplied` values with no catalog lookup — the manual
+  `overrides` layer, and the output (`inputs`, `output_root`,
+  `path_format`, default `{author}/{title}`). It is mutually exclusive with
+  the legacy `-i`/`-o`/`-p`/`-a`/`--completed-directory` flags. An
+  unresolvable explicit id, a release the book does not carry, or a missing
+  client fails the job before discovery, merge, or source moves. Every
+  supported scalar metadata field is written from the effective metadata,
+  the provider cover URL (when present) is embedded, and the resolved
+  chapters are embedded with a `chapters.txt` sidecar.
 - Chapter embedding into M4B files using native mp4ameta library
 - Chapters are now embedded directly into the M4B container, not just written to chapters.txt
 - Full chapter metadata round-trip: extraction from source → embedding in output

@@ -44,6 +44,10 @@ pub enum AudiobookdbError {
     Timeout,
     #[error("no book found for ID: {0}")]
     IdNotFound(String),
+    #[error(
+        "release {release_id} is not one of the releases of book {book_id}; an explicit release must not silently fall back"
+    )]
+    ReleaseNotFound { book_id: String, release_id: String },
     #[error("connection error: {0}")]
     Connection(String),
     #[error("serialization error: {0}")]
@@ -253,7 +257,25 @@ impl AudiobookdbClient {
     /// `GET /books/{id}` directly. Any identifier not found on its endpoint is an
     /// `IdNotFound` error — the client does not fall back to `POST /search`, so
     /// an id is only resolved through the catalog endpoints.
+    ///
+    /// The release used for narrator/cover/chapter data is the ASIN-linked matched
+    /// release, falling back to the book's first release. Callers that must pin
+    /// an exact edition use [`Self::fetch_book_with_release`].
     pub async fn fetch_book(&self, book_id: &str) -> Result<BookMetadata, AudiobookdbError> {
+        self.fetch_book_with_release(book_id, None).await
+    }
+
+    /// Look up book metadata, pinning the edition to `release_id` when provided.
+    ///
+    /// An explicit release id must be one of the book's releases: an id the book
+    /// does not carry is an error, never a silent fall back to the book's first
+    /// release. Without a release id, the matched/first-release fallback of
+    /// [`Self::fetch_book`] applies.
+    pub async fn fetch_book_with_release(
+        &self,
+        book_id: &str,
+        release_id: Option<&str>,
+    ) -> Result<BookMetadata, AudiobookdbError> {
         let endpoint = Self::resolve_endpoint(book_id);
         let book = match endpoint {
             BookEndpoint::ExternalAsin => match self.resolve_external(book_id).await {
@@ -278,13 +300,48 @@ impl AudiobookdbClient {
             },
         };
 
-        // Fetch release data for chapter information. The matched release
-        // (ASIN-linked) is preferred; otherwise fall back to the book's first
-        // release. Missing release data is not fatal because many books simply
-        // lack chapter metadata.
-        let release_id = Self::release_id_for(&book, book.matched_release_id.as_deref());
-        let release_data =
-            if let Some(rid) = release_id { self.get_release(&rid).await.ok() } else { None };
+        // Fetch release data for chapter information. An explicit release id
+        // pins the edition: it wins over the matched/first fallback and, when
+        // the book carries a release list, it must be one of them — an unknown
+        // id is an error, never a silent fall back to the first release.
+        // Without an explicit id, the matched release (ASIN-linked) is
+        // preferred, then the book's first release. Missing release data in
+        // that mode is not fatal because many books simply lack chapter
+        // metadata; with an explicit id it is, because the caller chose that
+        // edition deliberately.
+        let (release_id, explicit) = match release_id {
+            Some(rid) if !rid.is_empty() => {
+                let known = book.releases.iter().any(|r| r.id == rid);
+                if !book.releases.is_empty() && !known {
+                    return Err(AudiobookdbError::ReleaseNotFound {
+                        book_id: book_id.to_string(),
+                        release_id: rid.to_string(),
+                    });
+                }
+                (Some(rid.to_string()), true)
+            }
+            Some(_) | None => {
+                (Self::release_id_for(&book, book.matched_release_id.as_deref()), false)
+            }
+        };
+        let release_data = match release_id {
+            Some(rid) => match self.get_release(&rid).await {
+                Ok(data) => Some(data),
+                // Fallback mode (matched/first release): many books lack
+                // chapter metadata, so a missing release is not fatal.
+                Err(e) if !explicit => {
+                    tracing::debug!(
+                        "Release fetch for fallback id {rid} failed ({}); continuing without it",
+                        e
+                    );
+                    None
+                }
+                // Explicit edition: the caller pinned this release, so a
+                // failed fetch is a diagnosed error.
+                Err(e) => return Err(e),
+            },
+            None => None,
+        };
 
         Ok(Self::map_book(book_id, &book, release_data.as_ref()))
     }

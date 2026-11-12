@@ -108,6 +108,30 @@ impl MetadataSource {
             Self::Audiobookdb(c) => Ok(c.fetch_book(id).await?),
         }
     }
+
+    /// Fetch a book pinning the exact release, when the source supports it.
+    ///
+    /// An explicit `release_id` must be a release of the resolved book; a
+    /// source without edition separation ignores it (and
+    /// [`Self::as_audiobookdb`] lets callers reject the combination up front).
+    pub async fn fetch_book_with_release(
+        &self,
+        book_id: &str,
+        release_id: Option<&str>,
+    ) -> Result<BookMetadata, MetadataError> {
+        match self {
+            Self::Audible(c) => Ok(c.fetch_book(book_id).await?),
+            Self::Audiobookdb(c) => Ok(c.fetch_book_with_release(book_id, release_id).await?),
+        }
+    }
+
+    /// The AudiobookDB client when this source is the audiobookdb kind.
+    pub fn as_audiobookdb(&self) -> Option<&AudiobookdbClient> {
+        match self {
+            Self::Audiobookdb(c) => Some(c),
+            Self::Audible(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]

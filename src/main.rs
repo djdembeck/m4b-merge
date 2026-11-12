@@ -58,6 +58,12 @@ struct Args {
     #[arg(short = 'a', long = "metadata-id", value_name = "ID")]
     pub metadata_id: Option<String>,
 
+    /// Process from a versioned JSON job file (authoritative metadata base,
+    /// per-field write policies, cover/chapter policies). Mutually exclusive
+    /// with -i, -a, -o, -p, and --completed-directory.
+    #[arg(long = "job", value_name = "FILE")]
+    pub job: Option<PathBuf>,
+
     /// Show what would be done without actually doing it
     #[arg(long = "dry-run")]
     pub dry_run: bool,
@@ -114,39 +120,92 @@ async fn main() {
         check_ffmpeg_and_exit();
     }
 
-    // Validate inputs
-    if args.inputs.is_empty() {
-        eprintln!("Error: No input files or directories provided.");
-        eprintln!("Use -i or --inputs to specify input paths.");
-        std::process::exit(1);
-    }
+    // Job mode: the job file owns inputs, output root, and metadata base.
+    // The standalone flags that would fight the job are rejected up front.
+    let job = if let Some(job_path) = &args.job {
+        let conflicts: Vec<&str> = [
+            (!args.inputs.is_empty()).then_some("-i/--inputs"),
+            args.metadata_id.is_some().then_some("-a/--metadata-id"),
+            args.output.is_some().then_some("-o/--output"),
+            args.completed_directory.is_some().then_some("--completed-directory"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !conflicts.is_empty() {
+            eprintln!(
+                "Error: --job is mutually exclusive with {} (the job file provides them)",
+                conflicts.join(", ")
+            );
+            std::process::exit(1);
+        }
+        match m4b_merge::job::Job::load(job_path) {
+            Ok(job) => Some(job),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        if args.inputs.is_empty() {
+            eprintln!("Error: No input files or directories provided.");
+            eprintln!("Use -i or --inputs to specify input paths, or --job for a job file.");
+            std::process::exit(1);
+        }
+        None
+    };
+
+    // In job mode the job file owns the input list; standalone mode keeps
+    // the CLI flag inputs.
+    let run_inputs: Vec<PathBuf> = match job.as_ref() {
+        Some(job) => job.inputs.clone(),
+        None => args.inputs.clone(),
+    };
 
     // Early dry-run: print summary and exit without needing FFmpeg or output dir
     if args.dry_run {
         println!("=== Dry Run Mode ===");
-        println!("Inputs:");
-        for input in &args.inputs {
-            println!("  - {}", input.display());
-        }
-        if let Some(ref output) = args.output {
-            println!("Output: {}", output.display());
+        if let Some(job) = &job {
+            println!("Job: {}", args.job.as_ref().expect("job mode").display());
+            println!("Inputs:");
+            for input in &job.inputs {
+                println!("  - {}", input.display());
+            }
+            println!("Output Root: {}", job.output_root.display());
+            println!(
+                "Path Format: {}",
+                if job.path_format.is_empty() {
+                    "(default {author}/{title})"
+                } else {
+                    job.path_format.as_str()
+                }
+            );
         } else {
-            println!("Output: (default)");
+            println!("Inputs:");
+            for input in &args.inputs {
+                println!("  - {}", input.display());
+            }
+            if let Some(ref output) = args.output {
+                println!("Output: {}", output.display());
+            } else {
+                println!("Output: (default)");
+            }
+            if let Some(ref completed_dir) = args.completed_directory {
+                println!("Completed Directory: {}", completed_dir.display());
+            }
+            if let Some(metadata_id) = &args.metadata_id {
+                println!("Metadata ID: {}", metadata_id);
+            }
+            println!("Metadata Source: {}", args.metadata_source);
         }
-        if let Some(ref completed_dir) = args.completed_directory {
-            println!("Completed Directory: {}", completed_dir.display());
-        }
-        if let Some(metadata_id) = &args.metadata_id {
-            println!("Metadata ID: {}", metadata_id);
-        }
-        println!("Metadata Source: {}", args.metadata_source);
         println!("\nDry run complete. No files were modified.");
         std::process::exit(0);
     }
 
-    // Create configuration
+    // Create configuration. In job mode the CLI-level paths are unused; the
+    // job's output_root, inputs, and completed_directory drive the run.
     let config = Config::new(
-        args.inputs.clone(),
+        run_inputs.clone(),
         args.output.clone(),
         args.api_url.clone(),
         args.metadata_source,
@@ -181,14 +240,21 @@ async fn main() {
         );
     }
 
-    info!("m4b-merge starting with {} input(s)", args.inputs.len());
+    info!("m4b-merge starting with {} input(s)", run_inputs.len());
 
-    // Create and run processor
-    match Processor::new(config) {
+    // Create and run processor. Job mode builds the processor from the job
+    // file (its source selection and output root); standalone mode keeps the
+    // legacy flag-driven behavior.
+    let processor_result = match job {
+        Some(job) => Processor::for_job(job, config),
+        None => Processor::new(config),
+    };
+
+    match processor_result {
         Ok(processor) => {
             let progress_handler = ConsoleProgressHandler;
 
-            match processor.process_with_progress(args.inputs, &progress_handler).await {
+            match processor.process_with_progress(run_inputs, &progress_handler).await {
                 Ok(results) => {
                     println!("\n=== Processing Complete ===");
                     println!("Successfully processed {} audiobook(s)", results.len());

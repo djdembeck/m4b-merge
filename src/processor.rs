@@ -48,6 +48,9 @@ pub enum ProcessorError {
     #[error("No input files provided")]
     NoInputs,
 
+    #[error("Job input error: {0}")]
+    Job(#[from] crate::job::JobError),
+
     #[error("No output directory specified")]
     NoOutputDir,
 
@@ -171,6 +174,9 @@ pub struct Processor {
     api_client: Option<MetadataSource>,
     merger: Merger,
     tagger: Tagger,
+    /// Structured job input (authoritative metadata base, overrides, and
+    /// per-field write policies); `None` for the legacy standalone CLI.
+    job: Option<crate::job::Job>,
     /// Test-only substitute for [`Tagger::embed_chapters`], so the
     /// chapter-embed failure path can be exercised without a real file.
     #[cfg(test)]
@@ -219,6 +225,59 @@ impl Processor {
             api_client,
             merger,
             tagger,
+            job: None,
+            #[cfg(test)]
+            embed_hook,
+        })
+    }
+
+    /// Create a processor for a structured job file.
+    ///
+    /// The job supplies its own metadata base and output; its inputs drive
+    /// discovery. The CLI's `--metadata-source`/`--api-url`/`--region` flags
+    /// are ignored in favor of the job's own `source` selection (provider
+    /// mode) or the absence of a client (supplied mode), so a supplied job
+    /// runs fully offline.
+    pub fn for_job(job: crate::job::Job, config: Config) -> Result<Self> {
+        let source = match job.source.as_ref() {
+            Some(src) => Some(
+                MetadataSource::new_with_region(
+                    src.source,
+                    src.api_url.as_deref(),
+                    src.region.unwrap_or(crate::api::MetadataRegion::Us),
+                )
+                .map_err(|e| ProcessorError::Job(crate::job::JobError::Metadata(e)))?,
+            ),
+            // Provider input without an explicit source uses the configured
+            // kind defaults; supplied input never needs a client.
+            None => match &job.input_provider {
+                Some(_) => Some(
+                    MetadataSource::new_with_region(
+                        config.metadata_source,
+                        config.api_url.as_deref(),
+                        config.region,
+                    )
+                    .map_err(|e| ProcessorError::Job(crate::job::JobError::Metadata(e)))?,
+                ),
+                None => None,
+            },
+        };
+
+        let ffmpeg = Arc::new(
+            FFmpeg::discover().map_err(|e| ProcessorError::FFmpegNotFound(e.to_string()))?,
+        );
+        let merger = Merger::new(ffmpeg.clone());
+        let tagger = Tagger::new();
+        #[cfg(test)]
+        let embed_hook = None;
+
+        Ok(Self {
+            config,
+            ffmpeg,
+            api_client: source,
+            merger,
+            tagger,
+            job: Some(job),
             #[cfg(test)]
             embed_hook,
         })
@@ -240,6 +299,7 @@ impl Processor {
             config,
             ffmpeg,
             api_client,
+            job: None,
             merger,
             tagger,
             #[cfg(test)]
@@ -264,7 +324,10 @@ impl Processor {
 
         // Skip creating output directory in dry-run mode
         if !self.config.dry_run {
-            if let Some(output) = &self.config.output {
+            if let Some(job) = &self.job {
+                std::fs::create_dir_all(&job.output_root)
+                    .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))?;
+            } else if let Some(output) = &self.config.output {
                 std::fs::create_dir_all(output)
                     .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))?;
             }
@@ -361,6 +424,10 @@ impl Processor {
         group: &AudioGroup,
         progress_handler: &dyn ProgressHandler,
     ) -> Result<ProcessingResult> {
+        if let Some(job) = &self.job {
+            return self.process_group_job(group, job, progress_handler).await;
+        }
+
         let input_paths: Vec<PathBuf> = group.files.iter().map(|f| f.path.clone()).collect();
 
         debug!("Processing group '{}' with {} files", group.name, input_paths.len());
@@ -611,6 +678,205 @@ impl Processor {
             metadata_applied,
             files_moved,
         })
+    }
+
+    /// Process one audio group under a structured job.
+    ///
+    /// Differs from the legacy path deliberately:
+    /// - Metadata comes from the job's base + overrides. Resolution failure
+    ///   (unknown id, release the book does not carry, missing client) fails
+    ///   the group before any merge or source move.
+    /// - Tag writes follow per-field policies; a `write` without a value and
+    ///   an unresolvable preserved title/subtitle component are group
+    ///   failures, not warnings.
+    /// - `preserve` chapters on a multi-file group is refused: a merge cannot
+    ///   byte-preserve per-file chapters, so the strict promise is only valid
+    ///   for a single input.
+    /// - The source files move only after every write succeeded.
+    async fn process_group_job(
+        &self,
+        group: &AudioGroup,
+        job: &crate::job::Job,
+        progress_handler: &dyn ProgressHandler,
+    ) -> Result<ProcessingResult> {
+        let input_paths: Vec<PathBuf> = group.files.iter().map(|f| f.path.clone()).collect();
+        let is_single_input = group.files.len() == 1;
+
+        // Output path from the job's root and template. Resolving it needs no
+        // metadata in dry-run; naming uses the effective metadata below.
+        if self.config.dry_run {
+            info!(
+                "DRY RUN (job): would process {} file(s) from '{}'",
+                group.files.len(),
+                group.name
+            );
+            return Ok(ProcessingResult {
+                input_files: input_paths,
+                output_file: PathBuf::new(),
+                metadata_applied: false,
+                files_moved: false,
+            });
+        }
+
+        // Resolve effective metadata. In provider mode this is the only place
+        // the catalog is touched; in supplied mode no client exists at all.
+        // A resolution failure (unknown id, release the book does not carry,
+        // missing client) returns here — before any merge or source move.
+        let effective = job.resolve(self.api_client.as_ref()).await?;
+
+        // Output path from the job's root and template.
+        let output_path = self.determine_job_output_path(&job.output_root, &effective)?;
+
+        // PR1 baseline for chapters (the documented default): resolved
+        // chapters (provider → input → generated per-track), embedded, plus
+        // the `chapters.txt` sidecar. A per-field chapter policy arrives in a
+        // follow-up; PR1 has no `chapters` job field. The range guard runs
+        // before the merge: mp4ameta writes start times verbatim, so a chapter
+        // at or past the estimated duration would become an unplayable entry.
+        let mut chapters = effective.metadata.chapters.clone();
+        if chapters.is_empty() {
+            chapters = self.input_chapters(group);
+        }
+        if !chapters.is_empty()
+            && let Some(total) = effective.metadata.total_duration()
+            && let Some((count, details)) = describe_out_of_range_chapters(&chapters, total)
+        {
+            return Err(ProcessorError::ChaptersOutOfRange {
+                path: output_path.clone(),
+                count,
+                playlength: format_duration(total),
+                details,
+            });
+        }
+
+        // Stage 3: Merge
+        progress_handler.on_progress(ProcessingProgress {
+            stage: ProcessingStage::Merging,
+            current_file: Some(input_paths[0].clone()),
+            total_files: 1,
+            completed_files: 0,
+            message: "Merging audio files...".to_string(),
+        });
+
+        let merge_job = MergeJob::new(group.files.clone(), output_path.clone())
+            .with_threads(self.config.num_cpus);
+        let merged_path = self.merger.merge(&merge_job).map_err(ProcessorError::Merge)?;
+        info!("Successfully merged to: {}", merged_path.display());
+
+        // Stage 4: Policy-driven writes. Any failure here discards the merged
+        // output and fails the group before the sources move.
+        progress_handler.on_progress(ProcessingProgress {
+            stage: ProcessingStage::Tagging,
+            current_file: Some(merged_path.clone()),
+            total_files: 1,
+            completed_files: 0,
+            message: "Applying write policies...".to_string(),
+        });
+
+        // Tag writes: the documented baseline — every supported scalar field
+        // is written from the effective metadata (the legacy all-fields
+        // behavior). Per-field preserve/write/clear policies arrive in a
+        // follow-up.
+        self.tagger.write_metadata(&merged_path, &effective.metadata).map_err(|e| {
+            Self::discard_output(&merged_path);
+            ProcessorError::Tagging(e)
+        })?;
+
+        // Cover: PR1 keeps the legacy provider-URL behavior (a supplied job
+        // carries no cover URL, so nothing is downloaded). A cover policy
+        // (preserve / local file / URL / clear) arrives in a follow-up.
+        if let Some(cover_url) = effective.metadata.cover_url.clone() {
+            if is_single_input {
+                let source_sidecar = input_paths[0].with_extension("cover.txt");
+                if source_sidecar.is_file() {
+                    let dest = merged_path.with_extension("cover.txt");
+                    if let Err(e) = std::fs::copy(&source_sidecar, &dest) {
+                        warn!("Failed to carry source cover sidecar: {e}");
+                    }
+                }
+            }
+            if let Err(e) = self.tagger.embed_cover(&merged_path, &cover_url).await {
+                Self::discard_output(&merged_path);
+                return Err(ProcessorError::Tagging(e));
+            }
+        }
+
+        // Chapters: PR1 baseline — embed the resolved chapters and write the
+        // sidecar (the documented default). A chapter policy (preserve /
+        // explicit write / clear) arrives in a follow-up.
+        if !chapters.is_empty() {
+            if let Err(e) = self.tagger.embed_chapters(&merged_path, &chapters) {
+                Self::discard_output(&merged_path);
+                return Err(ProcessorError::Tagging(e));
+            }
+            let sidecar = merged_path.with_extension("chapters.txt");
+            if let Err(e) = self.tagger.write_chapters_txt(&sidecar, &effective.metadata) {
+                warn!("Failed to write chapters.txt: {e}");
+            }
+        }
+
+        // Stage 5: Move source files only after every write succeeded.
+        let completed_dir =
+            effective.completed_directory.as_ref().or(self.config.completed_directory.as_ref());
+        let files_moved = if let Some(completed_dir) = completed_dir {
+            progress_handler.on_progress(ProcessingProgress {
+                stage: ProcessingStage::MovingFiles,
+                current_file: Some(input_paths[0].clone()),
+                total_files: 1,
+                completed_files: 0,
+                message: "Moving source files to completed directory...".to_string(),
+            });
+            match self.tagger.move_completed_files(&input_paths, completed_dir) {
+                Ok(moved) => {
+                    info!("Moved {} files to completed directory", moved.len());
+                    true
+                }
+                Err(e) => {
+                    warn!("Failed to move source files: {e}");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        Ok(ProcessingResult {
+            input_files: input_paths,
+            output_file: merged_path,
+            metadata_applied: true,
+            files_moved,
+        })
+    }
+
+    /// Output path for a job: the job's root plus its template (default
+    /// `{author}/{title}`), sanitized per component like the legacy path.
+    fn determine_job_output_path(
+        &self,
+        output_root: &std::path::Path,
+        effective: &crate::job::EffectiveJob,
+    ) -> Result<PathBuf> {
+        let template = if effective.path_format.is_empty() {
+            "{author}/{title}".to_string()
+        } else {
+            effective.path_format.clone()
+        };
+        let formatted = self.format_path(&template, &effective.metadata);
+
+        let path_components: Vec<String> = formatted
+            .split('/')
+            .map(sanitize_filename::sanitize)
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut output_path = output_root.to_path_buf();
+        for component in &path_components[..path_components.len().saturating_sub(1)] {
+            output_path = output_path.join(component);
+        }
+        let filename = path_components
+            .last()
+            .map(|s| format!("{}.m4b", s))
+            .unwrap_or_else(|| "output.m4b".to_string());
+        Ok(output_path.join(filename))
     }
 
     /// Remove a merged output that failed post-merge validation.
