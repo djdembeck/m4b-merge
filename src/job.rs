@@ -175,6 +175,14 @@ impl Job {
                         "release_id is only supported by the audiobookdb source".into(),
                     ));
                 }
+                // A blank explicit pin is an invalid selection, not an absent
+                // one: it must fail, not silently fall back to the matched or
+                // first release. Only `None` selects the fallback.
+                if let Some(rid) = provider.release_id.as_deref().filter(|r| r.trim().is_empty()) {
+                    return Err(JobError::Invalid(format!(
+                        "release_id must be a non-blank release id, got {rid:?}"
+                    )));
+                }
                 match provider.release_id.as_deref() {
                     Some(release_id) => {
                         source.fetch_book_with_release(&provider.book_id, Some(release_id)).await?
@@ -332,6 +340,23 @@ mod tests {
         let provider = job.input_provider.unwrap();
         assert_eq!(provider.book_id, "B012345678");
         assert_eq!(provider.release_id.as_deref(), Some("rel12345678"));
+    }
+
+    #[tokio::test]
+    async fn rejects_blank_explicit_release_id() {
+        // A blank explicit release pin is an invalid selection, not an absent
+        // one: it must fail before any catalog fetch, not fall back to the
+        // matched or first release.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
+            "input_provider": { "book_id": "abc123def456", "release_id": "  " },
+            "output_root": "/o" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        job.validate().unwrap();
+        let source =
+            crate::api::MetadataSource::new(crate::api::MetadataSourceKind::Audiobookdb, None)
+                .unwrap();
+        let err = job.resolve(Some(&source)).await.unwrap_err().to_string();
+        assert!(err.contains("release_id"), "{err}");
     }
 
     #[tokio::test]
