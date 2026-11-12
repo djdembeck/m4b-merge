@@ -17,7 +17,19 @@ All notable changes to this project will be documented in this file. See [standa
   client fails the job before discovery, merge, or source moves. The
   provider cover URL (when present) is embedded, and the resolved chapters
   are embedded with a `chapters.txt` sidecar.
-  Per-field metadata write policies on the `--job` input: `preserve`
+- Independent cover and chapter write policies on the `--job` input.
+  Cover: `write_url` (default; the provider cover URL when present), `{"write":
+  "/absolute/path"}` (local file inside the job's `output_root`; paths that
+  escape the asset area, including via a symlink, are rejected before any
+  read, and the read is bounded to 5 MiB), `{"write_url": "https://…"}`,
+  `preserve` (single input only), or `clear`. Chapters: `write` (default; explicit list
+  with integer-millisecond times, or the resolved chapters, plus the
+  `chapters.txt` sidecar), `preserve` (single input only), or `clear`. Both
+  policies reject `preserve` on a multi-file group, where a strict
+  preservation promise is impossible; a cover `clear` removes the merged
+  artwork, and a sidecar write failure fails the group before the sources
+  move.
+- Per-field metadata write policies on the `--job` input: `preserve`
   (default), `write`, and `clear` for title, subtitle, authors, narrators,
   series, description, genres, and year. Title and subtitle are independent
   components of the shared `©nam`/`©alb` pair: writing one preserves the

@@ -97,6 +97,130 @@ pub struct WritePolicies {
     pub year: FieldPolicy,
 }
 
+/// Cover policy. `write_url` (the default) embeds the provider cover URL
+/// when the resolved metadata carries one — the legacy baseline; an explicit
+/// `{"write": "path"}` embeds from a validated local file, `{"write_url":
+/// "https://…"}` overrides the URL (under the existing SSRF guards), and
+/// `clear` removes the cover. `preserve` (single input only) keeps the
+/// source M4B's embedded cover without a download.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CoverPolicy {
+    Preserve,
+    Write(PathBuf),
+    WriteUrl(Option<String>),
+    Clear,
+}
+
+impl Default for CoverPolicy {
+    fn default() -> Self {
+        Self::WriteUrl(None)
+    }
+}
+
+/// Chapters policy. `write` (the default) embeds chapters and writes the
+/// `chapters.txt` sidecar: the explicit list when given
+/// (`{"write": {"chapters": [ … ]}}` with integer-millisecond times),
+/// otherwise the resolved chapters (provider chapters in provider mode,
+/// input chapters, then generated per-track chapters — the documented
+/// default behavior). `preserve` (single input only) skips all chapter
+/// mutation, so the source chapters survive the native merge. `clear`
+/// removes existing chapters from the output and skips the sidecar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChaptersPolicy {
+    Preserve,
+    /// Resolved chapters (`explicit: None`) or the explicit list.
+    Write {
+        explicit: Option<Vec<JobChapter>>,
+    },
+    Clear,
+}
+
+impl Default for ChaptersPolicy {
+    fn default() -> Self {
+        Self::Write { explicit: None }
+    }
+}
+
+struct ChaptersWriteList {
+    chapters: Vec<JobChapter>,
+}
+
+impl<'de> Deserialize<'de> for ChaptersWriteList {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            chapters: Vec<JobChapter>,
+        }
+        Ok(Self { chapters: Fields::deserialize(deserializer)?.chapters })
+    }
+}
+
+impl<'de> Deserialize<'de> for ChaptersPolicy {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // `"preserve" | "clear" | "write"`, `{"write": null}` (resolved
+        // chapters), or `{"write": {"chapters": [ … ]}}` (explicit list).
+        // A misspelled object field is rejected, never silently dropped.
+        use serde::de::Error;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(word) => match word.as_str() {
+                "preserve" => Ok(Self::Preserve),
+                "clear" => Ok(Self::Clear),
+                "write" => Ok(Self::Write { explicit: None }),
+                other => Err(D::Error::invalid_value(
+                    serde::de::Unexpected::Str(other),
+                    &"\"preserve\", \"clear\", or \"write\"",
+                )),
+            },
+            serde_json::Value::Object(map) => {
+                let mut entries = map.into_iter();
+                let Some((key, write_value)) = entries.next() else {
+                    return Ok(Self::default());
+                };
+                if entries.next().is_some() {
+                    return Err(D::Error::unknown_field(&key, &["write"]));
+                }
+                match key.as_str() {
+                    "write" => Ok(match write_value {
+                        serde_json::Value::Null => Self::Write { explicit: None },
+                        other => Self::Write {
+                            explicit: Some(
+                                ChaptersWriteList::deserialize(other)
+                                    .map_err(D::Error::custom)?
+                                    .chapters,
+                            ),
+                        },
+                    }),
+                    other => Err(D::Error::unknown_field(other, &["write"])),
+                }
+            }
+            _ => Err(D::Error::invalid_value(
+                serde::de::Unexpected::Other("chapter policy"),
+                &"a word or a {\"write\": …} object",
+            )),
+        }
+    }
+}
+
+/// One explicit chapter; all times are integer milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobChapter {
+    pub title: String,
+    /// Chapter start time in milliseconds.
+    pub start_millis: u64,
+    /// Chapter duration in milliseconds.
+    pub duration_millis: u64,
+}
+
 impl WritePolicies {
     /// The value a title `write` writes: the effective metadata's base title,
     /// the same `{title}` token that names the output path. The writer combines
@@ -206,6 +330,10 @@ pub struct Job {
     pub genres: FieldPolicy,
     #[serde(default)]
     pub year: FieldPolicy,
+    #[serde(default)]
+    pub cover: CoverPolicy,
+    #[serde(default)]
+    pub chapters: ChaptersPolicy,
 }
 
 impl Job {
@@ -266,6 +394,14 @@ impl Job {
                 }
             }
         }
+        if let CoverPolicy::Write(file) = &self.cover {
+            if !file.is_absolute() {
+                return Err(JobError::Invalid(format!(
+                    "cover file must be an absolute path, got {}",
+                    file.display()
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -322,6 +458,8 @@ impl Job {
         Ok(EffectiveJob {
             metadata: effective,
             policies: self.policies_from(),
+            cover: self.cover.clone(),
+            chapters: self.chapters.clone(),
             path_format: self.path_format.clone(),
             completed_directory: self.completed_directory.clone(),
         })
@@ -371,8 +509,23 @@ pub struct EffectiveJob {
     pub metadata: BookMetadata,
     /// Per-atom write policies for the scalar metadata fields.
     pub policies: WritePolicies,
+    pub cover: CoverPolicy,
+    pub chapters: ChaptersPolicy,
     pub path_format: String,
     pub completed_directory: Option<PathBuf>,
+}
+
+impl EffectiveJob {
+    /// A merge cannot byte-preserve per-file chapters across inputs; the
+    /// strict preserve promise is only valid for a single input file.
+    pub fn preserve_chapters_requires_single_input(&self) -> bool {
+        matches!(self.chapters, ChaptersPolicy::Preserve)
+    }
+
+    /// A strict cover-preservation promise is only valid for a single input.
+    pub fn preserve_cover_requires_single_input(&self) -> bool {
+        matches!(self.cover, CoverPolicy::Preserve)
+    }
 }
 
 /// Non-blank, trimmed values in `values`, in order.
@@ -441,6 +594,8 @@ mod tests {
         assert!(job.input_supplied.is_some());
         assert_eq!(job.title, TitlePolicy::Write);
         assert!(matches!(job.authors, FieldPolicy::Preserve));
+        assert!(matches!(job.cover, CoverPolicy::WriteUrl(_)));
+        assert!(matches!(job.chapters, ChaptersPolicy::Write { explicit: None }));
         job.validate().unwrap();
     }
 
@@ -459,6 +614,47 @@ mod tests {
         let effective = job.resolve(None).await.unwrap();
         assert_eq!(effective.policies.effective_title(&effective.metadata).as_deref(), Some("T"));
         assert_eq!(effective.policies.effective_subtitle(&effective.metadata), None);
+    }
+
+    #[test]
+    fn rejects_relative_cover_path() {
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o", "cover": { "write": "cover.jpg" } }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        let err = job.validate().unwrap_err().to_string();
+        assert!(err.contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn rejects_misspelled_chapter_policy_field() {
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o", "chapters": { "writ": null } }"#;
+        let err: serde_json::Error = serde_json::from_str::<Job>(raw).unwrap_err();
+        assert!(err.to_string().contains("writ"), "{}", err.to_string());
+    }
+
+    #[test]
+    fn parses_chapter_write_forms() {
+        // The bare word selects the resolved chapters.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o", "chapters": "write" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        assert!(matches!(job.chapters, ChaptersPolicy::Write { explicit: None }));
+
+        // The default (no `chapters` key) is the resolved write, so a
+        // multi-input job is not rejected by default.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        assert!(matches!(job.chapters, ChaptersPolicy::Write { explicit: None }));
+        assert!(matches!(job.cover, CoverPolicy::WriteUrl(_)));
+
+        // An object carries an explicit list.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o",
+            "chapters": { "write": { "chapters": [ { "title": "C", "start_millis": 0, "duration_millis": 100 } ] } } }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        assert!(matches!(job.chapters, ChaptersPolicy::Write { explicit: Some(_) }));
     }
 
     #[test]

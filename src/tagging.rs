@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -29,6 +30,9 @@ pub enum TaggingError {
 
     #[error("Cover download error: {0}")]
     CoverDownload(String),
+    /// A local cover path fell outside the authorized asset area.
+    #[error("local cover path escapes the asset root: {0}")]
+    CoverPathOutsideAssetRoot(String),
 
     #[error("Invalid file format: {0}")]
     InvalidFormat(String),
@@ -900,6 +904,121 @@ impl Tagger {
         self.embed_cover_data(path, &image_data)
     }
 
+    /// Maximum size of a local cover image in bytes (matches the URL limit).
+    pub const LOCAL_COVER_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+    /// Embed a cover image from a validated local file.
+    ///
+    /// The path must be absolute (job validation enforces this), the file
+    /// must exist and be at most [`Self::LOCAL_COVER_MAX_BYTES`] bytes. The
+    /// bytes then go through the same `covr` format handling as a URL
+    /// download (JPEG/PNG as-is, WebP/GIF transcoded to JPEG).
+    /// Embed a cover from a validated local file. The file must lie inside
+    /// `asset_root` (the job's `output_root`, the only area the job owns);
+    /// absolute paths that escape the root, or paths containing symlinks that
+    /// resolve outside it, are rejected before any read. The read itself is
+    /// bounded to [`Self::LOCAL_COVER_MAX_BYTES`]: a file that grows past the
+    /// limit between the size check and the read is refused (no unbounded
+    /// `fs::read` after a size-only check).
+    pub fn embed_cover_local<P: AsRef<Path>, A: AsRef<Path>>(
+        &self,
+        file_path: P,
+        cover_path: &Path,
+        asset_root: A,
+    ) -> Result<()> {
+        if !cover_path.is_absolute() {
+            return Err(TaggingError::CoverDownload(format!(
+                "Local cover path must be absolute, got {}",
+                cover_path.display()
+            )));
+        }
+        // The asset root must itself be canonicalizable so the containment
+        // comparison is well-defined; a missing root is a job configuration
+        // error, not a cover content error.
+        let asset_root = asset_root.as_ref().canonicalize().map_err(|e| {
+            TaggingError::CoverDownload(format!(
+                "Asset root {} is not usable: {}",
+                asset_root.as_ref().display(),
+                e
+            ))
+        })?;
+        // Canonicalize the cover path: this resolves symlinks, so a path
+        // spelled inside the asset area that links out of it is rejected.
+        let canonical = cover_path.canonicalize().map_err(|e| {
+            TaggingError::CoverDownload(format!(
+                "Local cover file {} is not readable: {}",
+                cover_path.display(),
+                e
+            ))
+        })?;
+        if !canonical.starts_with(&asset_root) {
+            return Err(TaggingError::CoverPathOutsideAssetRoot(cover_path.display().to_string()));
+        }
+        // Bound the read to limit+1 bytes (a single open-then-bounded-read,
+        // not a size-then-read TOCTOU window). If the buffer fills to the
+        // limit+1 mark, the file is too large: refuse it.
+        let file = std::fs::File::open(&canonical).map_err(|e| {
+            TaggingError::CoverDownload(format!(
+                "Failed to open local cover {}: {}",
+                cover_path.display(),
+                e
+            ))
+        })?;
+        let mut data = Vec::with_capacity(Self::LOCAL_COVER_MAX_BYTES as usize + 1);
+        let n = file.take(Self::LOCAL_COVER_MAX_BYTES + 1).read_to_end(&mut data).map_err(|e| {
+            TaggingError::CoverDownload(format!(
+                "Failed to read local cover {}: {}",
+                cover_path.display(),
+                e
+            ))
+        })?;
+        if (n as u64) > Self::LOCAL_COVER_MAX_BYTES {
+            return Err(TaggingError::CoverDownload(format!(
+                "Local cover file {} exceeds the {} byte limit",
+                cover_path.display(),
+                Self::LOCAL_COVER_MAX_BYTES
+            )));
+        }
+        self.embed_cover_data(file_path, &data)
+    }
+
+    /// Remove all embedded cover art. A deliberate `clear` cover policy;
+    /// `preserve` never calls this.
+    pub fn clear_cover<P: AsRef<Path>>(&self, file_path: P) -> Result<()> {
+        let path = file_path.as_ref();
+        Self::ensure_file_exists(path)?;
+
+        let mut tag = mp4ameta::Tag::read_from_path(path)
+            .map_err(|e| TaggingError::Mp4Meta(format!("Failed to read tag: {}", e)))?;
+
+        tag.remove_artworks();
+
+        tag.write_to_path(path)
+            .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write tags: {}", e)))?;
+
+        info!("Cleared existing cover from: {}", path.display());
+        Ok(())
+    }
+
+    /// Remove all chapter representations (Nero `chpl` list and QuickTime
+    /// chapter track) from the file. A deliberate `clear` chapters policy;
+    /// `preserve` never calls this.
+    pub fn clear_chapters<P: AsRef<Path>>(&self, file_path: P) -> Result<()> {
+        let path = file_path.as_ref();
+        Self::ensure_file_exists(path)?;
+
+        let mut tag = mp4ameta::Tag::read_from_path(path)
+            .map_err(|e| TaggingError::Mp4Meta(format!("Failed to read tag: {}", e)))?;
+
+        tag.chapter_list_mut().clear();
+        tag.chapter_track_mut().clear();
+
+        tag.write_to_path(path)
+            .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write chapters: {}", e)))?;
+
+        info!("Cleared existing chapters from: {}", path.display());
+        Ok(())
+    }
     /// Embed pre-downloaded cover image data into an MP4 file
     pub fn embed_cover_data<P: AsRef<Path>>(&self, file_path: P, image_data: &[u8]) -> Result<()> {
         let path = file_path.as_ref();
@@ -2958,5 +3077,124 @@ mod tests {
         let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
         assert_eq!(tag.title().unwrap(), "New Title");
         assert_eq!(tag.album().unwrap(), "New Title");
+    fn clear_chapters_removes_both_representations() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let tagger = Tagger::new();
+        tagger
+            .embed_chapters(&path, &[Chapter::new("C1", Duration::ZERO, Duration::from_secs(5))])
+            .unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.chapter_list().len(), 1);
+
+        tagger.clear_chapters(&path).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert!(tag.chapter_list().is_empty());
+        assert!(tag.chapter_track().is_empty());
+    }
+
+    #[test]
+    fn local_cover_embeds_and_rejects_bad_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let asset_root = temp_dir.path().join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let cover = asset_root.join("cover.png");
+        // Minimal 1x1 PNG.
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(&cover, PNG).unwrap();
+
+        let tagger = Tagger::new();
+        // A file inside the asset area is accepted.
+        tagger.embed_cover_local(&path, &cover, &asset_root).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert!(tag.artwork().is_some());
+
+        // Relative path is rejected.
+        let err = tagger.embed_cover_local(&path, Path::new("cover.png"), &asset_root).unwrap_err();
+        assert!(matches!(err, TaggingError::CoverDownload(_)));
+        // Missing file is rejected.
+        let missing = asset_root.join("missing.png");
+        let err = tagger.embed_cover_local(&path, &missing, &asset_root).unwrap_err();
+        assert!(matches!(err, TaggingError::CoverDownload(_)));
+    }
+
+    #[test]
+    fn local_cover_rejects_escaping_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let asset_root = temp_dir.path().join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        // A PNG that lives OUTSIDE the asset area.
+        let outside = temp_dir.path().join("outside.png");
+        let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        std::fs::write(&outside, &png).unwrap();
+        let tagger = Tagger::new();
+        // A direct path outside the asset area is rejected, not read.
+        let err = tagger.embed_cover_local(&path, &outside, &asset_root).unwrap_err();
+        assert!(
+            matches!(err, TaggingError::CoverPathOutsideAssetRoot(_)),
+            "expected path-escape rejection, got {err:?}"
+        );
+        // A symlink inside the asset area that points out of it is rejected.
+        let link = asset_root.join("link.png");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        #[cfg(unix)]
+        let err = tagger.embed_cover_local(&path, &link, &asset_root).unwrap_err();
+        #[cfg(unix)]
+        assert!(
+            matches!(err, TaggingError::CoverPathOutsideAssetRoot(_)),
+            "expected symlink-escape rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn local_cover_rejects_oversized_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let asset_root = temp_dir.path().join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let big = asset_root.join("big.png");
+        // limit + 1 bytes; the bounded read must refuse it.
+        let data = vec![0u8; Tagger::LOCAL_COVER_MAX_BYTES as usize + 1];
+        std::fs::write(&big, data).unwrap();
+        let tagger = Tagger::new();
+        let err = tagger.embed_cover_local(&path, &big, &asset_root).unwrap_err();
+        assert!(
+            matches!(err, TaggingError::CoverDownload(_)),
+            "expected oversize rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn clear_cover_removes_embedded_artwork() {
+        let temp_dir = TempDir::new().unwrap();
+        let asset_root = temp_dir.path().to_path_buf();
+        let path = create_minimal_m4b(&temp_dir);
+        let cover = temp_dir.path().join("cover.png");
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(&cover, PNG).unwrap();
+
+        let tagger = Tagger::new();
+        tagger.embed_cover_local(&path, &cover, &asset_root).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert!(tag.artwork().is_some());
+
+        tagger.clear_cover(&path).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert!(tag.artwork().is_none());
     }
 }
