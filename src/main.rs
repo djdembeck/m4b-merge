@@ -123,10 +123,12 @@ async fn main() {
     // Job mode: the job file owns inputs, output root, and metadata base.
     // The standalone flags that would fight the job are rejected up front.
     let job = if let Some(job_path) = &args.job {
+        let path_format_default = "{author}/{title}".to_string();
         let conflicts: Vec<&str> = [
             (!args.inputs.is_empty()).then_some("-i/--inputs"),
             args.metadata_id.is_some().then_some("-a/--metadata-id"),
             args.output.is_some().then_some("-o/--output"),
+            (args.path_format != path_format_default).then_some("-p/--path-format"),
             args.completed_directory.is_some().then_some("--completed-directory"),
         ]
         .into_iter()
