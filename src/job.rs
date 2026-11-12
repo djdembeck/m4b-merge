@@ -244,10 +244,12 @@ impl Job {
                 ));
             }
         }
-        if let SubtitlePolicy::Write(None) = &self.subtitle {
-            return Err(JobError::Invalid(
-                "subtitle policy 'write' requires a subtitle value".into(),
-            ));
+        if let SubtitlePolicy::Write(value) = &self.subtitle {
+            if value.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+                return Err(JobError::Invalid(
+                    "subtitle policy 'write' requires a subtitle value".into(),
+                ));
+            }
         }
         Ok(())
     }

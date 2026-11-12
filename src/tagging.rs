@@ -658,8 +658,10 @@ impl Tagger {
             }
             _ => {}
         }
-        if let crate::job::SubtitlePolicy::Write(None) = &policies.subtitle {
-            return Err(TaggingError::WriteWithoutValue { field: "subtitle" });
+        if let crate::job::SubtitlePolicy::Write(value) = &policies.subtitle {
+            if value.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+                return Err(TaggingError::WriteWithoutValue { field: "subtitle" });
+            }
         }
         let multi = |name: &'static str, values: &[String]| {
             if Self::join_values(values, ", ").is_none() {
@@ -674,7 +676,9 @@ impl Tagger {
         if policies.narrators == crate::job::FieldPolicy::Write {
             multi("narrators", &metadata.narrators)?;
         }
-        if policies.series == crate::job::FieldPolicy::Write && metadata.series_name.is_none() {
+        if policies.series == crate::job::FieldPolicy::Write
+            && metadata.series_name.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none()
+        {
             return Err(TaggingError::WriteWithoutValue { field: "series" });
         }
         if policies.description == crate::job::FieldPolicy::Write
@@ -795,7 +799,7 @@ impl Tagger {
 
     /// The `Series:` segment text for the metadata.
     fn series_info(metadata: &BookMetadata) -> Option<String> {
-        let name = metadata.series_name.as_deref()?;
+        let name = metadata.series_name.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
         Some(match &metadata.series_position {
             Some(pos) => format!("Series: {} #{pos}", name),
             None => format!("Series: {name}"),
