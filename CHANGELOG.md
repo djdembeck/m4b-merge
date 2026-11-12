@@ -14,10 +14,19 @@ All notable changes to this project will be documented in this file. See [standa
   `path_format`, default `{author}/{title}`). It is mutually exclusive with
   the legacy `-i`/`-o`/`-p`/`-a`/`--completed-directory` flags. An
   unresolvable explicit id, a release the book does not carry, or a missing
-  client fails the job before discovery, merge, or source moves. Every
-  supported scalar metadata field is written from the effective metadata,
-  the provider cover URL (when present) is embedded, and the resolved
-  chapters are embedded with a `chapters.txt` sidecar.
+  client fails the job before discovery, merge, or source moves. The
+  provider cover URL (when present) is embedded, and the resolved chapters
+  are embedded with a `chapters.txt` sidecar.
+- Per-field metadata write policies on the `--job` input: `preserve`
+  (default), `write`, and `clear` for title, subtitle, authors, narrators,
+  series, description, genres, and year. Title and subtitle are independent
+  components of the shared `©nam`/`©alb` pair: writing one preserves the
+  other, and clearing one removes only that component. A preserved title or
+  subtitle that cannot be established from the file's existing atoms fails
+  before any atom is mutated. A `write` without a non-blank effective value
+  is rejected. `preserve` fields keep the file's existing values even when
+  the effective metadata lacks them, so an omitted policy is never an
+  implicit clear.
 - Chapter embedding into M4B files using native mp4ameta library
 - Chapters are now embedded directly into the M4B container, not just written to chapters.txt
 - Full chapter metadata round-trip: extraction from source → embedding in output

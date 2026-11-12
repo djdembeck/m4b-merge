@@ -49,6 +49,14 @@ pub enum TaggingError {
         "Refusing to embed chapters for {path}: {count} chapter(s) start at or past the {playlength} playlength ({details})"
     )]
     ChaptersOutOfRange { path: PathBuf, count: usize, playlength: String, details: String },
+
+    #[error("write policy for '{field}' has no valid value to write")]
+    WriteWithoutValue { field: &'static str },
+
+    #[error(
+        "cannot preserve '{field}' for {path}: the preserved component cannot be established from the existing ©nam/©alb atoms; refusing to mutate. Use an explicit write with the known value."
+    )]
+    PreserveUnresolvable { field: &'static str, path: PathBuf },
 }
 
 /// Result type for tagging operations
@@ -505,6 +513,285 @@ impl Tagger {
 
         info!("Successfully wrote metadata to: {}", path.display());
         Ok(())
+    }
+
+    /// Write metadata tags according to per-field policies.
+    ///
+    /// Unlike [`Tagger::write_metadata`] (the standalone CLI's all-fields
+    /// behavior), this only mutates the atoms whose policy says so:
+    /// - `Write` sets the atom from the effective value;
+    /// - `Clear` removes the atom;
+    /// - `Preserve` leaves the file's existing value untouched.
+    ///
+    /// Title and subtitle are independent logical components of the shared
+    /// `©nam`/`©alb` representation: each is resolved on its own, and the
+    /// unselected component of a preserved pair is read back from the file's
+    /// existing atoms. A preserved component that cannot be established from
+    /// the defined representation (`©alb` for the title, the `©nam`/`©alb`
+    /// `"title - subtitle"` form for the subtitle) fails with
+    /// [`TaggingError::PreserveUnresolvable`] before any atom is mutated.
+    ///
+    /// Atom ownership: title/subtitle own `©nam` and `©alb`; authors own
+    /// `©ART`/`©aART`; narrators own `©wrt`; series owns the `Series:` segment
+    /// of `©grp`; description owns `©cmt`; genres own `©gen`; year owns `©day`.
+    /// Unrelated `©grp` segments and every atom not named here are never
+    /// touched, so preserving one field cannot erase another.
+    pub fn write_metadata_with_policies<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+        metadata: &BookMetadata,
+        policies: &crate::job::WritePolicies,
+    ) -> Result<()> {
+        let path = file_path.as_ref();
+        Self::ensure_file_exists(path)?;
+
+        // Validate every explicit `write` before mutating anything: a write
+        // without a valid available value is an error, not a silent preserve.
+        Self::validate_policies(metadata, policies)?;
+
+        let mut tag = mp4ameta::Tag::read_from_path(path).unwrap_or_default();
+
+        // Resolve the title/subtitle components independently from the
+        // existing atoms, then write `©nam`/`©alb` once.
+        let (title, subtitle) =
+            Self::resolve_title_subtitle(path, &tag, &policies.title, &policies.subtitle)?;
+
+        match (title.as_deref(), subtitle.as_deref()) {
+            (Some(title), Some(subtitle)) if !subtitle.trim().is_empty() => {
+                tag.set_title(format!("{title} - {subtitle}"));
+                tag.set_album(title);
+            }
+            (Some(title), _) => {
+                tag.set_title(title);
+                tag.set_album(title);
+            }
+            (None, _) => {
+                tag.remove_title();
+                tag.remove_album();
+            }
+        }
+
+        match policies.authors {
+            crate::job::FieldPolicy::Write => match Self::join_values(&metadata.authors, ", ") {
+                Some(authors) => {
+                    tag.set_artist(authors.clone());
+                    tag.set_album_artist(authors);
+                }
+                None => unreachable!("validated: authors write requires values"),
+            },
+            crate::job::FieldPolicy::Clear => {
+                tag.remove_artists();
+                tag.remove_album_artists();
+            }
+            crate::job::FieldPolicy::Preserve => {}
+        }
+
+        match policies.narrators {
+            crate::job::FieldPolicy::Write => match Self::join_values(&metadata.narrators, ", ") {
+                Some(narrators) => tag.set_composer(narrators),
+                None => unreachable!("validated: narrators write requires values"),
+            },
+            crate::job::FieldPolicy::Clear => {
+                tag.remove_composers();
+            }
+            crate::job::FieldPolicy::Preserve => {}
+        }
+
+        self.write_series_policy(&mut tag, metadata, policies.series);
+
+        match policies.description {
+            crate::job::FieldPolicy::Write => {
+                tag.set_comment(&metadata.description);
+            }
+            crate::job::FieldPolicy::Clear => {
+                tag.remove_comments();
+            }
+            crate::job::FieldPolicy::Preserve => {}
+        }
+
+        match policies.genres {
+            crate::job::FieldPolicy::Write => {
+                match Self::join_values(&metadata.genres, Self::GENRE_SEPARATOR) {
+                    Some(genres) => tag.set_genre(genres),
+                    None => unreachable!("validated: genres write requires values"),
+                }
+            }
+            crate::job::FieldPolicy::Clear => {
+                tag.remove_genres();
+            }
+            crate::job::FieldPolicy::Preserve => {}
+        }
+
+        match policies.year {
+            crate::job::FieldPolicy::Write => {
+                tag.set_year(metadata.year.unwrap().to_string());
+            }
+            crate::job::FieldPolicy::Clear => {
+                tag.remove_year();
+            }
+            crate::job::FieldPolicy::Preserve => {}
+        }
+
+        tag.write_to_path(path)
+            .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write tags: {}", e)))?;
+
+        info!("Successfully wrote policy-driven metadata to: {}", path.display());
+        Ok(())
+    }
+
+    /// Refuse a policy set whose `Write` has no valid available value.
+    fn validate_policies(
+        metadata: &BookMetadata,
+        policies: &crate::job::WritePolicies,
+    ) -> Result<()> {
+        match &policies.title {
+            crate::job::TitlePolicy::Write(title) if title.trim().is_empty() => {
+                return Err(TaggingError::WriteWithoutValue { field: "title" });
+            }
+            _ => {}
+        }
+        if let crate::job::SubtitlePolicy::Write(None) = &policies.subtitle {
+            return Err(TaggingError::WriteWithoutValue { field: "subtitle" });
+        }
+        let multi = |name: &'static str, values: &[String]| {
+            if Self::join_values(values, ", ").is_none() {
+                Err(TaggingError::WriteWithoutValue { field: name })
+            } else {
+                Ok(())
+            }
+        };
+        if policies.authors == crate::job::FieldPolicy::Write {
+            multi("authors", &metadata.authors)?;
+        }
+        if policies.narrators == crate::job::FieldPolicy::Write {
+            multi("narrators", &metadata.narrators)?;
+        }
+        if policies.series == crate::job::FieldPolicy::Write && metadata.series_name.is_none() {
+            return Err(TaggingError::WriteWithoutValue { field: "series" });
+        }
+        if policies.description == crate::job::FieldPolicy::Write
+            && metadata.description.trim().is_empty()
+        {
+            return Err(TaggingError::WriteWithoutValue { field: "description" });
+        }
+        if policies.genres == crate::job::FieldPolicy::Write {
+            multi("genres", &metadata.genres)?;
+        }
+        if policies.year == crate::job::FieldPolicy::Write && metadata.year.is_none() {
+            return Err(TaggingError::WriteWithoutValue { field: "year" });
+        }
+        Ok(())
+    }
+
+    /// Resolve the effective title and subtitle atoms from the policies and
+    /// the file's existing `©nam`/`©alb`.
+    ///
+    /// `None` means the component is cleared. A preserved component reads
+    /// back from the existing atoms; when the file has no album atom the
+    /// base title cannot be established and the write fails before mutation
+    /// rather than erasing data.
+    fn resolve_title_subtitle(
+        path: &Path,
+        tag: &mp4ameta::Tag,
+        title_policy: &crate::job::TitlePolicy,
+        subtitle_policy: &crate::job::SubtitlePolicy,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let existing_title = tag.title().map(|t| t.to_string()).filter(|t| !t.is_empty());
+        let existing_album = tag.album().map(|t| t.to_string()).filter(|t| !t.is_empty());
+
+        let title: Option<String> = match title_policy {
+            crate::job::TitlePolicy::Write(title) => Some(title.clone()),
+            crate::job::TitlePolicy::Clear => None,
+            crate::job::TitlePolicy::Preserve => {
+                // `©alb` is documented as the base title only, so it is the
+                // defined representation of the title component. A file with
+                // a title but no album (foreign tool, manual edit) cannot
+                // establish the base without guessing — refuse before mutation.
+                match &existing_album {
+                    Some(album) => Some(album.clone()),
+                    None if existing_title.is_some() => Err(TaggingError::PreserveUnresolvable {
+                        field: "title",
+                        path: path.to_path_buf(),
+                    })?,
+                    None => None,
+                }
+            }
+        };
+
+        let subtitle: Option<String> = match subtitle_policy {
+            crate::job::SubtitlePolicy::Write(subtitle) => {
+                subtitle.clone().filter(|s| !s.trim().is_empty())
+            }
+            crate::job::SubtitlePolicy::Clear => None,
+            crate::job::SubtitlePolicy::Preserve => {
+                // The documented `©nam` form is `title - subtitle`: recover
+                // the subtitle only when the existing title starts with the
+                // album plus the documented separator. Never split on
+                // arbitrary punctuation. A file with a title but no album
+                // has no base to subtract — refuse before mutation.
+                match (&existing_album, &existing_title) {
+                    (Some(album), Some(t)) => {
+                        let sep = format!("{album} - ");
+                        // The `©nam`/`©alb` pair is the documented
+                        // representation: a title that does not extend the
+                        // album by the documented separator is inconsistent,
+                        // so the subtitle cannot be established — refuse
+                        // before mutation rather than drop it as empty.
+                        let Some(stripped) = t.strip_prefix(&sep) else {
+                            return Err(TaggingError::PreserveUnresolvable {
+                                field: "subtitle",
+                                path: path.to_path_buf(),
+                            });
+                        };
+                        let sub = stripped.trim().to_string();
+                        (!sub.is_empty()).then_some(sub)
+                    }
+                    // No title to subtract from, or an album without a title:
+                    // the subtitle cannot be established — refuse.
+                    (None, Some(_)) | (Some(_), None) => Err(TaggingError::PreserveUnresolvable {
+                        field: "subtitle",
+                        path: path.to_path_buf(),
+                    })?,
+                    (None, None) => None,
+                }
+            }
+        };
+
+        Ok((title, subtitle))
+    }
+
+    /// Write the `Series:` segment of `©grp` per policy, keeping unrelated
+    /// segments. `Preserve` never touches `©grp`; `Write` adds the segment
+    /// (validated to have a series name); `Clear` removes only the `Series:`
+    /// segment. The tool-generated `Narrator:` legacy segment is filtered out
+    /// on a write, matching [`Tagger::apply_metadata`].
+    fn write_series_policy(
+        &self,
+        tag: &mut mp4ameta::Tag,
+        metadata: &BookMetadata,
+        policy: crate::job::FieldPolicy,
+    ) {
+        if policy == crate::job::FieldPolicy::Preserve {
+            return;
+        }
+        let mut segments = Self::preserved_grouping_segments(tag.grouping().map(|s| s as &str));
+        if policy == crate::job::FieldPolicy::Write {
+            segments.push(Self::series_info(metadata).expect("validated: series write"));
+        }
+        if segments.is_empty() {
+            tag.remove_groupings();
+        } else {
+            tag.set_grouping(segments.join(" | "));
+        }
+    }
+
+    /// The `Series:` segment text for the metadata.
+    fn series_info(metadata: &BookMetadata) -> Option<String> {
+        let name = metadata.series_name.as_deref()?;
+        Some(match &metadata.series_position {
+            Some(pos) => format!("Series: {} #{pos}", name),
+            None => format!("Series: {name}"),
+        })
     }
 
     /// Download cover art from URL and embed it in the MP4 file
@@ -2115,5 +2402,242 @@ mod tests {
         let tagger = Tagger::new();
         let result = tagger.embed_chapters(&m4b_path, &chapters);
         assert!(matches!(result, Err(TaggingError::DuplicateChapterTimes)));
+    }
+    /// Build a real M4B pre-tagged with a known `©nam`/`©alb` pair plus the
+    /// atoms other policies must not touch.
+    fn tagged_m4b(dir: &TempDir, nam: &str, album: &str) -> PathBuf {
+        let path = create_minimal_m4b(dir);
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title(nam);
+        tag.set_album(album);
+        tag.set_artist("Original Artist");
+        tag.set_composer("Original Narrator");
+        tag.set_comment("Original Description");
+        tag.set_genre("Original/Genre");
+        tag.set_year("2001");
+        tag.set_grouping("My Custom Segment | Series: Old #1");
+        tag.write_to_path(&path).unwrap();
+        path
+    }
+
+    fn meta() -> BookMetadata {
+        BookMetadata::new("ID1234567890", "New Title", "new description")
+            .add_author("New Author")
+            .add_narrator("New Narrator")
+            .add_genre("New Genre")
+            .with_subtitle("New Sub")
+            .with_series("New Series", "2")
+            .with_year(2024)
+    }
+
+    fn all_write_policies() -> crate::job::WritePolicies {
+        crate::job::WritePolicies::write_all("New Title".into(), Some("New Sub".into()))
+    }
+
+    #[test]
+    fn policy_write_all_fields_updates_only_named_atoms() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        tagger.write_metadata_with_policies(&path, &meta(), &all_write_policies()).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "New Title - New Sub");
+        assert_eq!(tag.album().unwrap(), "New Title");
+        assert_eq!(tag.artist().unwrap(), "New Author");
+        assert_eq!(tag.album_artist().unwrap(), "New Author");
+        assert_eq!(tag.composer().unwrap(), "New Narrator");
+        assert_eq!(tag.genre().unwrap(), "New Genre");
+        assert_eq!(tag.year().unwrap(), "2024");
+        // The unrelated grouping segment must survive a full write.
+        assert_eq!(tag.grouping().unwrap(), "My Custom Segment | Series: New Series #2");
+    }
+
+    #[test]
+    fn policy_preserve_all_leaves_file_untouched() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let before = std::fs::read(&path).unwrap();
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Old Title - Old Sub");
+        assert_eq!(tag.album().unwrap(), "Old Title");
+        assert_eq!(tag.artist().unwrap(), "Original Artist");
+        assert_eq!(tag.composer().unwrap(), "Original Narrator");
+        assert_eq!(tag.comment().unwrap(), "Original Description");
+        assert_eq!(tag.genre().unwrap(), "Original/Genre");
+        assert_eq!(tag.year().unwrap(), "2001");
+        assert_eq!(tag.grouping().unwrap(), "My Custom Segment | Series: Old #1");
+        let _ = before;
+    }
+
+    #[test]
+    fn policy_title_only_preserves_subtitle_component() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write("Brand New Title".into()),
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        // The unselected subtitle component must survive a title-only write.
+        assert_eq!(tag.title().unwrap(), "Brand New Title - Old Sub");
+        assert_eq!(tag.album().unwrap(), "Brand New Title");
+        // Unselected atoms stay.
+        assert_eq!(tag.artist().unwrap(), "Original Artist");
+    }
+
+    #[test]
+    fn policy_subtitle_only_preserves_title_component() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Write(Some("Brand New Sub".into())),
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        // The unselected title component must survive a subtitle-only write.
+        assert_eq!(tag.title().unwrap(), "Old Title - Brand New Sub");
+        assert_eq!(tag.album().unwrap(), "Old Title");
+    }
+
+    #[test]
+    fn policy_clear_specific_atoms_removes_only_them() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Clear,
+            narrators: crate::job::FieldPolicy::Clear,
+            series: crate::job::FieldPolicy::Clear,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Clear,
+            year: crate::job::FieldPolicy::Clear,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert!(tag.artist().is_none());
+        assert!(tag.composer().is_none());
+        assert!(tag.genre().is_none());
+        assert!(tag.year().is_none());
+        // The `Series:` segment is gone; the unrelated segment survives.
+        assert_eq!(tag.grouping().unwrap(), "My Custom Segment");
+        // Title/subtitle/description preserved.
+        assert_eq!(tag.title().unwrap(), "Old Title - Old Sub");
+        assert_eq!(tag.comment().unwrap(), "Original Description");
+    }
+
+    #[test]
+    fn policy_write_without_value_fails_before_mutation() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        // A metadata with no authors, writing authors: must fail, file intact.
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write("T".into()),
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Write,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        let empty_authors = BookMetadata::new("ID1234567890", "T", "");
+        let err =
+            tagger.write_metadata_with_policies(&path, &empty_authors, &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::WriteWithoutValue { field: "authors" }));
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.artist().unwrap(), "Original Artist");
+        assert_eq!(tag.title().unwrap(), "Old Title - Old Sub");
+    }
+
+    #[test]
+    fn policy_preserve_title_without_album_fails_before_mutation() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        // A foreign file with a title but no album atom.
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("Only A Title");
+        tag.set_artist("Some Artist");
+        tag.write_to_path(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Write(Some("Sub".into())),
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::PreserveUnresolvable { field: "title", .. }));
+        // File untouched: the title atom is still the original.
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Only A Title");
+        assert_eq!(tag.artist().unwrap(), "Some Artist");
+        assert!(tag.album().is_none());
+    }
+
+    #[test]
+    fn policy_preserve_subtitle_with_inconsistent_nam_fails_before_mutation() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        // `©nam` does not extend `©alb` by the documented ` - ` separator.
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("Completely Different Name");
+        tag.set_album("Base Title");
+        tag.write_to_path(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::PreserveUnresolvable { field: "subtitle", .. }));
     }
 }

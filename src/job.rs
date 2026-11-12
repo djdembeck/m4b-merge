@@ -40,6 +40,72 @@ pub enum JobError {
 
 pub type Result<T> = std::result::Result<T, JobError>;
 
+/// Per-field policy for a scalar metadata field.
+///
+/// `Write` writes the effective value, `Clear` removes the atom, and
+/// `Preserve` leaves the file's existing value untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldPolicy {
+    #[default]
+    Preserve,
+    Write,
+    Clear,
+}
+
+/// Title-component policy. `preserve` (the default) leaves both existing
+/// title components untouched; `clear` removes them; `{"write": "Title"}`
+/// writes the title.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TitlePolicy {
+    #[default]
+    Preserve,
+    Clear,
+    Write(String),
+}
+
+/// Subtitle-component policy. `preserve` (the default) leaves the existing
+/// subtitle component untouched; `clear` removes it; `{"write": "Sub"}`
+/// writes the subtitle (a `null` value is rejected at validation).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubtitlePolicy {
+    #[default]
+    Preserve,
+    Clear,
+    Write(Option<String>),
+}
+
+/// Scalar atom write policies, shared by the processor and the tagger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WritePolicies {
+    pub title: TitlePolicy,
+    pub subtitle: SubtitlePolicy,
+    pub authors: FieldPolicy,
+    pub narrators: FieldPolicy,
+    pub series: FieldPolicy,
+    pub description: FieldPolicy,
+    pub genres: FieldPolicy,
+    pub year: FieldPolicy,
+}
+
+impl WritePolicies {
+    /// The standalone CLI's documented behavior: write every supported field.
+    pub fn write_all(title: String, subtitle: Option<String>) -> Self {
+        Self {
+            title: TitlePolicy::Write(title),
+            subtitle: SubtitlePolicy::Write(subtitle),
+            authors: FieldPolicy::Write,
+            narrators: FieldPolicy::Write,
+            series: FieldPolicy::Write,
+            description: FieldPolicy::Write,
+            genres: FieldPolicy::Write,
+            year: FieldPolicy::Write,
+        }
+    }
+}
+
 /// Provider base: an explicit book id with an optional exact release id.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -116,6 +182,22 @@ pub struct Job {
     pub completed_directory: Option<PathBuf>,
     #[serde(default)]
     pub source: Option<JobSource>,
+    #[serde(default)]
+    pub title: TitlePolicy,
+    #[serde(default)]
+    pub subtitle: SubtitlePolicy,
+    #[serde(default)]
+    pub authors: FieldPolicy,
+    #[serde(default)]
+    pub narrators: FieldPolicy,
+    #[serde(default)]
+    pub series: FieldPolicy,
+    #[serde(default)]
+    pub description: FieldPolicy,
+    #[serde(default)]
+    pub genres: FieldPolicy,
+    #[serde(default)]
+    pub year: FieldPolicy,
 }
 
 impl Job {
@@ -154,6 +236,18 @@ impl Job {
         }
         if self.inputs.is_empty() {
             return Err(JobError::Invalid("inputs must not be empty".into()));
+        }
+        if let TitlePolicy::Write(title) = &self.title {
+            if title.trim().is_empty() {
+                return Err(JobError::Invalid(
+                    "title policy 'write' requires a title value".into(),
+                ));
+            }
+        }
+        if let SubtitlePolicy::Write(None) = &self.subtitle {
+            return Err(JobError::Invalid(
+                "subtitle policy 'write' requires a subtitle value".into(),
+            ));
         }
         Ok(())
     }
@@ -209,9 +303,24 @@ impl Job {
 
         Ok(EffectiveJob {
             metadata: effective,
+            policies: self.policies_from(),
             path_format: self.path_format.clone(),
             completed_directory: self.completed_directory.clone(),
         })
+    }
+
+    /// The job's per-atom write policies, independent of the metadata base.
+    fn policies_from(&self) -> WritePolicies {
+        WritePolicies {
+            title: self.title.clone(),
+            subtitle: self.subtitle.clone(),
+            authors: self.authors,
+            narrators: self.narrators,
+            series: self.series,
+            description: self.description,
+            genres: self.genres,
+            year: self.year,
+        }
     }
 
     /// Build the effective job for a supplied (authoritative) base, applying
@@ -242,17 +351,20 @@ impl Job {
         }
         Ok(EffectiveJob {
             metadata: effective,
+            policies: self.policies_from(),
             path_format: self.path_format.clone(),
             completed_directory: self.completed_directory.clone(),
         })
     }
 }
 
-/// A job resolved into effective metadata plus output settings.
+/// A job resolved into effective metadata plus policies.
 #[derive(Debug, Clone)]
 pub struct EffectiveJob {
-    /// Effective (base + overrides) metadata; feeds naming and tag writes.
+    /// Effective (base + overrides) metadata; feeds naming and `Write` values.
     pub metadata: BookMetadata,
+    /// Per-atom write policies for the scalar metadata fields.
+    pub policies: WritePolicies,
     pub path_format: String,
     pub completed_directory: Option<PathBuf>,
 }
@@ -310,11 +422,35 @@ mod tests {
 
     #[test]
     fn parses_valid_supplied_job() {
-        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": { "title": "The Test" }, "output_root": "/tmp/out", "path_format": "{author}/{title}" }"#;
+        let raw = r#"{
+            "schema_version": 1,
+            "inputs": ["in.m4b"],
+            "input_supplied": { "title": "The Test" },
+            "output_root": "/tmp/out",
+            "path_format": "{author}/{title}",
+            "title": { "write": "The Test" }
+        }"#;
         let job: Job = serde_json::from_str(raw).unwrap();
         assert_eq!(job.schema_version, 1);
         assert!(job.input_supplied.is_some());
+        assert!(matches!(job.title, TitlePolicy::Write(_)));
+        assert!(matches!(job.authors, FieldPolicy::Preserve));
         job.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_write_without_value() {
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o", "title": { "write": "  " } }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        let err = job.validate().unwrap_err().to_string();
+        assert!(err.contains("title"), "{err}");
+
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o", "subtitle": { "write": null } }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        let err = job.validate().unwrap_err().to_string();
+        assert!(err.contains("subtitle"), "{err}");
     }
 
     #[test]
@@ -335,7 +471,10 @@ mod tests {
 
     #[test]
     fn rejects_mutually_exclusive_bases() {
-        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_provider": { "book_id": "B012345678" }, "input_supplied": { "title": "T" }, "output_root": "/o" }"#;
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
+            "input_provider": { "book_id": "B012345678" },
+            "input_supplied": { "title": "T" },
+            "output_root": "/o" }"#;
         let job: Job = serde_json::from_str(raw).unwrap();
         let err = job.validate().unwrap_err().to_string();
         assert!(err.contains("mutually exclusive"), "{err}");
@@ -353,7 +492,8 @@ mod tests {
         // ASIN / canonical book id / selected release id stay separate fields.
         let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
             "input_provider": { "book_id": "B012345678", "release_id": "rel12345678" },
-            "source": { "source": "audiobookdb" }, "output_root": "/o" }"#;
+            "source": { "source": "audiobookdb" },
+            "output_root": "/o" }"#;
         let job: Job = serde_json::from_str(raw).unwrap();
         job.validate().unwrap();
         let provider = job.input_provider.unwrap();
@@ -382,7 +522,8 @@ mod tests {
     async fn supplied_resolve_applies_overrides() {
         let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
             "input_supplied": { "title": "Base", "subtitle": "Sub", "authors": ["A"] },
-            "overrides": { "title": "Override", "authors": ["B", "C"] }, "output_root": "/o" }"#;
+            "overrides": { "title": "Override", "authors": ["B", "C"] },
+            "output_root": "/o" }"#;
         let job: Job = serde_json::from_str(raw).unwrap();
         let effective = job.resolve(None).await.unwrap();
         assert_eq!(effective.metadata.title, "Override");
@@ -392,7 +533,9 @@ mod tests {
 
     #[tokio::test]
     async fn supplied_resolve_rejects_blank_title() {
-        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": { "title": "   " }, "output_root": "/o" }"#;
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
+            "input_supplied": { "title": "   " },
+            "output_root": "/o" }"#;
         let job: Job = serde_json::from_str(raw).unwrap();
         let err = job.resolve(None).await.unwrap_err().to_string();
         assert!(err.contains("title"), "{err}");

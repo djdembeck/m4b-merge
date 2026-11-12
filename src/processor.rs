@@ -796,14 +796,16 @@ impl Processor {
             message: "Applying write policies...".to_string(),
         });
 
-        // Tag writes: the documented baseline — every supported scalar field
-        // is written from the effective metadata (the legacy all-fields
-        // behavior). Per-field preserve/write/clear policies arrive in a
-        // follow-up.
-        self.tagger.write_metadata(&merged_path, &effective.metadata).map_err(|e| {
-            Self::discard_output(&merged_path);
-            ProcessorError::Tagging(e)
-        })?;
+        // Tag writes: per-field policies. A `write` without a valid value, or
+        // an unresolvable preserved title/subtitle component, is a diagnosed
+        // failure before any atom is mutated; `preserve` fields keep the
+        // file's existing values.
+        self.tagger
+            .write_metadata_with_policies(&merged_path, &effective.metadata, &effective.policies)
+            .map_err(|e| {
+                Self::discard_output(&merged_path);
+                ProcessorError::Tagging(e)
+            })?;
 
         // Cover: PR1 keeps the legacy provider-URL behavior (a supplied job
         // carries no cover URL, so nothing is downloaded). A cover policy

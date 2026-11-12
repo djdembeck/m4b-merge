@@ -121,14 +121,14 @@ m4b-merge --job job.json
 The job selects its metadata base exactly one of two ways:
 
 - `input_provider` — an explicit catalog id (`book_id`, plus an exact
-  `release_id` for `audiobookdb`). An unresolvable id, a release the book
-  does not carry, or a missing client fails the job before any file is
-  touched.
+  `release_id` for `audiobookdb`). The catalog is the authority; an
+  unresolvable id, a release the book does not carry, or a missing client
+  fails the job before any file is touched.
 - `input_supplied` — the values are authoritative as-is; no catalog lookup
   is attempted and the job runs fully offline.
 
-An optional `overrides` object replaces individual fields; present
-non-blank values win over the base.
+On top of the base, an optional `overrides` object replaces individual
+fields; present non-blank values win over the base.
 
 ```json
 {
@@ -139,7 +139,11 @@ non-blank values win over the base.
     "authors": ["F. Scott Fitzgerald"]
   },
   "output_root": "/library",
-  "path_format": "{author}/{title}"
+  "path_format": "{author}/{title}",
+  "title": { "write": "The Great Gatsby" },
+  "subtitle": "preserve",
+  "authors": "write",
+  "year": "clear"
 }
 ```
 
@@ -156,11 +160,24 @@ Field semantics:
   files are moved here. In job mode the CLI `--completed-directory` flag is
   rejected (the job file owns it), so omitting this field means the sources
   are not moved.
-- `overrides` (optional) — same shape as `input_supplied`.
+- `overrides` (optional) — same shape as `input_supplied`; present
+  non-blank values win over the base.
+- `title` / `subtitle` — `preserve` (default), `clear`, or `{"write": "value"}`.
+  Title and subtitle share the `©nam`/`©alb` atom pair: a write of one
+  component preserves the other, and `clear` of one removes only that
+  component. `preserve` recovers the component from the existing tags; a file
+  whose tags cannot establish it fails before mutation rather than erasing
+  data.
+- `authors`, `narrators`, `series`, `description`, `genres`, `year` —
+  `preserve` (default), `write`, or `clear`. A `write` requires the effective
+  value to be non-blank, and fails the job if it is not. `preserve` fields
+  keep the file's existing values even when the effective metadata lacks them.
 
-Every supported scalar metadata field is written from the effective
-metadata; the provider cover URL (when present) is embedded, and the resolved
-chapters are embedded with a `chapters.txt` sidecar.
+The output path is `output_root` + the (sanitized) template, so the same job
+against the same book always lands on the same path — no worker-time catalog
+rematching is needed by callers. Only the fields whose policy is `write` or
+`clear` are touched; the provider cover URL (when present) is embedded, and
+the resolved chapters are embedded with a `chapters.txt` sidecar.
 
 ### Verify Environment
 
@@ -191,6 +208,10 @@ carries neither, the existing group is left as is (on a rebuild, legacy
 `Narrator:` and `Series:` segments are dropped, a new series entry is added
 when series metadata is present, and unrelated segments are kept, so a group
 holding only legacy content is cleared entirely).
+
+When a job file drives processing, only the fields whose policy is `write` or
+`clear` are touched; `preserve` fields keep the file's existing values even
+when the effective metadata lacks them.
 
 ## Path Format Variables
 
