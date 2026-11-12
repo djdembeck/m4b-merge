@@ -261,8 +261,17 @@ parent directories are re-validated against the output root at claim time and
 again immediately before the merge, and the produced file is re-validated
 after it: it must be a regular, non-empty file inside the canonical output
 root, so a swapped symlinked parent cannot redirect the accepted output
-outside the root. This protects the job's staging area only; publishing into
-a shared destination still needs the caller's race-safe publication.
+outside the root. A rejected output is removed through the parent directory
+pinned at cleanup, so a parent swapped for a symlink cannot redirect the
+removal at an external file. The merge itself writes through the resolved
+pathname (the media pipeline is path-based), so a local attacker with a
+sub-millisecond rename window between the pre-merge check and the merge
+opening the file can redirect that one write; the post-merge zero-byte and
+containment check then discards the result, so a redirected output is never
+accepted as successful. Closing that window requires a descriptor-bound
+merge, which is out of scope for the current pipeline. This protects the
+job's staging area only; publishing into a shared destination still needs
+the caller's race-safe publication.
 
 ### Verify Environment
 

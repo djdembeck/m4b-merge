@@ -222,6 +222,17 @@ pub struct Processor {
     >,
 }
 
+/// Outcome of a pinned removal attempt.
+enum Discard {
+    /// The file was removed.
+    Removed,
+    /// Validation failed; the path was left in place.
+    Refused,
+    /// The platform cannot pin the parent; the caller applies its
+    /// fallback.
+    Unpinned,
+}
+
 impl Processor {
     /// Create a new Processor with the given configuration
     pub fn new(config: Config) -> Result<Self> {
@@ -463,9 +474,23 @@ impl Processor {
                         .as_ref()
                         .map(|j| {
                             let msg = e.to_string();
+                            // Redact both the raw and the canonical root:
+                            // a root that is (or was) a symlink makes an
+                            // older canonical target appear in the message,
+                            // and only the current one is known here.
                             let canonical = std::fs::canonicalize(&j.output_root)
                                 .unwrap_or_else(|_| j.output_root.clone());
-                            msg.replace(canonical.to_string_lossy().as_ref(), "output_root")
+                            let mut redacted =
+                                msg.replace(canonical.to_string_lossy().as_ref(), "output_root");
+                            if !j.output_root.starts_with(canonical.as_os_str())
+                                && !canonical.starts_with(j.output_root.as_os_str())
+                            {
+                                redacted = redacted.replace(
+                                    j.output_root.to_string_lossy().as_ref(),
+                                    "output_root",
+                                );
+                            }
+                            redacted
                         })
                         .unwrap_or_else(|| e.to_string());
                     failed_groups.push((group.name.clone(), diagnosed.clone()));
@@ -1393,32 +1418,118 @@ impl Processor {
 
     /// Remove a merged output that failed validation. The output keeps its
     /// final name once merged, so leaving it behind makes a rejected book
-    /// look like a finished one. In job mode the removal is root-aware: the
-    /// entry is deleted only if it is a regular file whose parent still lies
-    /// inside the output root, so a parent swapped for a symlink after the
-    /// claim can never make cleanup delete an external file. Source files
-    /// are never touched.
+    /// look like a finished one. In job mode the removal is root-aware and
+    /// pinned: the entry is deleted only if it is a regular file inside a
+    /// parent that is a real directory (not a symlink) under the output root,
+    /// and the removal itself is issued relative to that pinned parent, so a
+    /// parent swapped for a symlink after validation cannot redirect cleanup
+    /// at an external file. Source files are never touched.
     fn discard_output(&self, path: &std::path::Path) {
         if let Some(job) = &self.job {
             let root =
                 std::fs::canonicalize(&job.output_root).unwrap_or_else(|_| job.output_root.clone());
-            let inside = path
-                .parent()
-                .and_then(|p| std::fs::canonicalize(p).ok())
-                .map(|p| p.starts_with(&root))
-                .unwrap_or(false);
-            let regular =
-                std::fs::symlink_metadata(path).map(|m| m.file_type().is_file()).unwrap_or(false);
-            if !inside || !regular {
-                warn!(
-                    "Rejected output {} escaped the root or is not a regular file; left in place",
-                    path.display()
-                );
-                return;
+            match self.discard_pinned(path, &root) {
+                Discard::Removed => return,
+                Discard::Refused => {
+                    warn!(
+                        "Rejected output {} escaped the root or is not a regular file; left in place",
+                        path.display()
+                    );
+                    return;
+                }
+                Discard::Unpinned => {
+                    // The platform cannot pin the parent: fall back to the
+                    // check-then-remove path (the pinned path is strictly
+                    // safer).
+                    let inside = path
+                        .parent()
+                        .and_then(|p| std::fs::canonicalize(p).ok())
+                        .map(|p| p.starts_with(&root))
+                        .unwrap_or(false);
+                    let regular = std::fs::symlink_metadata(path)
+                        .map(|m| m.file_type().is_file())
+                        .unwrap_or(false);
+                    if !inside || !regular {
+                        warn!(
+                            "Rejected output {} escaped the root or is not a regular file; left in place",
+                            path.display()
+                        );
+                        return;
+                    }
+                    if let Err(e) = std::fs::remove_file(path) {
+                        warn!("Failed to remove rejected output {}: {}", path.display(), e);
+                    }
+                    return;
+                }
             }
         }
         if let Err(e) = std::fs::remove_file(path) {
             warn!("Failed to remove rejected output {}: {}", path.display(), e);
+        }
+    }
+
+    /// Job-mode removal with the parent directory pinned: open the parent
+    /// with `O_DIRECTORY` (a symlinked parent fails the open, so its target
+    /// can never be followed), require the entry to be a regular file via
+    /// `fstatat`, then `unlinkat` relative to the pinned descriptor. Because
+    /// the descriptor pins the exact directory, a later swap of the
+    /// parent's name cannot redirect the removal outside the root. Non-Unix
+    /// platforms report `Unpinned` and the caller keeps the
+    /// check-then-remove fallback.
+    fn discard_pinned(&self, path: &std::path::Path, root: &std::path::Path) -> Discard {
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
+            let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+                return Discard::Refused;
+            };
+            let (Ok(parent_c), Ok(name_c)) = (
+                CString::new(parent.as_os_str().as_bytes().to_vec()),
+                CString::new(name.as_bytes().to_vec()),
+            ) else {
+                return Discard::Refused;
+            };
+            let dirfd = unsafe { libc::open(parent_c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY) };
+            if dirfd < 0 {
+                return Discard::Unpinned;
+            }
+            let mut dir_stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(dirfd, &mut dir_stat) } != 0
+                || dir_stat.st_mode & libc::S_IFMT != libc::S_IFDIR
+            {
+                return Discard::Refused;
+            }
+            // The pinned directory's canonical location must still be
+            // inside the output root: a parent swapped for a symlink opens
+            // as its (external) target, and unlinked through it that target
+            // would be deleted. Refuse instead.
+            if std::fs::canonicalize(parent).map(|p| !p.starts_with(root)).unwrap_or(true) {
+                return Discard::Refused;
+            }
+            let mut entry = unsafe { std::mem::zeroed() };
+            if unsafe {
+                libc::fstatat(dirfd, name_c.as_ptr(), &mut entry, libc::AT_SYMLINK_NOFOLLOW)
+            } != 0
+                || entry.st_mode & libc::S_IFMT != libc::S_IFREG
+            {
+                return Discard::Refused;
+            }
+            if unsafe { libc::unlinkat(dirfd, name_c.as_ptr(), 0) } == 0 {
+                Discard::Removed
+            } else {
+                warn!(
+                    "Failed to remove rejected output {}: {}",
+                    path.display(),
+                    std::io::Error::last_os_error()
+                );
+                Discard::Refused
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (path, root);
+            Discard::Unpinned
         }
     }
 
@@ -2288,6 +2399,49 @@ mod tests {
         let err = processor.recheck_claimed_placeholder(&output_path).unwrap_err();
         assert!(err.to_string().contains("output root"), "{err}");
         assert_eq!(std::fs::read(&external).expect("external file survived"), b"external");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_discard_refuses_symlinked_parent_and_removes_in_root() {
+        // discard_output must unlink through a pinned parent descriptor:
+        // a parent swapped for a symlink must be refused (the external
+        // same-named file survives), while a real parent under the root
+        // still removes its rejected output.
+        let temp_dir = TempDir::new().unwrap();
+        let output_root = temp_dir.path().join("out");
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(output_root.join("Book")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let input = create_test_m4b(&temp_dir.path().join("Book"), 5);
+        let job_path = temp_dir.path().join("job.json");
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}], "input_supplied": {{ "title": "X", "authors": ["A"] }}, "output_root": {:?}, "path_format": "{{author}}/{{title}}" }}"#,
+            input, output_root
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let processor = Processor::for_job(
+            crate::job::Job::load(&job_path).unwrap(),
+            job_config(&temp_dir, &temp_dir.path().join("cfg-done")),
+        )
+        .unwrap();
+
+        // 1. A symlinked parent pointing outside the root is refused.
+        let external = outside.join("Esc.m4b");
+        std::fs::write(&external, b"external").unwrap();
+        std::os::unix::fs::symlink(&outside, output_root.join("Esc")).unwrap();
+        processor.discard_output(&output_root.join("Esc/Esc.m4b"));
+        assert_eq!(
+            std::fs::read(&external).expect("external file survived"),
+            b"external",
+            "a symlinked parent must not let cleanup delete an external file"
+        );
+
+        // 2. A real parent under the root still removes its rejected file.
+        let real = output_root.join("Book/Real.m4b");
+        std::fs::write(&real, b"rejected").unwrap();
+        processor.discard_output(&real);
+        assert!(!real.exists(), "rejected output in the root must be removed");
     }
 
     #[tokio::test]

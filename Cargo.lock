@@ -707,6 +707,7 @@ dependencies = [
  "anyhow",
  "clap",
  "httpdate",
+ "libc",
  "mp4ameta",
  "natord",
  "regex",
