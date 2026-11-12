@@ -481,6 +481,9 @@ impl AudiobookdbClient {
                 .filter(|id| !id.is_empty())
                 .unwrap_or(caller_id)
                 .to_string(),
+            // The book's own canonical id when the catalog carries one; an
+            // ASIN-shaped caller id is not a canonical book id.
+            book_id: book.id.as_deref().filter(|id| !id.is_empty()).unwrap_or_default().to_string(),
             title,
             subtitle,
             authors,

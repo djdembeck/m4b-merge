@@ -544,6 +544,9 @@ impl Job {
     fn base_from_supplied(&self, supplied: &SuppliedInput) -> Result<BookMetadata> {
         Ok(BookMetadata {
             metadata_id: String::new(),
+            // Supplied mode has no canonical catalog book id: the `{book_id}`
+            // token contributes no segment, and `metadata_id` stays empty too.
+            book_id: String::new(),
             title: supplied.title.clone(),
             subtitle: supplied.subtitle.clone(),
             authors: supplied.authors.clone(),
@@ -582,6 +585,16 @@ impl EffectiveJob {
     /// A strict cover-preservation promise is only valid for a single input.
     pub fn preserve_cover_requires_single_input(&self) -> bool {
         matches!(self.cover, CoverPolicy::Preserve)
+    }
+
+    /// The job's effective output template: its `path_format`, or the
+    /// documented default when omitted.
+    pub fn template(&self) -> &str {
+        if self.path_format.is_empty() {
+            crate::path_resolver::DEFAULT_TEMPLATE
+        } else {
+            &self.path_format
+        }
     }
 }
 

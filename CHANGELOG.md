@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file. See [standa
 
 
 ### Added
+- One parsed-template output-path resolver for `--job` runs (`resolver_version`
+  from `--capabilities`): only template separators create directories; a
+  token's value is sanitized as component data so it cannot introduce
+  directories, re-substitute tokens, traverse (`..`), address a drive, or
+  escape `output_root`. Unknown tokens are rejected with the token, its
+  position, and the supported list. The legacy `-p`/`--path-format`
+  string-replacement behavior is unchanged. New tokens: canonical `{book_id}`
+  (distinct from the provider-dependent `{metadata_id}`) and singular/plural
+  first-ordered `{author}`/`{narrator}`.
+- `m4b-merge --capabilities`: machine-readable schema/resolver identity and
+  the full token and field/cover/chapter policy vocabulary, so callers build
+  pickers and validation from the engine instead of their own registry.
 - `--job FILE` processes a book from a versioned JSON job file (schema
   `schema_version: 1`). The job is the single source of truth for the
   metadata base — an explicit catalog id via `input_provider`, or

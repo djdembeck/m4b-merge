@@ -1041,35 +1041,54 @@ impl Processor {
         })
     }
 
-    /// Output path for a job: the job's root plus its template (default
-    /// `{author}/{title}`), sanitized per component like the legacy path.
+    /// Output path for a job: the job's root plus the parsed-template
+    /// resolver's output, with root containment enforced before any write.
     fn determine_job_output_path(
         &self,
         output_root: &std::path::Path,
         effective: &crate::job::EffectiveJob,
     ) -> Result<PathBuf> {
-        let template = if effective.path_format.is_empty() {
-            "{author}/{title}".to_string()
-        } else {
-            effective.path_format.clone()
-        };
-        let formatted = self.format_path(&template, &effective.metadata);
+        let relative = crate::path_resolver::PathResolver::resolve_output(
+            effective.template(),
+            &effective.metadata,
+        )
+        .map_err(|e| crate::job::JobError::Invalid(e.to_string()))?;
+        self.job_output_path_for(output_root, &relative)
+    }
 
-        let path_components: Vec<String> = formatted
-            .split('/')
-            .map(sanitize_filename::sanitize)
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let mut output_path = output_root.to_path_buf();
-        for component in &path_components[..path_components.len().saturating_sub(1)] {
-            output_path = output_path.join(component);
+    /// Join a resolved relative path to the root, guaranteeing containment.
+    ///
+    /// The resolver guarantees every component is non-empty, separator-free,
+    /// and free of leading `.`/`:` characters, so lexical joining cannot
+    /// escape; the canonical containment check is the second, structural
+    /// line of defense.
+    fn job_output_path_for(
+        &self,
+        output_root: &std::path::Path,
+        relative: &str,
+    ) -> Result<PathBuf> {
+        let canonical_root = std::fs::canonicalize(output_root).or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                std::fs::create_dir_all(output_root)
+                    .and_then(|_| std::fs::canonicalize(output_root))
+                    .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))
+            } else {
+                Err(ProcessorError::OutputDirCreation(e.to_string()))
+            }
+        })?;
+        let mut candidate = canonical_root.clone();
+        for component in relative.split('/') {
+            if !component.is_empty() {
+                candidate = candidate.join(component);
+            }
         }
-        let filename = path_components
-            .last()
-            .map(|s| format!("{}.m4b", s))
-            .unwrap_or_else(|| "output.m4b".to_string());
-        Ok(output_path.join(filename))
+        if !candidate.starts_with(&canonical_root) {
+            return Err(ProcessorError::Job(crate::job::JobError::Invalid(format!(
+                "resolved output path escapes output root: {}",
+                candidate.display()
+            ))));
+        }
+        Ok(candidate)
     }
 
     /// Remove a merged output that failed post-merge validation.

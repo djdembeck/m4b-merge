@@ -358,6 +358,9 @@ impl ApiBookResponse {
 
         BookMetadata {
             metadata_id: self.asin,
+            // Audnexus identifies books by ASIN; there is no canonical
+            // AudiobookDB book id to carry.
+            book_id: String::new(),
             title: self.title,
             subtitle: self.subtitle,
             authors: self.authors.into_iter().map(|a| a.name).collect(),

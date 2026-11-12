@@ -73,6 +73,11 @@ struct Args {
     /// Check FFmpeg installation and display version information
     #[arg(long = "check-ffmpeg")]
     pub check_ffmpeg: bool,
+
+    /// Print the machine-readable schema/resolver identity and supported
+    /// token/field-policy capabilities as JSON, then exit.
+    #[arg(long = "capabilities")]
+    pub capabilities: bool,
 }
 
 /// Console progress handler that prints to stdout
@@ -104,6 +109,12 @@ impl ProgressHandler for ConsoleProgressHandler {
 async fn main() {
     let matches = Args::command().try_get_matches().unwrap_or_else(|e| e.exit());
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    // --capabilities is self-contained: no FFmpeg, no job, no network.
+    if args.capabilities {
+        println!("{}", m4b_merge::capabilities::Capabilities::build().to_json());
+        std::process::exit(0);
+    }
 
     // Initialize tracing with the requested log level
     let subscriber = tracing_subscriber::fmt()
