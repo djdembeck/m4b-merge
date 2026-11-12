@@ -537,8 +537,7 @@ impl Job {
         }
     }
 
-    /// The metadata source provider mode builds (`None` in supplied mode,
-    /// which performs no catalog request).
+    /// The metadata source provider mode builds (`None` in supplied mode).
     pub fn metadata_source(
         &self,
         config: &crate::config::Config,
@@ -567,9 +566,9 @@ impl Job {
     }
 
     /// Non-mutating preview: resolve the effective metadata exactly as
-    /// execution does and the same parsed template with the same resolver,
-    /// returning the exact sanitized relative path plus the effective
-    /// values. No directories, media, or reservations; no success promised.
+    /// execution does and the same parsed template, returning the exact
+    /// sanitized relative path plus the effective values. No directories,
+    /// media, or reservations; no success promised.
     pub async fn preview(&self, config: &crate::config::Config) -> Result<JobPreview> {
         let source = self.metadata_source(config)?;
         let effective = self.resolve(source.as_ref()).await?;
@@ -614,24 +613,21 @@ impl Job {
 }
 
 /// A non-mutating preview of a job's resolved output path and effective
-/// metadata; `relative_path` is the exact sanitized relative path execution
-/// produces from the same effective metadata, inside `output_root`.
+/// metadata; `relative_path` is the exact sanitized relative path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JobPreview {
     pub schema_version: u32,
     pub resolver_version: &'static str,
     /// The effective template that was resolved.
     pub path_format: String,
-    /// The exact sanitized relative output path inside the job's `output_root`
-    /// (including the output extension).
+    /// The exact sanitized relative output path inside the job's `output_root`.
     pub relative_path: String,
     /// The effective (base + overrides) metadata the path resolved from.
     pub metadata: crate::metadata::BookMetadata,
 }
 
 /// Machine-readable execution result: every produced output and sidecar,
-/// per-group identity and outcome, diagnosed errors. Paths are relative to
-/// the job's `output_root`; no absolute-path fallback.
+/// per-group identity and outcome, diagnosed errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JobResult {
     pub schema_version: u32,
@@ -639,8 +635,7 @@ pub struct JobResult {
     pub resolver_version: &'static str,
     /// `succeeded` when every group succeeded, `partial_failure` when some did not, `failed` when none did.
     pub status: &'static str,
-    /// The diagnosed error when the run failed before producing any group
-    /// outcome. Emitted with empty `groups`.
+    /// The diagnosed error when the run failed before producing any group outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub groups: Vec<GroupResult>,
@@ -652,8 +647,7 @@ impl JobResult {
         self.status == "succeeded"
     }
 
-    /// A diagnosed failure before any group ran; a machine run always
-    /// emits a parseable document.
+    /// A diagnosed failure before any group ran.
     pub fn setup_failed(error: String) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
@@ -665,8 +659,7 @@ impl JobResult {
     }
 
     /// Build the machine result: every group in run order with its
-    /// artifacts and diagnosed error; the status never claims success for a
-    /// failed group.
+    /// artifacts and diagnosed error; the status never claims success.
     pub fn from_run(job_schema_version: u32, run: &crate::processor::RunOutcome) -> Self {
         let groups = run
             .outcomes
@@ -709,8 +702,7 @@ pub struct GroupResult {
     /// `output_root` and validated to lie inside it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<Artifact>,
-    /// `true` when the group's source files were moved to the completed
-    /// directory.
+    /// `true` when the group's sources were moved to the completed directory.
     pub files_moved: bool,
     /// A diagnosed error when the group failed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1100,7 +1092,8 @@ mod tests {
 
     #[test]
     fn artifact_validates_containment() {
-        let root = std::path::PathBuf::from("/library/book");
+        // Platform-native absolute root: `/...` is not absolute on Windows.
+        let root = std::env::temp_dir().join("m4b-test-root");
         // Inside the root: the relative path is kept.
         let inside = root.join("Author/Book.m4b");
         let art = Artifact::from_absolute(&root, &inside).unwrap();
@@ -1110,11 +1103,11 @@ mod tests {
         let sidecar = root.join("Author/Book.chapters.txt");
         assert_eq!(Artifact::from_absolute(&root, &sidecar).unwrap().kind, "sidecar");
         // Outside the root: refused, no absolute-path fallback.
-        let outside = std::path::PathBuf::from("/elsewhere/Book.m4b");
+        let outside = std::env::temp_dir().join("m4b-elsewhere/Book.m4b");
         assert!(Artifact::from_absolute(&root, &outside).is_none());
         // A sibling prefix that merely shares text must not count:
-        // /library/book-2 is not inside /library/book.
-        let sibling = std::path::PathBuf::from("/library/book-2/Book.m4b");
+        // <tmp>/m4b-test-root-2 is not inside <tmp>/m4b-test-root.
+        let sibling = std::env::temp_dir().join("m4b-test-root-2/Book.m4b");
         assert!(Artifact::from_absolute(&root, &sibling).is_none());
         // Relative input is refused.
         assert!(Artifact::from_absolute(&root, std::path::Path::new("Book.m4b")).is_none());
@@ -1131,18 +1124,16 @@ mod tests {
             outcome: if ok { GroupOutcome::Succeeded } else { GroupOutcome::Failed },
             error: (!ok).then(|| err.to_string()),
         };
-        // The `results` count is irrelevant to the status: it is driven by
-        // the group outcomes (zero = failed, one = partial).
+        // Status is driven by the group outcomes, not the results count.
+        let result = || crate::processor::ProcessingResult {
+            input_files: Vec::new(),
+            output_file: "g.m4b".into(),
+            metadata_applied: true,
+            files_moved: false,
+            artifacts: Vec::new(),
+        };
         let run = |complete: bool, n: usize, outcomes: Vec<GroupOutcomes>| RunOutcome {
-            results: (0..n)
-                .map(|_| crate::processor::ProcessingResult {
-                    input_files: Vec::new(),
-                    output_file: "g.m4b".into(),
-                    metadata_applied: true,
-                    files_moved: false,
-                    artifacts: Vec::new(),
-                })
-                .collect(),
+            results: vec![result(); n],
             outcomes,
             complete,
             detail: String::new(),

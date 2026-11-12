@@ -214,13 +214,12 @@ It resolves the effective metadata exactly as execution does (base +
 overrides; a supplied job performs **no catalog request**) and the same
 parsed template with the same resolver, printing the exact sanitized
 relative output path (plus the effective metadata) as JSON. It creates no
-output or completed directories, writes no media, and reserves no names, and
-makes no execution success promise: collisions, media errors, and filesystem
-failures are execution-time. The previewed path is the path execution
-produces, provided the metadata is the same — so a **provider** preview that
-refetches at execution is **advisory** unless the caller captures the
-supplied resolved metadata (supplied mode has no fetch, so its preview is
-exact).
+directories, writes no media, reserves no names, and makes no success
+promise: collisions and media errors are execution-time. The previewed path
+is the path execution produces, provided the metadata is the same — a
+**provider** preview that refetches at execution is **advisory** unless the
+caller captures the supplied resolved metadata (supplied mode has no fetch,
+so its preview is exact).
 
 #### Machine results (`--machine`)
 
@@ -245,10 +244,10 @@ Every produced output and sidecar is enumerated; artifact paths are
 absolute-path fallback). `input_files` are the job's input paths, not
 artifacts. `status` never claims success for a failed group; a partial or
 total failure exits 1 after the document is printed, and setup/run-level
-failures (missing FFmpeg, discovery failure) emit a `failed` document with a
-top-level `error` and empty `groups`. A **job run is one book**: one group
-named `"job"`, so `partial_failure` cannot occur from `--machine --job`; it
-is reserved for multi-group library consumers of `Processor::run`.
+failures emit a `failed` document with a top-level `error` and empty
+`groups`. A **job run is one book**: one group named `"job"`, so
+`partial_failure` cannot occur from `--machine --job`; it is reserved for
+multi-group library consumers of `Processor::run`.
 
 #### No-clobber
 
@@ -258,13 +257,12 @@ exists-then-rename race, and no overwrite rename. A pre-existing file or
 directory at the path fails the run with a diagnosed collision, untouched; a
 failed group leaves no falsely successful partial output, removes its claimed
 placeholder on merge failure, and never destroys its source files. Created
-parent directories are re-validated against the output root at claim time,
-and the produced file is re-validated after the merge: it must be a regular,
-non-empty file inside the canonical output root, so a swapped symlinked
-parent cannot redirect the accepted output outside the root.
- This protects
-the job's staging area only; publishing into a shared destination
-still needs the caller's race-safe publication.
+parent directories are re-validated against the output root at claim time and
+again immediately before the merge, and the produced file is re-validated
+after it: it must be a regular, non-empty file inside the canonical output
+root, so a swapped symlinked parent cannot redirect the accepted output
+outside the root. This protects the job's staging area only; publishing into
+a shared destination still needs the caller's race-safe publication.
 
 ### Verify Environment
 

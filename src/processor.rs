@@ -90,8 +90,7 @@ pub enum ProcessorError {
 }
 
 /// The full outcome of a run: the succeeded results plus every group's
-/// recorded outcome (successful and failed), so a machine result can
-/// enumerate all groups without guessing.
+/// recorded outcome (successful and failed).
 #[derive(Debug, Clone)]
 pub struct RunOutcome {
     pub results: Vec<ProcessingResult>,
@@ -102,13 +101,12 @@ pub struct RunOutcome {
     pub detail: String,
 }
 
-/// A group's outcome: identity, artifacts, inputs, and the diagnosed
-/// error, so nothing is ever undisclosed.
+/// A group's outcome: identity, artifacts, inputs, and diagnosed error.
 #[derive(Debug, Clone)]
 pub struct GroupOutcomes {
     pub group: String,
     /// Every produced output and sidecar, relative to the job's
-    /// `output_root`; empty when the group failed before producing anything.
+    /// `output_root`; empty when the group failed before producing any.
     pub artifacts: Vec<crate::job::Artifact>,
     pub input_files: Vec<PathBuf>,
     pub files_moved: bool,
@@ -351,8 +349,8 @@ impl Processor {
         Ok(run.results)
     }
 
-    /// The full run outcome, the single entry point the `--machine` flow
-    /// uses; `process*` wrap it.
+    /// The full run outcome; the single entry point the `--machine` flow
+    /// uses, and what `process*` wrap.
     pub async fn run(
         &self,
         inputs: Vec<PathBuf>,
@@ -456,27 +454,20 @@ impl Processor {
                 Err(e) => {
                     warn!("Group '{}' failed: {}", group.name, e);
                     // Machine output never carries an absolute path: the
-                    // job's output root is relativized in every diagnosed
-                    // group error at this boundary (canonical form when
-                    // relative, the literal root when absolute).
+                    // job's output root is relativized at this boundary.
                     let diagnosed = self
                         .job
                         .as_ref()
                         .map(|j| {
                             let msg = e.to_string();
-                            let root = if j.output_root.is_absolute() {
-                                j.output_root.clone()
-                            } else {
-                                std::fs::canonicalize(&j.output_root)
-                                    .unwrap_or_else(|_| j.output_root.clone())
-                            };
-                            let root_str = root.to_string_lossy().into_owned();
-                            msg.replace(&root_str, "output_root")
+                            let canonical = std::fs::canonicalize(&j.output_root)
+                                .unwrap_or_else(|_| j.output_root.clone());
+                            let canonical_str = canonical.to_string_lossy().into_owned();
+                            msg.replace(&canonical_str, "output_root")
                         })
                         .unwrap_or_else(|| e.to_string());
                     failed_groups.push((group.name.clone(), diagnosed.clone()));
-                    // A rejected merged output is discarded before the group
-                    // fails; the diagnosed error carries the truth.
+                    // A rejected merged output is discarded before the group fails.
                     outcomes.push(GroupOutcomes {
                         group: group.name.clone(),
                         artifacts: Vec::new(),
@@ -923,6 +914,10 @@ impl Processor {
         // Engine-side no-clobber: claim with `O_CREAT|O_EXCL` immediately
         // before the write; a claim failure leaves the existing file intact.
         self.claim_output_name(&output_path)?;
+        // A parent swapped for a symlink between claim and merge would let
+        // the merge write outside the root; re-check before the merge opens
+        // anything.
+        self.recheck_claimed_placeholder(&output_path)?;
 
         // Stage 3: Merge
         progress_handler.on_progress(ProcessingProgress {
@@ -1248,13 +1243,39 @@ impl Processor {
         Ok(candidate)
     }
 
+    fn recheck_claimed_placeholder(&self, output_path: &std::path::Path) -> Result<()> {
+        let Some(job) = self.job.as_ref() else {
+            return Ok(());
+        };
+        let Some(parent) = output_path.parent() else {
+            return Ok(());
+        };
+        if self.parent_escapes_root(job, parent)? {
+            Self::discard_output(output_path);
+            return Err(self.output_root_escape(output_path));
+        }
+        Ok(())
+    }
+
+    /// `true` when `parent`'s canonical location is not inside the job's
+    /// canonical output root (a swapped-in symlink carried it outside).
+    fn parent_escapes_root(&self, job: &crate::job::Job, parent: &std::path::Path) -> Result<bool> {
+        let root =
+            std::fs::canonicalize(&job.output_root).unwrap_or_else(|_| job.output_root.clone());
+        let canonical_parent = std::fs::canonicalize(parent).map_err(|e| {
+            ProcessorError::OutputDirCreation(format!(
+                "Failed to canonicalize output directory {}: {e}",
+                parent.display()
+            ))
+        })?;
+        Ok(!canonical_parent.starts_with(&root))
+    }
+
     /// Claim the output file name before any write: `O_CREAT|O_EXCL`
     /// atomically reserves the exact path, so a pre-existing file or
     /// directory (or a concurrent claim) fails with a diagnosed collision —
-    /// nothing is written, renamed, or suffixed. After creating parent
-    /// directories, their canonical location is re-validated against the
-    /// output root so a swapped-in symlink cannot carry the write outside
-    /// the root.
+    /// nothing is written, renamed, or suffixed. Created parent directories
+    /// are re-validated against the output root.
     fn claim_output_name(&self, output_path: &std::path::Path) -> Result<()> {
         // Job-mode only: the claim runs inside a job run.
         let job = self.job.as_ref().ok_or_else(|| {
@@ -1272,15 +1293,7 @@ impl Processor {
                     parent.display()
                 ))
             })?;
-            let root =
-                std::fs::canonicalize(&job.output_root).unwrap_or_else(|_| job.output_root.clone());
-            let canonical_parent = std::fs::canonicalize(parent).map_err(|e| {
-                ProcessorError::OutputDirCreation(format!(
-                    "Failed to canonicalize output directory {}: {e}",
-                    parent.display()
-                ))
-            })?;
-            if !canonical_parent.starts_with(&root) {
+            if self.parent_escapes_root(job, parent)? {
                 return Err(ProcessorError::OutputDirCreation(format!(
                     "Output directory {} escapes the job output root after creation; refusing",
                     parent.display()
@@ -1301,13 +1314,10 @@ impl Processor {
         }
     }
 
-    /// Bind the produced output to the validated root after the merge. The
-    /// merge writes by path, so the produced file is re-resolved with
-    /// [`std::fs::canonicalize`], which follows any parent swapped for a
-    /// symlink; the resolved location must be a regular file inside the
-    /// canonical output root and not the untouched zero-byte claim
-    /// placeholder — a merge redirected through a swapped parent, even one
-    /// restored before this check, leaves the claimed file empty. Any
+    /// Bind the produced output to the validated root after the merge: the
+    /// produced file must be a regular file inside the canonical output root
+    /// and not the untouched zero-byte claim placeholder — a redirected
+    /// merge, even one restored before this check, leaves it empty. Any
     /// mismatch fails the group and discards the produced file.
     fn verify_output_in_root(&self, output_path: &std::path::Path) -> Result<()> {
         let job = self.job.as_ref().ok_or_else(|| {
@@ -1352,9 +1362,7 @@ impl Processor {
     }
 
     /// The produced artifacts of a result, relative to the job's
-    /// `output_root`. Job mode only: the machine result requires root
-    /// containment and has no absolute-path fallback, so a produced path
-    /// that is not inside the canonical root is not emitted.
+    /// `output_root`; a produced path outside the root is not emitted.
     fn artifacts_for_result(&self, result: &ProcessingResult) -> Vec<crate::job::Artifact> {
         let Some(job) = &self.job else {
             return Vec::new();
@@ -2146,7 +2154,7 @@ mod tests {
         let preview = job.preview(&config).await.unwrap();
         assert_eq!(preview.relative_path, "PA/Parity - SS (2019).m4b");
         assert!(!output_root.exists(), "preview created nothing");
-        // Execution: the artifact is the previewed relative path, exactly.
+        // Execution produces the previewed relative path, exactly.
         let processor = Processor::for_job(job, config.clone()).unwrap();
         let run = processor.run(vec![input.clone()], &NoOpProgressHandler).await.unwrap();
         assert!(run.complete, "run must complete");

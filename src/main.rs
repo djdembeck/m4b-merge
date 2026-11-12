@@ -71,13 +71,13 @@ struct Args {
     pub dry_run: bool,
 
     /// Non-mutating job preview: print the exact sanitized relative output
-    /// path (plus effective values) as JSON from the same resolver and metadata
-    /// as execution. Job mode only; exclusive with `--machine`.
+    /// path (plus effective values) as JSON from the same resolver and
+    /// metadata as execution. Job mode only; exclusive with `--machine`.
     #[arg(long = "job-preview")]
     pub job_preview: bool,
 
-    /// Machine-readable execution results: stable JSON on stdout only (logs
-    /// and progress go to stderr), enumerating every produced output and
+    /// Machine-readable execution results: stable JSON on stdout only
+    /// (logs/progress to stderr), enumerating every produced output and
     /// sidecar. Job mode only; exits nonzero on failure; exclusive with
     /// `--job-preview`.
     #[arg(long = "machine")]
@@ -102,8 +102,7 @@ impl ProgressHandler for ConsoleProgressHandler {
     }
 }
 
-/// Progress handler for `--machine` mode: every line goes to stderr so the
-/// stdout stream stays a single clean JSON document.
+/// Progress handler for `--machine` mode: every line goes to stderr.
 struct StderrProgressHandler;
 
 impl ProgressHandler for StderrProgressHandler {
@@ -123,6 +122,13 @@ fn write_progress(progress: &ProcessingProgress, write: impl Fn(&str)) {
     }
 }
 
+/// Redacts the caller's job-file path from machine diagnostics (no
+/// absolute paths in machine output).
+fn redact_job_path(job_path: &std::path::Path, diagnostic: &str) -> String {
+    let path = job_path.to_string_lossy();
+    diagnostic.replace(path.as_ref(), "job file")
+}
+
 /// Print the machine result to stdout and exit: 0 when every group
 /// succeeded, 1 otherwise.
 fn machine_exit(result: &m4b_merge::job::JobResult) -> ! {
@@ -130,8 +136,7 @@ fn machine_exit(result: &m4b_merge::job::JobResult) -> ! {
     std::process::exit(if result.all_succeeded() { 0 } else { 1 });
 }
 
-/// Tracing writer: stderr in `--machine`/`--job-preview` mode (stdout must
-/// stay a single clean JSON document), stdout elsewhere.
+/// Tracing writer: stderr in `--machine`/`--job-preview` mode, stdout elsewhere.
 #[derive(Clone)]
 struct LogWriter {
     stderr: bool,
@@ -155,9 +160,8 @@ async fn main() {
         std::process::exit(0);
     }
 
-    // Initialize tracing with the requested log level. In `--machine` and
-    // `--job-preview` mode the stdout stream is a single JSON document, so
-    // every log line goes to stderr.
+    // Initialize tracing with the requested log level; in `--machine`/
+    // `--job-preview` mode every log line goes to stderr.
     let builder = tracing_subscriber::fmt().with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&args.log_level)),
@@ -189,11 +193,12 @@ async fn main() {
         match m4b_merge::job::Job::load(job_path) {
             Ok(job) => Some(job),
             Err(e) => {
-                // `--machine` promises a parseable document on every failure path.
+                // `--machine` promises a parseable, path-free document on
+                // every failure path.
                 if args.machine {
                     machine_exit(&m4b_merge::job::JobResult::setup_failed(format!(
-                        "failed to load job {}: {e}",
-                        job_path.display()
+                        "failed to load job file: {}",
+                        redact_job_path(job_path, &e.to_string())
                     )));
                 }
                 eprintln!("Error: {}", e);
