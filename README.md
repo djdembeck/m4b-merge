@@ -263,7 +263,12 @@ The output path is generated from a template. Two template conventions exist:
 | `{year}`     | Release year                    |
 | `{genre}`      | First genre                     |
 | `{metadata_id}` | Provider-dependent looked-up ID (ASIN for audnexus, resolved catalog ID for audiobookdb); empty in supplied mode |
-| `{book_id}`   | Canonical catalog book ID from the resolved metadata; present in provider mode, empty in supplied mode. Distinct from `{metadata_id}` |
+| `{book_id}`   | Canonical catalog book ID from the resolved metadata; present in provider mode, empty in supplied mode. Distinct from `{metadata_id}`; job-resolver-only |
+
+In the table above, `{book_id}` is a **job-resolver-only** token: the legacy
+CLI `-p`/`--path-format` template does not substitute it (an unmatched
+placeholder is left as literal text by the legacy path). All other tokens are
+shared by both conventions.
 
 A token whose value is missing or empty does not contribute a path segment
 (empty segments are stripped). The only exceptions are `{author}`,

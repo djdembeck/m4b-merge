@@ -248,7 +248,7 @@ fn sanitize_component(raw: &str) -> String {
     // kept. Leading dots are trimmed so a value cannot become a hidden
     // entry.
     let no_dots = remove_dot_runs(&sanitized);
-    no_dots.trim_start_matches(':').trim_end().to_string()
+    no_dots.trim_start_matches(['.', ':']).trim_end().to_string()
 }
 
 /// Remove `..` runs from a string, keeping single dots.
@@ -447,6 +447,21 @@ mod tests {
         n.title = "..".to_string();
         let result = PathResolver::resolve("{author}/{title}", &n).unwrap();
         assert_eq!(result, "The Author");
+    }
+
+    #[test]
+    fn leading_dots_cannot_make_hidden_entries() {
+        // A value that begins with dots must not survive as a hidden
+        // (dot-prefixed) entry, in either a directory component or the
+        // file-name component.
+        let mut d = meta();
+        d.authors = vec![".hidden".to_string()];
+        let result = PathResolver::resolve("{author}/{title}", &d).unwrap();
+        assert_eq!(result, "hidden/The Book");
+        let mut f = meta();
+        f.title = ".hidden".to_string();
+        let result = PathResolver::resolve("{author}/{title}", &f).unwrap();
+        assert_eq!(result, "The Author/hidden");
     }
 
     #[test]

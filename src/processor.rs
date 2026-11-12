@@ -1060,8 +1060,11 @@ impl Processor {
     ///
     /// The resolver guarantees every component is non-empty, separator-free,
     /// and free of leading `.`/`:` characters, so lexical joining cannot
-    /// escape; the canonical containment check is the second, structural
-    /// line of defense.
+    /// escape. On top of that, every intermediate component that already
+    /// exists is canonicalized and required to stay under the canonical
+    /// root: a symlinked directory (or a nested symlink) cannot point the
+    /// output outside the job's output area, and a symlinked final entry is
+    /// rejected so the output file is never written through a link.
     fn job_output_path_for(
         &self,
         output_root: &std::path::Path,
@@ -1076,17 +1079,33 @@ impl Processor {
                 Err(ProcessorError::OutputDirCreation(e.to_string()))
             }
         })?;
-        let mut candidate = canonical_root.clone();
-        for component in relative.split('/') {
-            if !component.is_empty() {
-                candidate = candidate.join(component);
+        let components: Vec<&str> = relative.split('/').filter(|c| !c.is_empty()).collect();
+        // Walk every directory component; the last is the file name.
+        let escape = |component: &str, via: &std::path::Path| {
+            ProcessorError::Job(crate::job::JobError::Invalid(format!(
+                "resolved output path escapes output root via component {component:?}: {}",
+                via.display()
+            )))
+        };
+        let mut dir = canonical_root.clone();
+        for component in &components[..components.len().saturating_sub(1)] {
+            dir = dir.join(component);
+            if dir.exists() {
+                let resolved = std::fs::canonicalize(&dir)
+                    .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))?;
+                if !resolved.starts_with(&canonical_root) {
+                    return Err(escape(component, &dir));
+                }
+                dir = resolved;
             }
         }
-        if !candidate.starts_with(&canonical_root) {
-            return Err(ProcessorError::Job(crate::job::JobError::Invalid(format!(
-                "resolved output path escapes output root: {}",
-                candidate.display()
-            ))));
+        let candidate = dir.join(components.last().expect("non-empty relative path"));
+        // A symlinked final entry would let the output be written through a
+        // link that points outside the root; reject it.
+        if let Ok(meta) = std::fs::symlink_metadata(&candidate) {
+            if meta.file_type().is_symlink() {
+                return Err(escape(components.last().unwrap(), &candidate));
+            }
         }
         Ok(candidate)
     }
@@ -1387,6 +1406,12 @@ mod tests {
             false,
             None,
         )
+    }
+
+    /// A processor for pure path-resolution tests: the (unused) API URL
+    /// points nowhere, so construction needs no network.
+    fn path_test_processor(temp_dir: &TempDir) -> Processor {
+        Processor::new(api_test_config(temp_dir, "http://127.0.0.1:1")).unwrap()
     }
 
     fn create_test_audio_file(dir: &TempDir, name: &str, content: &[u8]) -> PathBuf {
@@ -2592,5 +2617,53 @@ mod tests {
             "expected the multi-input chapter-preserve rejection, got {err}"
         );
         assert!(!output_root.join("A/P.m4b").exists());
+    }
+
+    #[test]
+    fn job_output_path_stays_inside_root_for_normal_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = path_test_processor(&temp_dir);
+        let root = temp_dir.path().join("output");
+        let path = processor.job_output_path_for(&root, "Author/Book.m4b").unwrap();
+        assert!(path.starts_with(std::fs::canonicalize(&root).unwrap()));
+        assert!(path.file_name().unwrap() == "Book.m4b");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn job_output_path_rejects_a_symlinked_directory_component() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = path_test_processor(&temp_dir);
+        let root = temp_dir.path().join("output");
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("Author")).unwrap();
+        let err = processor.job_output_path_for(&root, "Author/Book.m4b").unwrap_err();
+        assert!(
+            err.to_string().contains("escapes output root"),
+            "symlinked directory must be rejected, got {err}"
+        );
+        // Nothing may be written outside the root.
+        assert!(!outside.join("Book.m4b").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn job_output_path_rejects_a_symlinked_final_entry() {
+        let temp_dir = TempDir::new().unwrap();
+        let processor = path_test_processor(&temp_dir);
+        let root = temp_dir.path().join("output");
+        let outside = temp_dir.path().join("outside.m4b");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, b"existing").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("Link.m4b")).unwrap();
+        let err = processor.job_output_path_for(&root, "Link.m4b").unwrap_err();
+        assert!(
+            err.to_string().contains("escapes output root"),
+            "symlinked final entry must be rejected, got {err}"
+        );
+        // The target file must be untouched.
+        assert_eq!(std::fs::read(&outside).unwrap(), b"existing");
     }
 }
