@@ -920,6 +920,18 @@ impl Tagger {
     /// bounded to [`Self::LOCAL_COVER_MAX_BYTES`]: a file that grows past the
     /// limit between the size check and the read is refused (no unbounded
     /// `fs::read` after a size-only check).
+    ///
+    /// Residual risk and trust boundary: the canonicalize-then-open sequence
+    /// has a TOCTOU window. A concurrent writer that can modify files inside
+    /// the asset area can swap the target (replace the file, or a symlink that
+    /// a re-canonicalization would resolve) between [`Path::canonicalize`] and
+    /// [`std::fs::File::open`], so the bytes read are attacker-chosen —
+    /// confined to the asset area and bounded to the size limit, but not
+    /// necessarily the file that was canonicalized. The implemented guarantees
+    /// are static containment (the resolved path stays under the asset root)
+    /// plus the size-bounded read. An atomic root-relative open (open the
+    /// parent directory and resolve relative to it, then verify the opened
+    /// inode) is a documented follow-up.
     pub fn embed_cover_local<P: AsRef<Path>, A: AsRef<Path>>(
         &self,
         file_path: P,
