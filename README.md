@@ -232,42 +232,34 @@ m4b-merge --job job.json --machine
 ```
 
 Stable JSON on **stdout only** — all logs and progress go to stderr, so the
-stdout document parses cleanly on success and on failure. The document
-enumerates **every** produced output and sidecar, with per-group identity,
-outcome, and diagnosed errors:
+document parses cleanly on success and on failure:
 
 ```json
 {
   "status": "succeeded | partial_failure | failed",
   "groups": [
     {
-      "group": "job",
-      "outcome": "succeeded | failed",
-      "input_files": ["track1.m4b"],
+      "group": "job", "outcome": "succeeded",
+      "input_files": ["track1.m4b"], "files_moved": false,
       "artifacts": [
         { "relative_path": "Author/Title.m4b", "kind": "audio", "exists": true },
         { "relative_path": "Author/Title.chapters.txt", "kind": "sidecar", "exists": true }
-      ],
-      "files_moved": true,
-      "error": null
+      ]
     }
   ]
 }
 ```
 
-Artifact paths are **relative to the job's `output_root`** and validated to
-lie inside it — there is no absolute-path fallback, so a caller can
-contain-check every artifact against its own job staging tree.
-`input_files` are the paths the job's inputs resolved to (as written in the
-job file), not artifacts. `status`
-never claims success for a group that failed, and a partial or total failure
-exits nonzero (1) after the document is printed. Setup and run-level
-failures (e.g. FFmpeg missing, discovery failure) emit a `failed` document
-with a top-level `error` field and an empty `groups` list, so the stream
-always parses. A **job run processes exactly one book**: all discovered
-files form a single group named `"job"`, so `partial_failure` (some groups
-succeeded, some failed) cannot occur from `--machine --job`; it is part of
-the schema for multi-group library consumers of `Processor::run`.
+Every produced output and sidecar is enumerated; artifact paths are
+**relative to the job's `output_root`** and validated to lie inside it —
+no absolute-path fallback. `input_files` are the job's input paths, not
+artifacts. `status` never claims success for a failed group; a partial or
+total failure exits 1 after the document is printed, and setup/run-level
+failures (missing FFmpeg, discovery failure) emit a `failed` document with
+a top-level `error` and empty `groups`. A **job run is one book**: all
+discovered files form a single group named `"job"`, so `partial_failure`
+cannot occur from `--machine --job`; it is reserved for multi-group
+library consumers of `Processor::run`.
 
 #### No-clobber
 
