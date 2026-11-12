@@ -261,7 +261,13 @@ contain-check every artifact against its own job staging tree.
 `input_files` are the paths the job's inputs resolved to (as written in the
 job file), not artifacts. `status`
 never claims success for a group that failed, and a partial or total failure
-exits nonzero (1) after the document is printed.
+exits nonzero (1) after the document is printed. Setup and run-level
+failures (e.g. FFmpeg missing, discovery failure) emit a `failed` document
+with a top-level `error` field and an empty `groups` list, so the stream
+always parses. A **job run processes exactly one book**: all discovered
+files form a single group named `"job"`, so `partial_failure` (some groups
+succeeded, some failed) cannot occur from `--machine --job`; it is part of
+the schema for multi-group library consumers of `Processor::run`.
 
 #### No-clobber
 

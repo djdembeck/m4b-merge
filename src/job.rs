@@ -679,6 +679,10 @@ pub struct JobResult {
     /// `succeeded` when every group succeeded, `partial_failure` when some
     /// did and some did not, `failed` when none did.
     pub status: &'static str,
+    /// The diagnosed error when the run failed before producing any group
+    /// outcome (setup, discovery, or an unrecoverable run error).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub groups: Vec<GroupResult>,
 }
 
@@ -688,9 +692,17 @@ impl JobResult {
         self.status == "succeeded"
     }
 
+    /// A diagnosed failure before any group ran (e.g. processor setup or
+    /// discovery), so a machine run always emits a parseable document.
+    pub fn setup_failed(error: String) -> Self {
+        Self { status: "failed", groups: Vec::new(), error: Some(error) }
+    }
+
     /// Build the machine result from a run outcome: every group in run order
     /// with its artifacts and diagnosed error; the status never claims
-    /// success for a failed group.
+    /// success for a failed group. A CLI job run is a single book (one
+    /// group), so `partial_failure` arises only for multi-group library
+    /// consumers of `Processor::run`.
     pub fn from_run(run: &crate::processor::RunOutcome) -> Self {
         let groups = run
             .outcomes
@@ -711,7 +723,7 @@ impl JobResult {
         } else {
             "partial_failure"
         };
-        Self { status, groups }
+        Self { status, groups, error: None }
     }
 }
 

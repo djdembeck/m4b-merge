@@ -127,6 +127,13 @@ fn write_progress(progress: &ProcessingProgress, write: impl Fn(&str)) {
     }
 }
 
+/// Print the machine result to stdout and exit: 0 when every group
+/// succeeded, 1 otherwise. Never returns.
+fn machine_exit(result: &m4b_merge::job::JobResult) -> ! {
+    println!("{}", serde_json::to_string_pretty(result).expect("result serializes"));
+    std::process::exit(if result.all_succeeded() { 0 } else { 1 });
+}
+
 /// Tracing writer: stderr in `--machine`/`--job-preview` mode (stdout must
 /// stay a single clean JSON document), stdout elsewhere.
 #[derive(Clone)]
@@ -205,6 +212,13 @@ async fn main() {
         Some(job) => job.inputs.clone(),
         None => args.inputs.clone(),
     };
+
+    // `--machine --dry-run` is rejected up front: the dry-run early exit
+    // below would otherwise succeed without emitting any machine JSON.
+    if args.machine && args.dry_run {
+        eprintln!("Error: --machine is a real run; drop --dry-run.");
+        std::process::exit(1);
+    }
 
     // Early dry-run: print summary and exit without needing FFmpeg or output dir
     if args.dry_run {
@@ -300,12 +314,6 @@ async fn main() {
             eprintln!("Error: --job-preview and --machine are mutually exclusive.");
             std::process::exit(1);
         }
-        if args.machine && args.dry_run {
-            // A dry run produces no artifacts; emitting an empty
-            // `succeeded` document would be a false claim.
-            eprintln!("Error: --machine is a real run; drop --dry-run.");
-            std::process::exit(1);
-        }
         if args.job_preview {
             // Non-mutating: resolves the effective metadata (a supplied job
             // needs no catalog) and the exact sanitized relative path via the
@@ -322,31 +330,24 @@ async fn main() {
             std::process::exit(0);
         }
         // --machine: stable JSON on stdout only; progress goes to stderr via
-        // StderrProgressHandler. A partial or total failure exits nonzero
-        // after the result is printed, with the truth in `status`.
-        let processor_result = Processor::for_job(job.clone(), config);
-        let processor = match processor_result {
+        // StderrProgressHandler. Every failure path — setup, the run itself,
+        // and any group failure — prints a truthful document before the
+        // nonzero exit.
+        let processor = match Processor::for_job(job.clone(), config) {
             Ok(processor) => processor,
             Err(e) => {
                 error!("Failed to create processor: {}", e);
-                eprintln!("Error: Failed to initialize: {}", e);
-                std::process::exit(1);
+                machine_exit(&m4b_merge::job::JobResult::setup_failed(e.to_string()));
             }
         };
         let run = match processor.run(job.inputs.clone(), &StderrProgressHandler).await {
             Ok(run) => run,
             Err(e) => {
                 error!("Processing failed: {}", e);
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
+                machine_exit(&m4b_merge::job::JobResult::setup_failed(e.to_string()));
             }
         };
-        let result = m4b_merge::job::JobResult::from_run(&run);
-        println!("{}", serde_json::to_string_pretty(&result).expect("result serializes"));
-        if !result.all_succeeded() {
-            std::process::exit(1);
-        }
-        std::process::exit(0);
+        machine_exit(&m4b_merge::job::JobResult::from_run(&run));
     }
 
     info!("m4b-merge starting with {} input(s)", run_inputs.len());

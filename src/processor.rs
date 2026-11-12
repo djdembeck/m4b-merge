@@ -929,7 +929,12 @@ impl Processor {
 
         let merge_job = MergeJob::new(group.files.clone(), output_path.clone())
             .with_threads(self.config.num_cpus);
-        let merged_path = self.merger.merge(&merge_job).map_err(ProcessorError::Merge)?;
+        let merged_path = self.merger.merge(&merge_job).map_err(|e| {
+            // A failed merge must not leave the claimed placeholder behind:
+            // it would block a retry with a false collision.
+            Self::discard_output(&output_path);
+            ProcessorError::Merge(e)
+        })?;
         info!("Successfully merged to: {}", merged_path.display());
 
         // Stage 4: Policy-driven writes. Any failure here discards the merged
@@ -1130,12 +1135,15 @@ impl Processor {
         };
 
         // Enumerate every produced file (the merged output and the
-        // `chapters.txt` sidecar when one exists on disk) so the machine
-        // result never silently omits a sidecar.
+        // `chapters.txt`/`cover.txt` sidecars when they exist on disk) so the
+        // machine result never silently omits a sidecar.
         let mut artifacts = vec![merged_path.clone()];
-        let sidecar = merged_path.with_extension("chapters.txt");
-        if sidecar.is_file() {
-            artifacts.push(sidecar);
+        for sidecar in
+            [merged_path.with_extension("chapters.txt"), merged_path.with_extension("cover.txt")]
+        {
+            if sidecar.is_file() {
+                artifacts.push(sidecar);
+            }
         }
 
         Ok(ProcessingResult {
@@ -1235,7 +1243,17 @@ impl Processor {
     /// with a diagnosed collision and nothing is written, renamed, or
     /// suffixed. The merge then writes to the claimed path (truncating the
     /// engine-owned placeholder it just created, never a pre-existing file).
+    /// After creating the parent directories, their canonical location is
+    /// re-validated against the output root so a directory that was a
+    /// missing (or swapped-to-symlink) component during the pre-check cannot
+    /// carry the write outside the root.
     fn claim_output_name(&self, output_path: &std::path::Path) -> Result<()> {
+        // Job-mode only: the claim runs inside a job run.
+        let job = self.job.as_ref().ok_or_else(|| {
+            ProcessorError::Job(crate::job::JobError::Invalid(
+                "output name claim requires a job".into(),
+            ))
+        })?;
         if output_path.exists() {
             return Err(ProcessorError::OutputCollision { path: output_path.to_path_buf() });
         }
@@ -1246,6 +1264,20 @@ impl Processor {
                     parent.display()
                 ))
             })?;
+            let root =
+                std::fs::canonicalize(&job.output_root).unwrap_or_else(|_| job.output_root.clone());
+            let canonical_parent = std::fs::canonicalize(parent).map_err(|e| {
+                ProcessorError::OutputDirCreation(format!(
+                    "Failed to canonicalize output directory {}: {e}",
+                    parent.display()
+                ))
+            })?;
+            if !canonical_parent.starts_with(&root) {
+                return Err(ProcessorError::OutputDirCreation(format!(
+                    "Output directory {} escapes the job output root after creation; refusing",
+                    parent.display()
+                )));
+            }
         }
         // `create_new` maps to `O_CREAT|O_EXCL`: the create fails if the path
         // exists, closing the exists-then-write race without a rename.
