@@ -452,14 +452,7 @@ impl Processor {
         resolved_job: Option<&crate::job::EffectiveJob>,
     ) -> Result<ProcessingResult> {
         if let Some(job) = &self.job {
-            return self
-                .process_group_job(
-                    group,
-                    job,
-                    resolved_job.expect("job resolved"),
-                    progress_handler,
-                )
-                .await;
+            return self.process_group_job(group, job, resolved_job, progress_handler).await;
         }
 
         let input_paths: Vec<PathBuf> = group.files.iter().map(|f| f.path.clone()).collect();
@@ -731,7 +724,7 @@ impl Processor {
         &self,
         group: &AudioGroup,
         job: &crate::job::Job,
-        effective: &crate::job::EffectiveJob,
+        resolved_job: Option<&crate::job::EffectiveJob>,
         progress_handler: &dyn ProgressHandler,
     ) -> Result<ProcessingResult> {
         let input_paths: Vec<PathBuf> = group.files.iter().map(|f| f.path.clone()).collect();
@@ -755,7 +748,9 @@ impl Processor {
 
         // The job was resolved exactly once in `process_with_progress`, before
         // discovery and output creation; that EffectiveJob is authoritative
-        // here. No catalog touch happens in this function.
+        // here. No catalog touch happens in this function. Dry-run returned
+        // above, so the job is resolved by this point.
+        let effective = resolved_job.expect("job resolved before the dry-run return");
 
         // Output path from the job's root and template.
         let output_path = self.determine_job_output_path(&job.output_root, effective)?;
@@ -1578,6 +1573,43 @@ mod tests {
             assert!(result.output_file.starts_with(&output_dir));
             assert_eq!(result.output_file.extension().unwrap(), "m4b");
         }
+    }
+
+    // A job dry-run must not panic: the job is not resolved in dry-run (it
+    // stays network-free), so the `EffectiveJob` must not be required before
+    // the dry-run early return. Regression for a `resolved_job.expect` that
+    // fired before that return.
+    #[tokio::test]
+    async fn job_dry_run_with_input_file_does_not_panic() {
+        let temp_dir = TempDir::new().unwrap();
+        // An existing input file so discovery produces a group that reaches the
+        // job dry-run return.
+        let input_path = temp_dir.path().join("book");
+        std::fs::create_dir(&input_path).unwrap();
+        let _ = create_test_audio_file(&temp_dir, "book/chapter1.mp3", b"dummy");
+        let output_dir = temp_dir.path().join("output");
+
+        let job_path = temp_dir.path().join("job.json");
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],
+                  "input_supplied": {{ "title": "T", "authors": ["A"] }},
+                  "output_root": {:?}, "path_format": "{{author}}/{{title}}" }}"#,
+            input_path.join("chapter1.mp3"),
+            output_dir
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let job = crate::job::Job::load(&job_path).unwrap();
+
+        let config = test_config(Some(output_dir), None, true, None);
+        let processor = Processor::for_job(job, config).unwrap();
+
+        let result = processor
+            .process(vec![input_path.join("chapter1.mp3")])
+            .await
+            .expect("a job dry-run must not panic or fail");
+        // The dry-run group is reported as processed without touching metadata.
+        assert_eq!(result.len(), 1);
+        assert!(!result[0].metadata_applied);
     }
 
     fn test_metadata_with_genres() -> BookMetadata {
