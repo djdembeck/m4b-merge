@@ -235,11 +235,9 @@ document parses cleanly on success and on failure:
 
 ```json
 { "status": "succeeded | partial_failure | failed",
-  "groups": [{ "group": "job", "outcome": "succeeded",
-    "input_files": ["track1.m4b"],
-    "artifacts": [
-      { "relative_path": "Author/Title.m4b", "kind": "audio", "exists": true },
-      { "relative_path": "Author/Title.chapters.txt", "kind": "sidecar", "exists": true } ] } ] }
+  "groups": [{ "group": "job", "outcome": "succeeded", "input_files": ["track1.m4b"],
+    "artifacts": [ { "relative_path": "Author/Title.m4b", "kind": "audio", "exists": true },
+                    { "relative_path": "Author/Title.chapters.txt", "kind": "sidecar", "exists": true } ] } ] }
 ```
 
 Every produced output and sidecar is enumerated; artifact paths are
@@ -262,11 +260,11 @@ failed group leaves no falsely successful partial output, removes its claimed
 placeholder on merge failure, and never destroys its source files. Created
 parent directories are re-validated against the output root at claim time,
 and the produced file is re-validated after the merge: it must be a regular,
-non-empty file inside the canonical output root, so a parent swapped for a
-symlink during the write cannot redirect the accepted output outside the
-root. This protects the job's staging area only: publishing a staged output
-into a shared, externally-owned destination still needs the caller's own
-race-safe no-replace publication — staging alone does not protect that path.
+non-empty file inside the canonical output root, so a swapped symlinked
+parent cannot redirect the accepted output outside the root.
+ This protects
+the job's staging area only; publishing into a shared destination
+still needs the caller's race-safe publication.
 
 ### Verify Environment
 
@@ -359,7 +357,7 @@ maintaining their own registry, and reject protocol/resolver versions they do
 not understand. The command is self-contained (no FFmpeg, job, or network).
 The `--job-preview` and `--machine` surfaces carry the same
 `schema_version`/`resolver_version` identity, so a caller can verify that a
-previewed or produced path came from the resolver version it validated.
+path came from the resolver version it validated.
 
 ## Exit Codes
 

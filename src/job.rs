@@ -568,9 +568,8 @@ impl Job {
 
     /// Non-mutating preview: resolve the effective metadata exactly as
     /// execution does and the same parsed template with the same resolver,
-    /// returning the exact sanitized relative path plus the effective values
-    /// for diagnostics. No directories, media, or name reservations happen,
-    /// and no execution success is promised.
+    /// returning the exact sanitized relative path plus the effective
+    /// values. No directories, media, or reservations; no success promised.
     pub async fn preview(&self, config: &crate::config::Config) -> Result<JobPreview> {
         let source = self.metadata_source(config)?;
         let effective = self.resolve(source.as_ref()).await?;
@@ -615,35 +614,33 @@ impl Job {
 }
 
 /// A non-mutating preview of a job's resolved output path and effective
-/// metadata. `relative_path` is the exact sanitized relative path (inside
-/// `output_root`) execution produces from the same effective metadata.
+/// metadata; `relative_path` is the exact sanitized relative path execution
+/// produces from the same effective metadata, inside `output_root`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JobPreview {
     pub schema_version: u32,
     pub resolver_version: &'static str,
     /// The effective template that was resolved.
     pub path_format: String,
-    /// The exact sanitized relative output path inside the job's
-    /// `output_root`, including the output extension.
+    /// The exact sanitized relative output path inside the job's `output_root`
+    /// (including the output extension).
     pub relative_path: String,
-    /// The effective (base + overrides) metadata the path was resolved from.
+    /// The effective (base + overrides) metadata the path resolved from.
     pub metadata: crate::metadata::BookMetadata,
 }
 
 /// Machine-readable execution result: every produced output and sidecar,
 /// per-group identity and outcome, diagnosed errors. Paths are relative to
-/// the job's `output_root`; there is no absolute-path fallback.
+/// the job's `output_root`; no absolute-path fallback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JobResult {
     pub schema_version: u32,
-    /// The resolver version that produced the output paths, matching
-    /// `--capabilities` so a caller can verify the identity of a path.
+    /// The resolver version that produced the output paths; matches `--capabilities`.
     pub resolver_version: &'static str,
-    /// `succeeded` when every group succeeded, `partial_failure` when some
-    /// did and some did not, `failed` when none did.
+    /// `succeeded` when every group succeeded, `partial_failure` when some did not, `failed` when none did.
     pub status: &'static str,
     /// The diagnosed error when the run failed before producing any group
-    /// outcome (setup, discovery, or an unrecoverable run error).
+    /// outcome. Emitted with empty `groups`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub groups: Vec<GroupResult>,
@@ -655,8 +652,8 @@ impl JobResult {
         self.status == "succeeded"
     }
 
-    /// A diagnosed failure before any group ran (e.g. processor setup or
-    /// discovery), so a machine run always emits a parseable document.
+    /// A diagnosed failure before any group ran; a machine run always
+    /// emits a parseable document.
     pub fn setup_failed(error: String) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
@@ -667,10 +664,9 @@ impl JobResult {
         }
     }
 
-    /// Build the machine result: every group in run order with its artifacts
-    /// and diagnosed error; the status never claims success for a failed
-    /// group. A CLI job run is one book (one group), so `partial_failure`
-    /// arises only for multi-group library consumers.
+    /// Build the machine result: every group in run order with its
+    /// artifacts and diagnosed error; the status never claims success for a
+    /// failed group.
     pub fn from_run(job_schema_version: u32, run: &crate::processor::RunOutcome) -> Self {
         let groups = run
             .outcomes
@@ -706,8 +702,7 @@ impl JobResult {
 pub struct GroupResult {
     pub group: String,
     pub outcome: GroupOutcome,
-    /// The input files that were processed; relative where they sit under a
-    /// path the caller owns. Not artifacts.
+    /// The input files that were processed. Not artifacts.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub input_files: Vec<PathBuf>,
     /// Every produced output and sidecar, relative to the job's
@@ -762,15 +757,6 @@ fn kind_of(path: &str) -> &'static str {
 pub enum GroupOutcome {
     Succeeded,
     Failed,
-}
-
-impl GroupOutcome {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-        }
-    }
 }
 
 /// A job resolved into effective metadata plus policies.
@@ -1145,9 +1131,8 @@ mod tests {
             outcome: if ok { GroupOutcome::Succeeded } else { GroupOutcome::Failed },
             error: (!ok).then(|| err.to_string()),
         };
-        // `results` is empty except for the partial case: the status is
-        // `failed` when no group succeeded, so zero results is the failed
-        // shape and one is the partial shape.
+        // The `results` count is irrelevant to the status: it is driven by
+        // the group outcomes (zero = failed, one = partial).
         let run = |complete: bool, n: usize, outcomes: Vec<GroupOutcomes>| RunOutcome {
             results: (0..n)
                 .map(|_| crate::processor::ProcessingResult {

@@ -71,15 +71,15 @@ struct Args {
     pub dry_run: bool,
 
     /// Non-mutating job preview: print the exact sanitized relative output
-    /// path (plus effective values) as JSON from the same resolver and
-    /// metadata as execution. Job mode only; exclusive with `--machine`.
+    /// path (plus effective values) as JSON from the same resolver and metadata
+    /// as execution. Job mode only; exclusive with `--machine`.
     #[arg(long = "job-preview")]
     pub job_preview: bool,
 
-    /// Machine-readable execution results: stable JSON on stdout only
-    /// (logs and progress go to stderr), enumerating every produced output
-    /// and sidecar. Job mode only; exits nonzero on failure; exclusive
-    /// with `--job-preview`.
+    /// Machine-readable execution results: stable JSON on stdout only (logs
+    /// and progress go to stderr), enumerating every produced output and
+    /// sidecar. Job mode only; exits nonzero on failure; exclusive with
+    /// `--job-preview`.
     #[arg(long = "machine")]
     pub machine: bool,
 
@@ -124,7 +124,7 @@ fn write_progress(progress: &ProcessingProgress, write: impl Fn(&str)) {
 }
 
 /// Print the machine result to stdout and exit: 0 when every group
-/// succeeded, 1 otherwise. Never returns.
+/// succeeded, 1 otherwise.
 fn machine_exit(result: &m4b_merge::job::JobResult) -> ! {
     println!("{}", serde_json::to_string_pretty(result).expect("result serializes"));
     std::process::exit(if result.all_succeeded() { 0 } else { 1 });

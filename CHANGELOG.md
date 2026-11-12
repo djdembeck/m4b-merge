@@ -8,25 +8,22 @@ All notable changes to this project will be documented in this file. See [standa
 ### Added
 - `--job-preview`: a non-mutating preview for `--job` runs that prints the
   exact sanitized relative output path (plus the effective metadata)
-  resolved by the same parsed template and resolver execution uses. It
-  creates no directories, writes no media, reserves no names, and makes no
-  execution success promise.
+  resolved by the same parsed template and resolver execution uses; it
+  creates no directories, writes no media, and makes no execution success
+  promise.
 - `--machine` (job mode): stable execution results as JSON on stdout only
   (logs and progress go to stderr), enumerating every produced output and
   sidecar with per-group identity/outcome and diagnosed errors; artifact
-  paths are relative to the job's `output_root` and validated to lie inside
-  it. Partial or total failure exits 1; setup/run-level failures emit a
-  `failed` document with a top-level `error`, so stdout always parses.
-- Engine-side no-clobber for `--job` runs: the resolved output name is
-  claimed with `O_CREAT|O_EXCL` before any write, parents are re-validated
-  against the canonical root at claim time, and the produced file is
-  re-validated after the merge (regular, non-empty file inside the canonical
-  root), so a parent swapped for a symlink during the write cannot redirect
-  the accepted output outside the root. A collision is a diagnosed failure
-  that leaves the existing file untouched; a failed merge removes its
-  claimed placeholder so a retry is not blocked. Staging containment does
-  not protect a final shared publication; that remains the caller's
-  race-safe gate.
+  paths are relative to the job's `output_root` and validated inside it;
+  failure exits 1; stdout always parses.
+- Engine-side no-clobber for `--job` runs: the output name is claimed with
+  `O_CREAT|O_EXCL` before any write, parents are re-validated at claim
+  time, and the produced file after the merge (regular, non-empty file
+  inside the canonical root), so a swapped parent cannot redirect the
+  accepted output outside the root. A collision is a diagnosed failure that
+  leaves the existing file untouched; a failed merge removes its claimed
+  placeholder. Diagnostics in the machine document never carry absolute
+  paths.
 - One parsed-template output-path resolver for `--job` runs (`resolver_version`
   from `--capabilities`): only template separators create directories; a
   token's value is sanitized as component data so it cannot introduce

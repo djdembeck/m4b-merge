@@ -455,7 +455,26 @@ impl Processor {
                 }
                 Err(e) => {
                     warn!("Group '{}' failed: {}", group.name, e);
-                    failed_groups.push((group.name.clone(), e.to_string()));
+                    // Machine output never carries an absolute path: the
+                    // job's output root is relativized in every diagnosed
+                    // group error at this boundary (canonical form when
+                    // relative, the literal root when absolute).
+                    let diagnosed = self
+                        .job
+                        .as_ref()
+                        .map(|j| {
+                            let msg = e.to_string();
+                            let root = if j.output_root.is_absolute() {
+                                j.output_root.clone()
+                            } else {
+                                std::fs::canonicalize(&j.output_root)
+                                    .unwrap_or_else(|_| j.output_root.clone())
+                            };
+                            let root_str = root.to_string_lossy().into_owned();
+                            msg.replace(&root_str, "output_root")
+                        })
+                        .unwrap_or_else(|| e.to_string());
+                    failed_groups.push((group.name.clone(), diagnosed.clone()));
                     // A rejected merged output is discarded before the group
                     // fails; the diagnosed error carries the truth.
                     outcomes.push(GroupOutcomes {
@@ -464,7 +483,7 @@ impl Processor {
                         input_files: group.files.iter().map(|f| f.path.clone()).collect(),
                         files_moved: false,
                         outcome: crate::job::GroupOutcome::Failed,
-                        error: Some(e.to_string()),
+                        error: Some(diagnosed),
                     });
                     progress_handler.on_progress(ProcessingProgress {
                         stage: ProcessingStage::Error,
