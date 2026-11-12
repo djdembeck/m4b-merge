@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use std::path::PathBuf;
 use tracing::{error, info, warn};
 
@@ -100,7 +100,8 @@ impl ProgressHandler for ConsoleProgressHandler {
 
 #[tokio::main]
 async fn main() {
-    let args = Args::parse();
+    let matches = Args::command().try_get_matches().unwrap_or_else(|e| e.exit());
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     // Initialize tracing with the requested log level
     let subscriber = tracing_subscriber::fmt()
@@ -123,17 +124,7 @@ async fn main() {
     // Job mode: the job file owns inputs, output root, and metadata base.
     // The standalone flags that would fight the job are rejected up front.
     let job = if let Some(job_path) = &args.job {
-        let path_format_default = "{author}/{title}".to_string();
-        let conflicts: Vec<&str> = [
-            (!args.inputs.is_empty()).then_some("-i/--inputs"),
-            args.metadata_id.is_some().then_some("-a/--metadata-id"),
-            args.output.is_some().then_some("-o/--output"),
-            (args.path_format != path_format_default).then_some("-p/--path-format"),
-            args.completed_directory.is_some().then_some("--completed-directory"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        let conflicts = job_flag_conflicts(&args, &matches);
         if !conflicts.is_empty() {
             eprintln!(
                 "Error: --job is mutually exclusive with {} (the job file provides them)",
@@ -291,6 +282,29 @@ async fn main() {
     }
 }
 
+/// Standalone flags that a `--job` run must not also carry. An explicit
+/// `-p/--path-format` is detected by clap's value source, not by comparing
+/// against the default: writing the default template out verbatim must still
+/// conflict with the job's own `path_format`.
+fn job_flag_conflicts(args: &Args, matches: &clap::ArgMatches) -> Vec<&'static str> {
+    // A default-filled value reports `ValueSource::DefaultValue`; only an
+    // explicitly supplied value reports `CommandLine` (or Environment).
+    let path_format_explicit = matches!(
+        matches.value_source("path_format"),
+        Some(clap::parser::ValueSource::CommandLine | clap::parser::ValueSource::EnvVariable)
+    );
+    [
+        (!args.inputs.is_empty()).then_some("-i/--inputs"),
+        args.metadata_id.is_some().then_some("-a/--metadata-id"),
+        args.output.is_some().then_some("-o/--output"),
+        path_format_explicit.then_some("-p/--path-format"),
+        args.completed_directory.is_some().then_some("--completed-directory"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 fn check_ffmpeg_and_exit() -> ! {
     match FFmpeg::discover() {
         Ok(mut ffmpeg) => {
@@ -335,5 +349,39 @@ fn check_ffmpeg_and_exit() -> ! {
             );
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(argv: &[&str]) -> (Args, clap::ArgMatches) {
+        let matches = Args::command().try_get_matches_from(argv).unwrap();
+        let args = Args::from_arg_matches(&matches).unwrap();
+        (args, matches)
+    }
+
+    #[test]
+    fn explicit_default_path_format_conflicts_with_job() {
+        // Writing out the default template verbatim must still conflict with
+        // the job's own path_format: value_source, not value comparison.
+        let (args, matches) = parse(&["m4b-merge", "--job", "job.json", "-p", "{author}/{title}"]);
+        let conflicts = job_flag_conflicts(&args, &matches);
+        assert!(conflicts.contains(&"-p/--path-format"), "{conflicts:?}");
+    }
+
+    #[test]
+    fn absent_path_format_does_not_conflict_with_job() {
+        let (args, matches) = parse(&["m4b-merge", "--job", "job.json"]);
+        let conflicts = job_flag_conflicts(&args, &matches);
+        assert!(!conflicts.contains(&"-p/--path-format"), "{conflicts:?}");
+    }
+
+    #[test]
+    fn explicit_custom_path_format_conflicts_with_job() {
+        let (args, matches) = parse(&["m4b-merge", "--job", "job.json", "-p", "custom"]);
+        let conflicts = job_flag_conflicts(&args, &matches);
+        assert!(conflicts.contains(&"-p/--path-format"), "{conflicts:?}");
     }
 }

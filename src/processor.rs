@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 use crate::api::{MetadataError, MetadataSource};
 use crate::audio::ffmpeg::{FFmpeg, FFmpegError};
 use crate::config::Config;
-use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
+use crate::discovery::{AudioFile, AudioGroup, DiscoveryError};
 use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
 use crate::tagging::{Tagger, TaggingError, describe_out_of_range_chapters, format_duration};
@@ -322,15 +322,21 @@ impl Processor {
             return Err(ProcessorError::NoInputs);
         }
 
-        // Skip creating output directory in dry-run mode
-        if !self.config.dry_run {
-            if let Some(job) = &self.job {
-                std::fs::create_dir_all(&job.output_root)
-                    .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))?;
-            } else if let Some(output) = &self.config.output {
-                std::fs::create_dir_all(output)
-                    .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))?;
-            }
+        // A structured job is one book. Resolve it exactly once, before
+        // discovery and before the output root is created: an unresolvable
+        // provider id (or a disabled client) fails before any directory,
+        // merge, or source move. In provider mode this is the only catalog
+        // fetch of the run; in supplied mode no client exists at all. Dry-run
+        // never resolves, so it stays network-free.
+        let resolved_job: Option<crate::job::EffectiveJob> = match &self.job {
+            Some(job) if !self.config.dry_run => Some(job.resolve(self.api_client.as_ref()).await?),
+            _ => None,
+        };
+        if resolved_job.is_some() {
+            info!(
+                "Job resolved; processing '{}' as one book",
+                self.job.as_ref().unwrap().output_root.display()
+            );
         }
 
         // Stage 1: Discovery
@@ -342,7 +348,18 @@ impl Processor {
             message: "Discovering audio files...".to_string(),
         });
 
-        let groups = self.discover_files(&inputs)?;
+        let job_mode = self.job.is_some();
+        let groups = if job_mode {
+            Self::group_job_inputs(&inputs, self.config.dry_run)?
+        } else {
+            if !self.config.dry_run {
+                if let Some(output) = &self.config.output {
+                    std::fs::create_dir_all(output)
+                        .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))?;
+                }
+            }
+            crate::discovery::discover_and_group(&inputs)?
+        };
         info!("Discovered {} audio groups to process", groups.len());
 
         if groups.is_empty() {
@@ -367,7 +384,7 @@ impl Processor {
                 message: format!("Processing group '{}'...", group.name),
             });
 
-            match self.process_group(group, progress_handler).await {
+            match self.process_group(group, progress_handler, resolved_job.as_ref()).await {
                 Ok(result) => {
                     results.push(result);
                 }
@@ -423,9 +440,17 @@ impl Processor {
         &self,
         group: &AudioGroup,
         progress_handler: &dyn ProgressHandler,
+        resolved_job: Option<&crate::job::EffectiveJob>,
     ) -> Result<ProcessingResult> {
         if let Some(job) = &self.job {
-            return self.process_group_job(group, job, progress_handler).await;
+            return self
+                .process_group_job(
+                    group,
+                    job,
+                    resolved_job.expect("job resolved"),
+                    progress_handler,
+                )
+                .await;
         }
 
         let input_paths: Vec<PathBuf> = group.files.iter().map(|f| f.path.clone()).collect();
@@ -697,6 +722,7 @@ impl Processor {
         &self,
         group: &AudioGroup,
         job: &crate::job::Job,
+        effective: &crate::job::EffectiveJob,
         progress_handler: &dyn ProgressHandler,
     ) -> Result<ProcessingResult> {
         let input_paths: Vec<PathBuf> = group.files.iter().map(|f| f.path.clone()).collect();
@@ -718,35 +744,24 @@ impl Processor {
             });
         }
 
-        // Resolve effective metadata. In provider mode this is the only place
-        // the catalog is touched; in supplied mode no client exists at all.
-        // A resolution failure (unknown id, release the book does not carry,
-        // missing client) returns here — before any merge or source move.
-        let effective = job.resolve(self.api_client.as_ref()).await?;
+        // The job was resolved exactly once in `process_with_progress`, before
+        // discovery and output creation; that EffectiveJob is authoritative
+        // here. No catalog touch happens in this function.
 
         // Output path from the job's root and template.
-        let output_path = self.determine_job_output_path(&job.output_root, &effective)?;
+        let output_path = self.determine_job_output_path(&job.output_root, effective)?;
 
         // PR1 baseline for chapters (the documented default): resolved
         // chapters (provider → input → generated per-track), embedded, plus
         // the `chapters.txt` sidecar. A per-field chapter policy arrives in a
-        // follow-up; PR1 has no `chapters` job field. The range guard runs
-        // before the merge: mp4ameta writes start times verbatim, so a chapter
-        // at or past the estimated duration would become an unplayable entry.
+        // follow-up; PR1 has no `chapters` job field. Range validation is
+        // owned by `Tagger::embed_chapters` against the merged container's
+        // actual duration: a chapter-derived bound would reject valid
+        // zero-length final markers, and it would not catch a chapter past the
+        // real playlength.
         let mut chapters = effective.metadata.chapters.clone();
         if chapters.is_empty() {
             chapters = self.input_chapters(group);
-        }
-        if !chapters.is_empty()
-            && let Some(total) = effective.metadata.total_duration()
-            && let Some((count, details)) = describe_out_of_range_chapters(&chapters, total)
-        {
-            return Err(ProcessorError::ChaptersOutOfRange {
-                path: output_path.clone(),
-                count,
-                playlength: format_duration(total),
-                details,
-            });
         }
 
         // Stage 3: Merge
@@ -803,14 +818,27 @@ impl Processor {
 
         // Chapters: PR1 baseline — embed the resolved chapters and write the
         // sidecar (the documented default). A chapter policy (preserve /
-        // explicit write / clear) arrives in a follow-up.
+        // explicit write / clear) arrives in a follow-up. The sidecar is
+        // written from the same resolved vector that was embedded — never from
+        // `effective.metadata.chapters`, which stays empty whenever the
+        // chapters came from the inputs (always for supplied jobs).
         if !chapters.is_empty() {
             if let Err(e) = self.tagger.embed_chapters(&merged_path, &chapters) {
                 Self::discard_output(&merged_path);
                 return Err(ProcessorError::Tagging(e));
             }
+            let artist = if effective.metadata.authors.is_empty() {
+                None
+            } else {
+                Some(effective.metadata.authors.join(", "))
+            };
             let sidecar = merged_path.with_extension("chapters.txt");
-            if let Err(e) = self.tagger.write_chapters_txt(&sidecar, &effective.metadata) {
+            if let Err(e) = self.tagger.write_chapters_txt_with(
+                &sidecar,
+                &effective.metadata.title,
+                artist.as_deref(),
+                &chapters,
+            ) {
                 warn!("Failed to write chapters.txt: {e}");
             }
         }
@@ -889,19 +917,23 @@ impl Processor {
         }
     }
 
-    /// Discover audio files from input paths
-    fn discover_files(&self, inputs: &[PathBuf]) -> Result<Vec<AudioGroup>> {
-        let groups = match discover_and_group(inputs) {
-            Ok(g) => g,
-            Err(e) => {
-                if self.config.dry_run {
-                    warn!("Discovery error in dry-run mode: {}", e);
-                    return Ok(Vec::new());
-                }
-                return Err(e.into());
+    /// Discover a job's inputs as a single group.
+    ///
+    /// A structured job is one book, so every discovered file is combined into
+    /// one group in the discovery's stable natural (numeric) order; the group
+    /// is never split by parent directory into multiple groups that would
+    /// share a single output path. Empty discovery is a dry-run no-op or a
+    /// `NoInputs` error.
+    fn group_job_inputs(inputs: &[PathBuf], dry_run: bool) -> Result<Vec<AudioGroup>> {
+        let files = crate::discovery::discover_files(inputs)?;
+        if files.is_empty() {
+            if dry_run {
+                println!("Dry run: No audio files discovered in input paths. Inputs: {:?}", inputs);
+                return Ok(Vec::new());
             }
-        };
-        Ok(groups)
+            return Err(ProcessorError::NoInputs);
+        }
+        Ok(vec![AudioGroup { name: "job".to_string(), files, disc_number: None }])
     }
 
     /// Resolve chapters for a group from its input files.
@@ -1411,14 +1443,44 @@ mod tests {
 
     #[test]
     fn test_no_inputs_returns_empty_groups() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = create_test_config(&temp_dir);
-        let processor = Processor::new(config).unwrap();
-
         // Empty inputs returns empty groups (not an error at discovery stage)
-        let result = processor.discover_files(&[]);
+        let result = crate::discovery::discover_files(&[]);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn job_inputs_across_directories_form_one_group_in_natural_order() {
+        // A job's inputs are one book: files spread across several parent
+        // directories must combine into a single group (never one group per
+        // directory sharing a single output path), in stable natural order.
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        std::fs::create_dir_all(root.join("disc1")).unwrap();
+        std::fs::create_dir_all(root.join("disc2")).unwrap();
+        for name in ["part1.mp3", "part2.mp3"] {
+            std::fs::write(root.join("disc1").join(name), b"").unwrap();
+        }
+        for name in ["part3.mp3", "part10.mp3"] {
+            std::fs::write(root.join("disc2").join(name), b"").unwrap();
+        }
+
+        let groups = Processor::group_job_inputs(&[root.to_path_buf()], false).unwrap();
+        assert_eq!(groups.len(), 1, "a job is one book: exactly one group");
+        let files = &groups[0].files;
+        assert_eq!(files.len(), 4);
+        // Natural (numeric) order: part1, part2, part3, part10.
+        let names: Vec<&str> =
+            files.iter().map(|f| f.path.file_name().unwrap().to_str().unwrap()).collect();
+        assert_eq!(names, ["part1.mp3", "part2.mp3", "part3.mp3", "part10.mp3"]);
+    }
+
+    #[test]
+    fn job_inputs_empty_list_errors_no_inputs() {
+        // An empty input list is a `NoInputs` error (not a discovery success
+        // with zero groups), so the job fails before any merge.
+        let err = Processor::group_job_inputs(&[], false).unwrap_err();
+        assert!(matches!(err, ProcessorError::NoInputs));
     }
 
     #[tokio::test]
@@ -1448,7 +1510,7 @@ mod tests {
             disc_number: None,
         };
 
-        let result = processor.process_group(&group, &NoOpProgressHandler).await;
+        let result = processor.process_group(&group, &NoOpProgressHandler, None).await;
         assert!(result.is_ok());
     }
 
@@ -1476,7 +1538,7 @@ mod tests {
             disc_number: None,
         };
 
-        let result = processor.process_group(&group, &NoOpProgressHandler).await;
+        let result = processor.process_group(&group, &NoOpProgressHandler, None).await;
         assert!(result.is_ok());
     }
 
@@ -1497,7 +1559,7 @@ mod tests {
             let group =
                 AudioGroup { name: name.to_string(), files: vec![audio_file], disc_number: None };
 
-            let result = processor.process_group(&group, &NoOpProgressHandler).await;
+            let result = processor.process_group(&group, &NoOpProgressHandler, None).await;
             assert!(result.is_ok());
             let result = result.unwrap();
             assert!(result.output_file.starts_with(&output_dir));
@@ -1636,7 +1698,7 @@ mod tests {
             disc_number: None,
         };
 
-        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+        let err = processor.process_group(&group, &NoOpProgressHandler, None).await.unwrap_err();
 
         match &err {
             ProcessorError::ChaptersOutOfRange { count, playlength, details, .. } => {
@@ -1681,7 +1743,7 @@ mod tests {
             disc_number: None,
         };
 
-        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+        let err = processor.process_group(&group, &NoOpProgressHandler, None).await.unwrap_err();
 
         match &err {
             ProcessorError::ChaptersOutOfRange { details, .. } => {
@@ -1709,7 +1771,7 @@ mod tests {
             disc_number: None,
         };
 
-        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+        let err = processor.process_group(&group, &NoOpProgressHandler, None).await.unwrap_err();
         let message = err.to_string();
 
         match &err {
@@ -1783,7 +1845,7 @@ mod tests {
         // Chapters are generated from the input tracks (no API client), and
         // in range, so the ffprobe guard passes — but the hook makes the
         // actual embed fail.
-        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+        let err = processor.process_group(&group, &NoOpProgressHandler, None).await.unwrap_err();
 
         assert!(
             matches!(err, ProcessorError::Tagging(TaggingError::Mp4Meta(_))),

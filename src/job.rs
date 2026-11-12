@@ -193,24 +193,10 @@ impl Job {
             (None, Some(supplied)) => {
                 // Supplied mode is authoritative: no catalog lookup, no ASIN or
                 // filename rematch, and no provider-dependent metadata_id.
-                let mut meta = BookMetadata {
-                    metadata_id: String::new(),
-                    title: supplied.title.clone(),
-                    subtitle: supplied.subtitle.clone(),
-                    authors: supplied.authors.clone(),
-                    narrators: supplied.narrators.clone(),
-                    series_name: supplied.series_name.clone(),
-                    series_position: supplied.series_position.clone(),
-                    description: supplied.description.clone().unwrap_or_default(),
-                    genres: supplied.genres.clone(),
-                    year: supplied.year,
-                    cover_url: None,
-                    chapters: Vec::new(),
-                };
-                apply_overrides(&mut meta, self.overrides.as_ref());
-                meta
+                return self.effective_from_supplied(supplied, self.overrides.as_ref());
             }
-            _ => unreachable!("validated: exactly one base"),
+            (Some(_), Some(_)) => unreachable!("validate() rejects both bases"),
+            (None, None) => unreachable!("validate() requires exactly one base"),
         };
 
         let mut effective = base;
@@ -221,6 +207,39 @@ impl Job {
             return Err(JobError::Invalid("effective title is empty".into()));
         }
 
+        Ok(EffectiveJob {
+            metadata: effective,
+            path_format: self.path_format.clone(),
+            completed_directory: self.completed_directory.clone(),
+        })
+    }
+
+    /// Build the effective job for a supplied (authoritative) base, applying
+    /// the override layer exactly once. No catalog lookup and no provider
+    /// dependency: a supplied job resolves fully offline.
+    fn effective_from_supplied(
+        &self,
+        supplied: &SuppliedInput,
+        overrides: Option<&OverrideFields>,
+    ) -> Result<EffectiveJob> {
+        let mut effective = BookMetadata {
+            metadata_id: String::new(),
+            title: supplied.title.clone(),
+            subtitle: supplied.subtitle.clone(),
+            authors: supplied.authors.clone(),
+            narrators: supplied.narrators.clone(),
+            series_name: supplied.series_name.clone(),
+            series_position: supplied.series_position.clone(),
+            description: supplied.description.clone().unwrap_or_default(),
+            genres: supplied.genres.clone(),
+            year: supplied.year,
+            cover_url: None,
+            chapters: Vec::new(),
+        };
+        apply_overrides(&mut effective, overrides);
+        if effective.title.trim().is_empty() {
+            return Err(JobError::Invalid("effective title is empty".into()));
+        }
         Ok(EffectiveJob {
             metadata: effective,
             path_format: self.path_format.clone(),
@@ -377,5 +396,18 @@ mod tests {
         let job: Job = serde_json::from_str(raw).unwrap();
         let err = job.resolve(None).await.unwrap_err().to_string();
         assert!(err.contains("title"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn provider_resolve_without_client_fails_diagnosed() {
+        // A provider job with no usable metadata source fails resolution with
+        // a diagnosed error — before any directory, merge, or source move —
+        // rather than proceeding with placeholder metadata.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
+            "input_provider": { "book_id": "B012345678" }, "output_root": "/o" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        job.validate().unwrap();
+        let err = job.resolve(None).await.unwrap_err().to_string();
+        assert!(err.contains("metadata source"), "{err}");
     }
 }
