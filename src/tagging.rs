@@ -559,40 +559,57 @@ impl Tagger {
 
         let mut tag = mp4ameta::Tag::read_from_path(path).unwrap_or_default();
 
-        // Resolve the title/subtitle components independently from the
-        // existing atoms, then write `©nam`/`©alb` once. A written component
-        // uses the effective metadata value (the same string that names the
-        // output path); a preserved component is read back from the file.
-        let (title, subtitle) = Self::resolve_title_subtitle(
-            path,
-            &tag,
-            &policies.title,
-            &policies.subtitle,
-            policies.effective_title(metadata),
-            policies.effective_subtitle(metadata),
-        )?;
+        // When both components are preserved, the shared `©nam`/`©alb` pair
+        // is left byte-for-byte untouched: rebuilding it would re-derive the
+        // subtitle from the `©nam`-minus-`©alb` suffix and trim it, silently
+        // dropping preserved tag data (e.g. `©nam = "Book -   "`). The
+        // all-preserve early return above only covers the whole set; this
+        // covers the case where another field is written and forces a tag
+        // write, so the preserved title atoms must still survive verbatim.
+        let both_preserve = matches!(
+            (policies.title, policies.subtitle),
+            (crate::job::TitlePolicy::Preserve, crate::job::SubtitlePolicy::Preserve)
+        );
+        if both_preserve {
+            debug!("Title and subtitle preserved; leaving ©nam/©alb untouched");
+        } else {
+            // Resolve the title/subtitle components independently from the
+            // existing atoms, then write `©nam`/`©alb` once. A written
+            // component uses the effective metadata value (the same string
+            // that names the output path); a preserved component is read back
+            // from the file.
+            let (title, subtitle) = Self::resolve_title_subtitle(
+                path,
+                &tag,
+                &policies.title,
+                &policies.subtitle,
+                policies.effective_title(metadata),
+                policies.effective_subtitle(metadata),
+            )?;
 
-        // A subtitle without a title is represented as the subtitle alone in
-        // both atoms (no fabricated title separator); the unselected
-        // component is never erased by the other's clear. The value is used
-        // verbatim (no trim) so a preserved subtitle round-trips exactly.
-        let subtitle = subtitle.as_deref().filter(|s| !s.trim().is_empty());
-        match (title.as_deref(), subtitle) {
-            (Some(title), Some(subtitle)) => {
-                tag.set_title(format!("{title} - {subtitle}"));
-                tag.set_album(title);
-            }
-            (Some(title), None) => {
-                tag.set_title(title);
-                tag.set_album(title);
-            }
-            (None, Some(subtitle)) => {
-                tag.set_title(subtitle);
-                tag.set_album(subtitle);
-            }
-            (None, None) => {
-                tag.remove_title();
-                tag.remove_album();
+            // A subtitle without a title is represented as the subtitle alone
+            // in both atoms (no fabricated title separator); the unselected
+            // component is never erased by the other's clear. The value is
+            // used verbatim (no trim) so a preserved subtitle round-trips
+            // exactly.
+            let subtitle = subtitle.as_deref().filter(|s| !s.trim().is_empty());
+            match (title.as_deref(), subtitle) {
+                (Some(title), Some(subtitle)) => {
+                    tag.set_title(format!("{title} - {subtitle}"));
+                    tag.set_album(title);
+                }
+                (Some(title), None) => {
+                    tag.set_title(title);
+                    tag.set_album(title);
+                }
+                (None, Some(subtitle)) => {
+                    tag.set_title(subtitle);
+                    tag.set_album(subtitle);
+                }
+                (None, None) => {
+                    tag.remove_title();
+                    tag.remove_album();
+                }
             }
         }
 
@@ -2570,6 +2587,39 @@ mod tests {
     }
 
     #[test]
+    fn policy_both_preserve_leaves_title_atoms_verbatim_when_other_field_writes() {
+        // When title AND subtitle are both preserved, the shared `©nam`/`©alb`
+        // pair must be left byte-for-byte even though another field write
+        // forces the tag to be reserialized. Rebuilding it would re-derive
+        // the subtitle from the `©nam`-minus-`©alb` suffix and trim it,
+        // silently dropping preserved bytes.
+        let temp_dir = TempDir::new().unwrap();
+        // A whitespace-only subtitle suffix: the canonical no-subtitle case
+        // (`©nam == ©alb`) is the easy one; this is the data-loss case.
+        let path = tagged_m4b(&temp_dir, "Book -   ", "Book");
+        let tagger = Tagger::new();
+        // Preserve the title pair, write only the year.
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Write,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        // The written year is applied...
+        assert_eq!(tag.year().unwrap(), "2024");
+        // ...and the preserved title atoms survive byte-for-byte.
+        assert_eq!(tag.title().unwrap(), "Book -   ");
+        assert_eq!(tag.album().unwrap(), "Book");
+    }
+
+    #[test]
     fn policy_title_only_preserves_subtitle_component() {
         let temp_dir = TempDir::new().unwrap();
         let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
@@ -2810,13 +2860,15 @@ mod tests {
         tag.write_to_path(&path).unwrap();
 
         let tagger = Tagger::new();
-        // Writing authors (a valid write) rebuilds the `©nam`/`©alb` pair from
-        // the preserved components; the inconsistent pair cannot establish the
-        // subtitle, so it fails before any atom is mutated.
+        // Writing the title (a valid write) rebuilds the `©nam`/`©alb` pair;
+        // the preserved subtitle must be re-established from the existing
+        // atoms, but the inconsistent pair cannot, so it fails before any atom
+        // is mutated. (When both components are preserved the pair is left
+        // untouched, so this check applies only to the rebuild path.)
         let policies = crate::job::WritePolicies {
-            title: crate::job::TitlePolicy::Preserve,
+            title: crate::job::TitlePolicy::Write,
             subtitle: crate::job::SubtitlePolicy::Preserve,
-            authors: crate::job::FieldPolicy::Write,
+            authors: crate::job::FieldPolicy::Preserve,
             narrators: crate::job::FieldPolicy::Preserve,
             series: crate::job::FieldPolicy::Preserve,
             description: crate::job::FieldPolicy::Preserve,
