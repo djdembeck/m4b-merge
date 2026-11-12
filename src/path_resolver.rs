@@ -462,6 +462,13 @@ mod tests {
         f.title = ".hidden".to_string();
         let result = PathResolver::resolve("{author}/{title}", &f).unwrap();
         assert_eq!(result, "The Author/hidden");
+        // A dotfile-style name must not survive as a hidden entry: the
+        // leading dot is stripped, so the job writes a visible file.
+        let mut c = meta();
+        c.title = ".config".to_string();
+        let result = PathResolver::resolve("{title}", &c).unwrap();
+        assert_eq!(result, "config");
+        assert!(!result.starts_with('.'), "dotfile survived: {result}");
     }
 
     #[test]

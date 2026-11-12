@@ -1056,15 +1056,19 @@ impl Processor {
         self.job_output_path_for(output_root, &relative)
     }
 
-    /// Join a resolved relative path to the root, guaranteeing containment.
+    /// Join a resolved relative path to the root, keeping the output inside
+    /// the job's output area.
     ///
-    /// The resolver guarantees every component is non-empty, separator-free,
-    /// and free of leading `.`/`:` characters, so lexical joining cannot
-    /// escape. On top of that, every intermediate component that already
-    /// exists is canonicalized and required to stay under the canonical
-    /// root: a symlinked directory (or a nested symlink) cannot point the
-    /// output outside the job's output area, and a symlinked final entry is
-    /// rejected so the output file is never written through a link.
+    /// The resolver already guarantees every component is non-empty,
+    /// separator-free, and free of leading `.`/`:` characters, so lexical
+    /// joining cannot escape. On top of that, any directory component that is
+    /// itself a symlink is rejected outright (a dangling symlink included),
+    /// and the remaining existing components are canonicalized and required
+    /// to stay under the canonical root. This is defense-in-depth against a
+    /// resolver bug rather than a structural guarantee: it closes the case
+    /// where a link below the root would otherwise let the output be written
+    /// outside the area, and a symlinked final entry is rejected so the
+    /// output file is never written through a link.
     fn job_output_path_for(
         &self,
         output_root: &std::path::Path,
@@ -1090,6 +1094,15 @@ impl Processor {
         let mut dir = canonical_root.clone();
         for component in &components[..components.len().saturating_sub(1)] {
             dir = dir.join(component);
+            // Reject a symlinked directory component, including a dangling
+            // one: following it would write the output outside the root.
+            if let Ok(meta) = std::fs::symlink_metadata(&dir) {
+                if meta.file_type().is_symlink() {
+                    return Err(escape(component, &dir));
+                }
+            }
+            // Defense-in-depth: any component that exists must resolve under
+            // the canonical root.
             if dir.exists() {
                 let resolved = std::fs::canonicalize(&dir)
                     .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))?;
@@ -2646,6 +2659,25 @@ mod tests {
         );
         // Nothing may be written outside the root.
         assert!(!outside.join("Book.m4b").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn job_output_path_rejects_a_dangling_symlinked_directory() {
+        // A symlink to a target that no longer exists: `exists()` is false,
+        // so the containment check must reject it via the symlink itself,
+        // not by resolving the target.
+        let temp_dir = TempDir::new().unwrap();
+        let processor = path_test_processor(&temp_dir);
+        let root = temp_dir.path().join("output");
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = temp_dir.path().join("does-not-exist");
+        std::os::unix::fs::symlink(&missing, root.join("Author")).unwrap();
+        let err = processor.job_output_path_for(&root, "Author/Book.m4b").unwrap_err();
+        assert!(
+            err.to_string().contains("escapes output root"),
+            "dangling symlinked directory must be rejected, got {err}"
+        );
     }
 
     #[cfg(unix)]

@@ -651,6 +651,9 @@ mod tests {
         let metadata = response.into_book_metadata();
         assert_eq!(metadata.metadata_id, "B08XYZ1234");
         assert_eq!(metadata.year, Some(2023));
+        // Audnexus identifies books by ASIN; there is no canonical
+        // AudiobookDB book id, so `{book_id}` stays empty for audnexus.
+        assert!(metadata.book_id.is_empty());
         // The book endpoint does not carry chapters; they come from `/chapters`.
         assert!(metadata.chapters.is_empty());
     }

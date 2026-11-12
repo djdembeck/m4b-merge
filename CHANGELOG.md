@@ -83,6 +83,10 @@ All notable changes to this project will be documented in this file. See [standa
 - Release titles are the bare version (`vX.Y.Z`) instead of `Release vX.Y.Z`.
 
 ### Changed
+- `--job` output paths: a `path_format` that resolves to no components (for
+  example `{subtitle}` on a book with no subtitle) now fails the group with an
+  `EmptyPath` error before any file is touched, instead of the legacy
+  `output.m4b` fallback; the legacy `-p`/`--path-format` path is unchanged.
 - **Breaking (Linux):** release Linux assets are now static-musl binaries.
   From the release following v2.0.0, `m4b-merge-linux` is x86-64 static
   musl and `m4b-merge-linux-arm64` is ARM64 static musl; no GNU-linked

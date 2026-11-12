@@ -263,7 +263,7 @@ The output path is generated from a template. Two template conventions exist:
 | `{year}`     | Release year                    |
 | `{genre}`      | First genre                     |
 | `{metadata_id}` | Provider-dependent looked-up ID (ASIN for audnexus, resolved catalog ID for audiobookdb); empty in supplied mode |
-| `{book_id}`   | Canonical catalog book ID from the resolved metadata; present in provider mode, empty in supplied mode. Distinct from `{metadata_id}`; job-resolver-only |
+| `{book_id}`   | Canonical AudiobookDB catalog book ID from the resolved metadata; populated only for AudiobookDB provider lookups, empty for audnexus and supplied mode. Distinct from `{metadata_id}`; job-resolver-only |
 
 In the table above, `{book_id}` is a **job-resolver-only** token: the legacy
 CLI `-p`/`--path-format` template does not substitute it (an unmatched
@@ -275,7 +275,10 @@ A token whose value is missing or empty does not contribute a path segment
 `{authors}`, `{narrator}`, and `{narrators}`, which substitute `Unknown` when
 no person is known. Unknown tokens in a job `path_format` are rejected with
 an actionable diagnostic (the token, its position, and the supported list)
-before any file is touched.
+before any file is touched. A job `path_format` that resolves to no
+components at all (for example `{subtitle}` on a book with no subtitle) fails
+the group with an `EmptyPath` error before any file is touched; the legacy CLI
+path has no such case because it falls back to `output.m4b`.
 
 **Default:** `{author}/{title}`
 
