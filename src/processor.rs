@@ -980,10 +980,12 @@ impl Processor {
             crate::job::ChaptersPolicy::Preserve => {
                 // Single-input only (enforced above): the merge is a native
                 // copy, so the source chapters survive; carry the sidecar if
-                // the source had one.
+                // the source had one. When the source has no sidecar, a
+                // re-run to the deterministic output path must not leave an
+                // earlier sidecar describing chapters the source lacks.
                 let source_sidecar = input_paths[0].with_extension("chapters.txt");
+                let dest = merged_path.with_extension("chapters.txt");
                 if source_sidecar.is_file() {
-                    let dest = merged_path.with_extension("chapters.txt");
                     std::fs::copy(&source_sidecar, &dest).map_err(|e| {
                         Self::discard_output(&merged_path);
                         ProcessorError::Tagging(TaggingError::Io(std::io::Error::new(
@@ -991,6 +993,17 @@ impl Processor {
                             format!(
                                 "failed to carry source chapter sidecar {} to {}: {e}",
                                 source_sidecar.display(),
+                                dest.display()
+                            ),
+                        )))
+                    })?;
+                } else if dest.is_file() {
+                    std::fs::remove_file(&dest).map_err(|e| {
+                        Self::discard_output(&merged_path);
+                        ProcessorError::Tagging(TaggingError::Io(std::io::Error::new(
+                            e.kind(),
+                            format!(
+                                "failed to remove stale chapter sidecar {}: {e}",
                                 dest.display()
                             ),
                         )))
@@ -2176,5 +2189,52 @@ mod tests {
         );
         assert!(!expected.exists(), "embed failure must not leave the output behind");
         assert!(input.exists(), "source file must not be moved after a failed embed");
+    }
+
+    #[tokio::test]
+    async fn test_preserve_chapters_removes_stale_sidecar_when_source_has_none() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let output_root = temp_dir.path().join("output");
+
+        // Single-input source with no sidecar of its own.
+        let book_dir = temp_dir.path().join("P Book");
+        let input = create_test_m4b(&book_dir, 10);
+
+        // The deterministic output path for {author}/{title} with title "P",
+        // author "A". A stale sidecar from an earlier run sits there,
+        // describing chapters the source does not carry.
+        let dest_dir = output_root.join("A");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let dest = dest_dir.join("P.m4b");
+        let sidecar = dest_dir.join("P.chapters.txt");
+        std::fs::write(&sidecar, "stale\n").unwrap();
+
+        let job: crate::job::Job = serde_json::from_str(&format!(
+            r#"{{ "schema_version": 1, "inputs": ["{}"],
+                    "input_supplied": {{"title": "P", "authors": ["A"]}},
+                    "output_root": "{}", "path_format": "{{author}}/{{title}}",
+                    "chapters": "preserve", "cover": "preserve" }}"#,
+            input.display(),
+            output_root.display()
+        ))
+        .unwrap();
+        // Supplied mode resolves offline, so resolve before the processor takes
+        // ownership of the job; the group path requires the resolved job.
+        let effective = job.resolve(None).await.unwrap();
+        let processor = Processor::for_job(job, config).unwrap();
+        let group = AudioGroup {
+            name: "P Book".to_string(),
+            files: vec![AudioFile::new(input.clone()).unwrap()],
+            disc_number: None,
+        };
+
+        let result =
+            processor.process_group(&group, &NoOpProgressHandler, Some(&effective)).await.unwrap();
+        assert_eq!(result.output_file, dest, "output path must be deterministic");
+
+        // Preserve must not leave a sidecar the source lacks: the stale file is
+        // removed so it cannot describe chapters absent from the copied source.
+        assert!(!sidecar.exists(), "stale chapter sidecar must be removed on preserve");
     }
 }
