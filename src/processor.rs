@@ -812,27 +812,15 @@ impl Processor {
         // `chapters.txt` sidecar list the same order; `embed_chapters` sorts a
         // copy internally, but the sidecar writer preserves input order.
         write_chapters.sort_by_key(|c| c.start_time);
-        // Pre-merge range guard for the *resolved* list only: the resolved
-        // chapters come from the provider, so the provider's `total_duration()`
-        // is the consistent reference and an out-of-range entry is rejected
-        // before anything is merged. An explicit list is NOT checked here: the
-        // provider's chapter ends do not bound the input's real playlength, so
-        // a valid explicit chapter would be wrongly rejected. It is validated
-        // post-merge against the merged container's authoritative duration (the
-        // `embed_chapters` write-boundary guard, which discards the output
-        // before the sources move).
-        if matches!(&effective.chapters, crate::job::ChaptersPolicy::Write { explicit: None })
-            && !write_chapters.is_empty()
-            && let Some(total) = effective.metadata.total_duration()
-            && let Some((count, details)) = describe_out_of_range_chapters(&write_chapters, total)
-        {
-            return Err(ProcessorError::ChaptersOutOfRange {
-                path: output_path.clone(),
-                count,
-                playlength: format_duration(total),
-                details,
-            });
-        }
+        // Out-of-range validation is left to the post-merge `embed_chapters`
+        // write-boundary guard, which checks both explicit and resolved lists
+        // against the merged container's authoritative (mvhd) duration and
+        // discards the output before the sources move. A pre-merge check here
+        // would compare against the provider's chapter-derived
+        // `total_duration()`, which is not the audio's real playlength and can
+        // wrongly reject a valid zero-length final marker that starts at the
+        // end of the provider's chapter list but before the longer merged
+        // audio ends.
 
         // Stage 3: Merge
         progress_handler.on_progress(ProcessingProgress {
@@ -2442,5 +2430,148 @@ mod tests {
 
         let out_tag = mp4ameta::Tag::read_from_path(&result.output_file).unwrap();
         assert!(out_tag.artwork().is_some(), "preserve must keep the source's embedded cover");
+    }
+
+    #[tokio::test]
+    async fn test_job_chapters_write_explicit_list_emitted() {
+        // An explicit list embeds exactly the supplied chapters (replacing
+        // the source's own), in range against the merged audio, and writes the
+        // sidecar. This asserts the emitted chapters, not just that some list
+        // is present.
+        let temp_dir = TempDir::new().unwrap();
+        let output_root = temp_dir.path().join("output");
+        let config = create_test_config(&temp_dir);
+
+        let book_dir = temp_dir.path().join("Explicit Book");
+        let input = create_test_m4b(&book_dir, 10);
+        // A source chapter that must NOT survive an explicit-list write.
+        let mut tag = mp4ameta::Tag::read_from_path(&input).unwrap();
+        tag.chapter_list_mut()
+            .push(mp4ameta::Chapter::new(std::time::Duration::ZERO, "SourceChapter"));
+        tag.write_to_path(&input).unwrap();
+
+        let job: crate::job::Job = serde_json::from_str(&format!(
+            r#"{{ "schema_version": 1, "inputs": ["{input}"],
+                    "input_supplied": {{"title": "Explicit Book", "authors": ["A"]}},
+                    "output_root": "{root}", "path_format": "{{author}}/{{title}}",
+                    "chapters": {{ "write": {{ "chapters": [
+                        {{"title": "Explicit One", "start_millis": 0, "duration_millis": 2000}},
+                        {{"title": "Explicit Two", "start_millis": 2000, "duration_millis": 3000}} ] }} }} }}"#,
+            input = input.display(),
+            root = output_root.display()
+        ))
+        .unwrap();
+        let effective = job.resolve(None).await.unwrap();
+        let processor = Processor::for_job(job, config).unwrap();
+        let group = AudioGroup {
+            name: "Explicit Book".to_string(),
+            files: vec![AudioFile::new(input).unwrap()],
+            disc_number: None,
+        };
+        let result =
+            processor.process_group(&group, &NoOpProgressHandler, Some(&effective)).await.unwrap();
+
+        let out_tag = mp4ameta::Tag::read_from_path(&result.output_file).unwrap();
+        let titles: Vec<&str> = out_tag.chapter_list().iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["Explicit One", "Explicit Two"],
+            "the explicit list must be embedded verbatim (source chapter replaced)"
+        );
+        // The chapter track must match the list (both representations).
+        let track_titles: Vec<&str> =
+            out_tag.chapter_track().iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(track_titles, vec!["Explicit One", "Explicit Two"]);
+        // The sidecar lists the same chapters.
+        let sidecar = result.output_file.with_extension("chapters.txt");
+        assert!(sidecar.exists(), "an explicit write must write the sidecar");
+        let sidecar_text = std::fs::read_to_string(&sidecar).unwrap();
+        assert!(sidecar_text.contains("Explicit One") && sidecar_text.contains("Explicit Two"));
+    }
+
+    #[tokio::test]
+    async fn test_job_chapters_preserve_keeps_source_chapters() {
+        // A single-input preserve is a native copy: the source's own chapters
+        // must survive. (The stale-sidecar test uses a chapter-less source, so
+        // it cannot verify preservation of real chapters.)
+        let temp_dir = TempDir::new().unwrap();
+        let output_root = temp_dir.path().join("output");
+        let config = create_test_config(&temp_dir);
+
+        let book_dir = temp_dir.path().join("Preserve Ch Book");
+        let input = create_test_m4b(&book_dir, 10);
+        let mut tag = mp4ameta::Tag::read_from_path(&input).unwrap();
+        tag.chapter_list_mut()
+            .push(mp4ameta::Chapter::new(std::time::Duration::ZERO, "PreservedCh"));
+        tag.write_to_path(&input).unwrap();
+
+        let job: crate::job::Job = serde_json::from_str(&format!(
+            r#"{{ "schema_version": 1, "inputs": ["{input}"],
+                    "input_supplied": {{"title": "Preserve Ch Book", "authors": ["A"]}},
+                    "output_root": "{root}", "path_format": "{{author}}/{{title}}",
+                    "chapters": "preserve", "cover": "preserve" }}"#,
+            input = input.display(),
+            root = output_root.display()
+        ))
+        .unwrap();
+        let effective = job.resolve(None).await.unwrap();
+        let processor = Processor::for_job(job, config).unwrap();
+        let group = AudioGroup {
+            name: "Preserve Ch Book".to_string(),
+            files: vec![AudioFile::new(input).unwrap()],
+            disc_number: None,
+        };
+        let result =
+            processor.process_group(&group, &NoOpProgressHandler, Some(&effective)).await.unwrap();
+
+        let out_tag = mp4ameta::Tag::read_from_path(&result.output_file).unwrap();
+        let titles: Vec<&str> = out_tag.chapter_list().iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["PreservedCh"],
+            "a single-input preserve must keep the source's chapters"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_job_chapters_preserve_multi_input_rejected() {
+        // A merge cannot byte-preserve per-file chapters, so a multi-input
+        // `chapters: preserve` is refused before any output is produced.
+        let temp_dir = TempDir::new().unwrap();
+        let output_root = temp_dir.path().join("output");
+        let config = create_test_config(&temp_dir);
+
+        let book_dir = temp_dir.path().join("MultiCh Book");
+        let f1 = create_test_m4b(&book_dir, 5);
+        let book_dir2 = temp_dir.path().join("MultiCh Book2");
+        let f2 = create_test_m4b(&book_dir2, 5);
+
+        let job: crate::job::Job = serde_json::from_str(&format!(
+            r#"{{ "schema_version": 1, "inputs": ["{a}", "{b}"],
+                    "input_supplied": {{"title": "P", "authors": ["A"]}},
+                    "output_root": "{root}", "path_format": "{{author}}/{{title}}",
+                    "chapters": "preserve" }}"#,
+            a = f1.display(),
+            b = f2.display(),
+            root = output_root.display()
+        ))
+        .unwrap();
+        let effective = job.resolve(None).await.unwrap();
+        let processor = Processor::for_job(job, config).unwrap();
+        let group = AudioGroup {
+            name: "MultiCh Book (multi)".to_string(),
+            files: vec![AudioFile::new(f1).unwrap(), AudioFile::new(f2).unwrap()],
+            disc_number: None,
+        };
+
+        let err = processor
+            .process_group(&group, &NoOpProgressHandler, Some(&effective))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("chapters policy 'preserve'"),
+            "expected the multi-input chapter-preserve rejection, got {err}"
+        );
+        assert!(!output_root.join("A/P.m4b").exists());
     }
 }
