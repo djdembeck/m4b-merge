@@ -549,12 +549,28 @@ impl Tagger {
         // without a valid available value is an error, not a silent preserve.
         Self::validate_policies(metadata, policies)?;
 
+        // An all-preserve set changes no atom, so do not rewrite the file at
+        // all: rewriting would reserialize the whole tag and is not
+        // byte-identical to the input.
+        if Self::all_preserve(policies) {
+            debug!("All policies preserve; leaving {} untouched", path.display());
+            return Ok(());
+        }
+
         let mut tag = mp4ameta::Tag::read_from_path(path).unwrap_or_default();
 
         // Resolve the title/subtitle components independently from the
-        // existing atoms, then write `©nam`/`©alb` once.
-        let (title, subtitle) =
-            Self::resolve_title_subtitle(path, &tag, &policies.title, &policies.subtitle)?;
+        // existing atoms, then write `©nam`/`©alb` once. A written component
+        // uses the effective metadata value (the same string that names the
+        // output path); a preserved component is read back from the file.
+        let (title, subtitle) = Self::resolve_title_subtitle(
+            path,
+            &tag,
+            &policies.title,
+            &policies.subtitle,
+            policies.effective_title(metadata),
+            policies.effective_subtitle(metadata),
+        )?;
 
         // A subtitle without a title is represented as the subtitle alone in
         // both atoms (no fabricated title separator); the unselected
@@ -648,21 +664,33 @@ impl Tagger {
         Ok(())
     }
 
+    /// True when no policy mutates an atom: an all-preserve set can skip the
+    /// file write entirely, keeping the output byte-identical to the input.
+    fn all_preserve(policies: &crate::job::WritePolicies) -> bool {
+        policies.title == crate::job::TitlePolicy::Preserve
+            && policies.subtitle == crate::job::SubtitlePolicy::Preserve
+            && policies.authors == crate::job::FieldPolicy::Preserve
+            && policies.narrators == crate::job::FieldPolicy::Preserve
+            && policies.series == crate::job::FieldPolicy::Preserve
+            && policies.description == crate::job::FieldPolicy::Preserve
+            && policies.genres == crate::job::FieldPolicy::Preserve
+            && policies.year == crate::job::FieldPolicy::Preserve
+    }
+
     /// Refuse a policy set whose `Write` has no valid available value.
     fn validate_policies(
         metadata: &BookMetadata,
         policies: &crate::job::WritePolicies,
     ) -> Result<()> {
-        match &policies.title {
-            crate::job::TitlePolicy::Write(title) if title.trim().is_empty() => {
-                return Err(TaggingError::WriteWithoutValue { field: "title" });
-            }
-            _ => {}
+        if policies.title == crate::job::TitlePolicy::Write
+            && policies.effective_title(metadata).is_none()
+        {
+            return Err(TaggingError::WriteWithoutValue { field: "title" });
         }
-        if let crate::job::SubtitlePolicy::Write(value) = &policies.subtitle {
-            if value.as_deref().map(str::trim).unwrap_or_default().is_empty() {
-                return Err(TaggingError::WriteWithoutValue { field: "subtitle" });
-            }
+        if policies.subtitle == crate::job::SubtitlePolicy::Write
+            && policies.effective_subtitle(metadata).is_none()
+        {
+            return Err(TaggingError::WriteWithoutValue { field: "subtitle" });
         }
         let multi = |name: &'static str, values: &[String]| {
             if Self::join_values(values, ", ").is_none() {
@@ -708,12 +736,16 @@ impl Tagger {
         tag: &mp4ameta::Tag,
         title_policy: &crate::job::TitlePolicy,
         subtitle_policy: &crate::job::SubtitlePolicy,
+        title_value: Option<String>,
+        subtitle_value: Option<String>,
     ) -> Result<(Option<String>, Option<String>)> {
         let existing_title = tag.title().map(|t| t.to_string()).filter(|t| !t.is_empty());
         let existing_album = tag.album().map(|t| t.to_string()).filter(|t| !t.is_empty());
 
         let title: Option<String> = match title_policy {
-            crate::job::TitlePolicy::Write(title) => Some(title.clone()),
+            // The value comes from the effective metadata (validated
+            // non-blank above), never from a string the policy carries.
+            crate::job::TitlePolicy::Write => title_value,
             crate::job::TitlePolicy::Clear => None,
             crate::job::TitlePolicy::Preserve => {
                 // `©alb` is documented as the base title only, so it is the
@@ -732,9 +764,10 @@ impl Tagger {
         };
 
         let subtitle: Option<String> = match subtitle_policy {
-            crate::job::SubtitlePolicy::Write(subtitle) => {
-                subtitle.clone().filter(|s| !s.trim().is_empty())
-            }
+            // The value comes from the effective metadata (validated
+            // non-blank in `validate_policies`), so there is no separate
+            // write-without-value check here.
+            crate::job::SubtitlePolicy::Write => subtitle_value,
             crate::job::SubtitlePolicy::Clear => None,
             crate::job::SubtitlePolicy::Preserve => {
                 // The documented `©nam` form is `title - subtitle`: recover
@@ -744,6 +777,13 @@ impl Tagger {
                 // has no base to subtract — refuse before mutation.
                 match (&existing_album, &existing_title) {
                     (Some(album), Some(t)) => {
+                        // A title equal to the album is the established
+                        // "no subtitle" representation — what `apply_metadata`
+                        // writes and ffmpeg's concat carries over — not an
+                        // error.
+                        if t == album {
+                            return Ok((title, None));
+                        }
                         let sep = format!("{album} - ");
                         // The `©nam`/`©alb` pair is the documented
                         // representation: a title that does not extend the
@@ -2462,8 +2502,20 @@ mod tests {
             .with_year(2024)
     }
 
+    /// A policy set that writes every field; the written values come from the
+    /// effective metadata (the same strings that name the output), so the
+    /// policies carry no values of their own.
     fn all_write_policies() -> crate::job::WritePolicies {
-        crate::job::WritePolicies::write_all("New Title".into(), Some("New Sub".into()))
+        crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Write,
+            authors: crate::job::FieldPolicy::Write,
+            narrators: crate::job::FieldPolicy::Write,
+            series: crate::job::FieldPolicy::Write,
+            description: crate::job::FieldPolicy::Write,
+            genres: crate::job::FieldPolicy::Write,
+            year: crate::job::FieldPolicy::Write,
+        }
     }
 
     #[test]
@@ -2512,7 +2564,9 @@ mod tests {
         assert_eq!(tag.genre().unwrap(), "Original/Genre");
         assert_eq!(tag.year().unwrap(), "2001");
         assert_eq!(tag.grouping().unwrap(), "My Custom Segment | Series: Old #1");
-        let _ = before;
+        // An all-preserve set must leave the file byte-identical: no atom is
+        // rewritten and the file is not reserialized at all.
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
@@ -2521,7 +2575,7 @@ mod tests {
         let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
         let tagger = Tagger::new();
         let policies = crate::job::WritePolicies {
-            title: crate::job::TitlePolicy::Write("Brand New Title".into()),
+            title: crate::job::TitlePolicy::Write,
             subtitle: crate::job::SubtitlePolicy::Preserve,
             authors: crate::job::FieldPolicy::Preserve,
             narrators: crate::job::FieldPolicy::Preserve,
@@ -2533,9 +2587,11 @@ mod tests {
         tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
 
         let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
-        // The unselected subtitle component must survive a title-only write.
-        assert_eq!(tag.title().unwrap(), "Brand New Title - Old Sub");
-        assert_eq!(tag.album().unwrap(), "Brand New Title");
+        // The title is written from the effective metadata (the same string
+        // that names the output), and the unselected subtitle component must
+        // survive a title-only write.
+        assert_eq!(tag.title().unwrap(), "New Title - Old Sub");
+        assert_eq!(tag.album().unwrap(), "New Title");
         // Unselected atoms stay.
         assert_eq!(tag.artist().unwrap(), "Original Artist");
     }
@@ -2547,7 +2603,7 @@ mod tests {
         let tagger = Tagger::new();
         let policies = crate::job::WritePolicies {
             title: crate::job::TitlePolicy::Preserve,
-            subtitle: crate::job::SubtitlePolicy::Write(Some("Brand New Sub".into())),
+            subtitle: crate::job::SubtitlePolicy::Write,
             authors: crate::job::FieldPolicy::Preserve,
             narrators: crate::job::FieldPolicy::Preserve,
             series: crate::job::FieldPolicy::Preserve,
@@ -2558,8 +2614,9 @@ mod tests {
         tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
 
         let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
-        // The unselected title component must survive a subtitle-only write.
-        assert_eq!(tag.title().unwrap(), "Old Title - Brand New Sub");
+        // The subtitle is written from the effective metadata; the unselected
+        // title component must survive a subtitle-only write.
+        assert_eq!(tag.title().unwrap(), "Old Title - New Sub");
         assert_eq!(tag.album().unwrap(), "Old Title");
     }
 
@@ -2596,7 +2653,7 @@ mod tests {
         let tagger = Tagger::new();
         let policies = crate::job::WritePolicies {
             title: crate::job::TitlePolicy::Clear,
-            subtitle: crate::job::SubtitlePolicy::Write(Some("Written Sub".into())),
+            subtitle: crate::job::SubtitlePolicy::Write,
             authors: crate::job::FieldPolicy::Preserve,
             narrators: crate::job::FieldPolicy::Preserve,
             series: crate::job::FieldPolicy::Preserve,
@@ -2607,8 +2664,54 @@ mod tests {
         tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
 
         let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
-        assert_eq!(tag.title().unwrap(), "Written Sub");
-        assert_eq!(tag.album().unwrap(), "Written Sub");
+        assert_eq!(tag.title().unwrap(), "New Sub");
+        assert_eq!(tag.album().unwrap(), "New Sub");
+    }
+
+    #[test]
+    fn policy_preserve_subtitle_on_equal_title_album_is_no_sub() {
+        // A file whose `©nam` equals `©alb` is the established no-subtitle
+        // representation (what `apply_metadata` writes and ffmpeg's concat
+        // carries over): a subtitle preserve must read it as "no subtitle",
+        // not fail, and a plain all-preserve run against it must succeed.
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title", "Old Title");
+        let tagger = Tagger::new();
+        // Write the title, preserve the subtitle: the subtitle preserve must
+        // read the equal title/album pair as "no subtitle", not fail.
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        // Title written from metadata; the preserved subtitle was none, so
+        // `©nam` is the bare title and `©alb` the base title only.
+        assert_eq!(tag.title().unwrap(), "New Title");
+        assert_eq!(tag.album().unwrap(), "New Title");
+    }
+
+    #[test]
+    fn policy_write_subtitle_with_blank_effective_value_fails() {
+        // A subtitle write with no (or blank) effective subtitle value is a
+        // diagnosed failure before any atom is mutated, not a silent clear.
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let meta_no_sub = BookMetadata::new("ID1234567890", "New Title", "d").with_subtitle("  ");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            subtitle: crate::job::SubtitlePolicy::Write,
+            ..all_write_policies()
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta_no_sub, &policies).unwrap_err();
+        assert!(matches!(
+            err,
+            TaggingError::WriteWithoutValue { field } if field == "subtitle"
+        ));
+        // No atom changed: the file is untouched.
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Old Title - Old Sub");
     }
 
     #[test]
@@ -2647,7 +2750,7 @@ mod tests {
         let tagger = Tagger::new();
         // A metadata with no authors, writing authors: must fail, file intact.
         let policies = crate::job::WritePolicies {
-            title: crate::job::TitlePolicy::Write("T".into()),
+            title: crate::job::TitlePolicy::Write,
             subtitle: crate::job::SubtitlePolicy::Preserve,
             authors: crate::job::FieldPolicy::Write,
             narrators: crate::job::FieldPolicy::Preserve,
@@ -2679,7 +2782,7 @@ mod tests {
         let tagger = Tagger::new();
         let policies = crate::job::WritePolicies {
             title: crate::job::TitlePolicy::Preserve,
-            subtitle: crate::job::SubtitlePolicy::Write(Some("Sub".into())),
+            subtitle: crate::job::SubtitlePolicy::Write,
             authors: crate::job::FieldPolicy::Preserve,
             narrators: crate::job::FieldPolicy::Preserve,
             series: crate::job::FieldPolicy::Preserve,
@@ -2707,10 +2810,13 @@ mod tests {
         tag.write_to_path(&path).unwrap();
 
         let tagger = Tagger::new();
+        // Writing authors (a valid write) rebuilds the `©nam`/`©alb` pair from
+        // the preserved components; the inconsistent pair cannot establish the
+        // subtitle, so it fails before any atom is mutated.
         let policies = crate::job::WritePolicies {
             title: crate::job::TitlePolicy::Preserve,
             subtitle: crate::job::SubtitlePolicy::Preserve,
-            authors: crate::job::FieldPolicy::Preserve,
+            authors: crate::job::FieldPolicy::Write,
             narrators: crate::job::FieldPolicy::Preserve,
             series: crate::job::FieldPolicy::Preserve,
             description: crate::job::FieldPolicy::Preserve,
@@ -2728,10 +2834,12 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let path = tagged_m4b(&temp_dir, "Book - Sub  ", "Book");
         let tagger = Tagger::new();
+        // An authors write rebuilds the `©nam`/`©alb` pair from the preserved
+        // components; the preserved subtitle must round-trip exactly.
         let policies = crate::job::WritePolicies {
             title: crate::job::TitlePolicy::Preserve,
             subtitle: crate::job::SubtitlePolicy::Preserve,
-            authors: crate::job::FieldPolicy::Preserve,
+            authors: crate::job::FieldPolicy::Write,
             narrators: crate::job::FieldPolicy::Preserve,
             series: crate::job::FieldPolicy::Preserve,
             description: crate::job::FieldPolicy::Preserve,
@@ -2775,14 +2883,25 @@ mod tests {
     }
 
     #[test]
-    fn write_all_without_subtitle_clears_it() {
-        // A standalone write with no subtitle must be usable (clears the
-        // subtitle component), not a `Write` without a value.
+    fn write_title_and_subtitle_from_effective_metadata() {
+        // A title and subtitle `write` uses the effective metadata's values
+        // (the same strings that name the output), so a job that supplies a
+        // title with no subtitle writes the bare title to `©nam`/`©alb`.
         let temp_dir = TempDir::new().unwrap();
         let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let meta_no_sub = BookMetadata::new("ID1234567890", "New Title", "d");
         let tagger = Tagger::new();
-        let policies = crate::job::WritePolicies::write_all("New Title".into(), None);
-        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Clear,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta_no_sub, &policies).unwrap();
 
         let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
         assert_eq!(tag.title().unwrap(), "New Title");

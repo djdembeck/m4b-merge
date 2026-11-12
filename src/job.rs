@@ -54,30 +54,37 @@ pub enum FieldPolicy {
 }
 
 /// Title-component policy. `preserve` (the default) leaves both existing
-/// title components untouched; `clear` removes them; `{"write": "Title"}`
-/// writes the title.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+/// title components untouched; `clear` removes them; `write` writes the
+/// effective metadata title (a blank effective title is a diagnosed failure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TitlePolicy {
     #[default]
     Preserve,
     Clear,
-    Write(String),
+    Write,
 }
 
 /// Subtitle-component policy. `preserve` (the default) leaves the existing
-/// subtitle component untouched; `clear` removes it; `{"write": "Sub"}`
-/// writes the subtitle (a `null` value is rejected at validation).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+/// subtitle component untouched; `clear` removes it; `write` writes the
+/// effective metadata subtitle (a blank effective subtitle is a diagnosed
+/// failure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SubtitlePolicy {
     #[default]
     Preserve,
     Clear,
-    Write(Option<String>),
+    Write,
 }
 
 /// Scalar atom write policies, shared by the processor and the tagger.
+///
+/// The title/subtitle `write` variants carry no value: a written component
+/// comes from the effective metadata, the same values that name the output
+/// path. A policy value that diverged from the effective metadata would put
+/// the file under one name while tagging it another, so the policy selects
+/// the operation and the metadata owns the value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WritePolicies {
     pub title: TitlePolicy,
@@ -91,24 +98,19 @@ pub struct WritePolicies {
 }
 
 impl WritePolicies {
-    /// The standalone CLI's documented behavior: write every supported field.
-    /// A `None` subtitle writes the title with no subtitle component (a
-    /// `Clear`), so the helper is usable for metadata that has no subtitle
-    /// instead of producing a `Write` without a value.
-    pub fn write_all(title: String, subtitle: Option<String>) -> Self {
-        Self {
-            title: TitlePolicy::Write(title),
-            subtitle: match subtitle {
-                Some(sub) => SubtitlePolicy::Write(Some(sub)),
-                None => SubtitlePolicy::Clear,
-            },
-            authors: FieldPolicy::Write,
-            narrators: FieldPolicy::Write,
-            series: FieldPolicy::Write,
-            description: FieldPolicy::Write,
-            genres: FieldPolicy::Write,
-            year: FieldPolicy::Write,
-        }
+    /// The value a title `write` writes: the effective metadata's base title,
+    /// the same `{title}` token that names the output path. The writer combines
+    /// it with the subtitle component into `©nam`, so the written `©alb` (the
+    /// base title) cannot diverge from the file name. A blank value is a
+    /// diagnosed failure, not a silent clear.
+    pub fn effective_title(&self, metadata: &crate::metadata::BookMetadata) -> Option<String> {
+        let title = metadata.title.trim();
+        (!title.is_empty()).then(|| title.to_string())
+    }
+
+    /// The value a subtitle `write` writes: the effective metadata subtitle.
+    pub fn effective_subtitle(&self, metadata: &crate::metadata::BookMetadata) -> Option<String> {
+        metadata.subtitle.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
     }
 }
 
@@ -243,20 +245,6 @@ impl Job {
         if self.inputs.is_empty() {
             return Err(JobError::Invalid("inputs must not be empty".into()));
         }
-        if let TitlePolicy::Write(title) = &self.title {
-            if title.trim().is_empty() {
-                return Err(JobError::Invalid(
-                    "title policy 'write' requires a title value".into(),
-                ));
-            }
-        }
-        if let SubtitlePolicy::Write(value) = &self.subtitle {
-            if value.as_deref().map(str::trim).unwrap_or_default().is_empty() {
-                return Err(JobError::Invalid(
-                    "subtitle policy 'write' requires a subtitle value".into(),
-                ));
-            }
-        }
         // Supplied mode: the effective series value (base, with an override
         // winning) is known now, so reject a blank write here, mirroring
         // title/subtitle. Provider mode's value is only known after the fetch,
@@ -315,8 +303,9 @@ impl Job {
             }
             (None, Some(supplied)) => {
                 // Supplied mode is authoritative: no catalog lookup, no ASIN or
-                // filename rematch, and no provider-dependent metadata_id.
-                return self.effective_from_supplied(supplied, self.overrides.as_ref());
+                // filename rematch, and no provider-dependent metadata_id. The
+                // override layer is applied exactly once below, on the base.
+                self.base_from_supplied(supplied)?
             }
             (Some(_), Some(_)) => unreachable!("validate() rejects both bases"),
             (None, None) => unreachable!("validate() requires exactly one base"),
@@ -341,8 +330,8 @@ impl Job {
     /// The job's per-atom write policies, independent of the metadata base.
     fn policies_from(&self) -> WritePolicies {
         WritePolicies {
-            title: self.title.clone(),
-            subtitle: self.subtitle.clone(),
+            title: self.title,
+            subtitle: self.subtitle,
             authors: self.authors,
             narrators: self.narrators,
             series: self.series,
@@ -352,15 +341,13 @@ impl Job {
         }
     }
 
-    /// Build the effective job for a supplied (authoritative) base, applying
-    /// the override layer exactly once. No catalog lookup and no provider
-    /// dependency: a supplied job resolves fully offline.
-    fn effective_from_supplied(
-        &self,
-        supplied: &SuppliedInput,
-        overrides: Option<&OverrideFields>,
-    ) -> Result<EffectiveJob> {
-        let mut effective = BookMetadata {
+    /// Build the supplied (authoritative) base metadata. No catalog lookup and
+    /// no provider dependency: a supplied job resolves fully offline. The
+    /// override layer is applied by [`Self::resolve`], exactly once, so a
+    /// non-idempotent policy (e.g. `clear` after `write`) is never applied
+    /// twice.
+    fn base_from_supplied(&self, supplied: &SuppliedInput) -> Result<BookMetadata> {
+        Ok(BookMetadata {
             metadata_id: String::new(),
             title: supplied.title.clone(),
             subtitle: supplied.subtitle.clone(),
@@ -373,16 +360,6 @@ impl Job {
             year: supplied.year,
             cover_url: None,
             chapters: Vec::new(),
-        };
-        apply_overrides(&mut effective, overrides);
-        if effective.title.trim().is_empty() {
-            return Err(JobError::Invalid("effective title is empty".into()));
-        }
-        Ok(EffectiveJob {
-            metadata: effective,
-            policies: self.policies_from(),
-            path_format: self.path_format.clone(),
-            completed_directory: self.completed_directory.clone(),
         })
     }
 }
@@ -457,30 +434,35 @@ mod tests {
             "input_supplied": { "title": "The Test" },
             "output_root": "/tmp/out",
             "path_format": "{author}/{title}",
-            "title": { "write": "The Test" }
+            "title": "write"
         }"#;
         let job: Job = serde_json::from_str(raw).unwrap();
         assert_eq!(job.schema_version, 1);
         assert!(job.input_supplied.is_some());
-        assert!(matches!(job.title, TitlePolicy::Write(_)));
+        assert_eq!(job.title, TitlePolicy::Write);
         assert!(matches!(job.authors, FieldPolicy::Preserve));
         job.validate().unwrap();
     }
 
+    #[tokio::test]
+    async fn parses_unit_title_subtitle_write() {
+        // Title and subtitle `write` are unit variants: the bare word selects
+        // the operation; the value comes from the effective metadata, so the
+        // policy carries no string and cannot diverge from the output path.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o", "title": "write", "subtitle": "write" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        assert_eq!(job.title, TitlePolicy::Write);
+        assert_eq!(job.subtitle, SubtitlePolicy::Write);
+        job.validate().unwrap();
+        // The effective value is the metadata's full title / subtitle.
+        let effective = job.resolve(None).await.unwrap();
+        assert_eq!(effective.policies.effective_title(&effective.metadata).as_deref(), Some("T"));
+        assert_eq!(effective.policies.effective_subtitle(&effective.metadata), None);
+    }
+
     #[test]
     fn rejects_write_without_value() {
-        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
-            "output_root": "/o", "title": { "write": "  " } }"#;
-        let job: Job = serde_json::from_str(raw).unwrap();
-        let err = job.validate().unwrap_err().to_string();
-        assert!(err.contains("title"), "{err}");
-
-        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
-            "output_root": "/o", "subtitle": { "write": null } }"#;
-        let job: Job = serde_json::from_str(raw).unwrap();
-        let err = job.validate().unwrap_err().to_string();
-        assert!(err.contains("subtitle"), "{err}");
-
         // A series write with no (or blank) supplied series name is rejected
         // at job validation, not after the merge.
         let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T", "series_name": "  "},

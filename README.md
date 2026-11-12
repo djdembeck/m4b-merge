@@ -140,7 +140,7 @@ fields; present non-blank values win over the base.
   },
   "output_root": "/library",
   "path_format": "{author}/{title}",
-  "title": { "write": "The Great Gatsby" },
+  "title": "write",
   "subtitle": "preserve",
   "authors": "write",
   "year": "clear"
@@ -162,7 +162,10 @@ Field semantics:
   are not moved.
 - `overrides` (optional) — same shape as `input_supplied`; present
   non-blank values win over the base.
-- `title` / `subtitle` — `preserve` (default), `clear`, or `{"write": "value"}`.
+- `title` / `subtitle` — `preserve` (default), `clear`, or `write`. A `write`
+  writes the effective metadata's value (the title, and the subtitle when one
+  is present) — the same strings that name the output path, so the tag cannot
+  diverge from the file name — and fails the job if that value is blank.
   Title and subtitle share the `©nam`/`©alb` atom pair: a write of one
   component preserves the other, and `clear` of one removes only that
   component. `preserve` recovers the component from the existing tags; a file
