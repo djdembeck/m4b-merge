@@ -239,8 +239,11 @@ impl Processor {
     /// mode) or the absence of a client (supplied mode), so a supplied job
     /// runs fully offline.
     pub fn for_job(job: crate::job::Job, config: Config) -> Result<Self> {
-        let source = match job.source.as_ref() {
-            Some(src) => Some(
+        // Only a provider job constructs a metadata client. A supplied job is
+        // fully offline: a `source` object, if present, is irrelevant and must
+        // not build a client.
+        let source = match (&job.input_provider, job.source.as_ref()) {
+            (Some(_), Some(src)) => Some(
                 MetadataSource::new_with_region(
                     src.source,
                     src.api_url.as_deref(),
@@ -248,19 +251,16 @@ impl Processor {
                 )
                 .map_err(|e| ProcessorError::Job(crate::job::JobError::Metadata(e)))?,
             ),
-            // Provider input without an explicit source uses the configured
-            // kind defaults; supplied input never needs a client.
-            None => match &job.input_provider {
-                Some(_) => Some(
-                    MetadataSource::new_with_region(
-                        config.metadata_source,
-                        config.api_url.as_deref(),
-                        config.region,
-                    )
-                    .map_err(|e| ProcessorError::Job(crate::job::JobError::Metadata(e)))?,
-                ),
-                None => None,
-            },
+            (Some(_), None) => Some(
+                MetadataSource::new_with_region(
+                    config.metadata_source,
+                    config.api_url.as_deref(),
+                    config.region,
+                )
+                .map_err(|e| ProcessorError::Job(crate::job::JobError::Metadata(e)))?,
+            ),
+            // Supplied input never needs a client, regardless of `source`.
+            (None, _) => None,
         };
 
         let ffmpeg = Arc::new(
@@ -358,7 +358,16 @@ impl Processor {
                         .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))?;
                 }
             }
-            crate::discovery::discover_and_group(&inputs)?
+            // Dry-run is tolerant of discovery errors: they become an empty
+            // group list (and a warning) rather than failing the run.
+            match crate::discovery::discover_and_group(&inputs) {
+                Ok(groups) => groups,
+                Err(e) if self.config.dry_run => {
+                    warn!("Discovery error in dry-run mode: {e}");
+                    Vec::new()
+                }
+                Err(e) => return Err(e.into()),
+            }
         };
         info!("Discovered {} audio groups to process", groups.len());
 
@@ -763,6 +772,10 @@ impl Processor {
         if chapters.is_empty() {
             chapters = self.input_chapters(group);
         }
+        // Normalize once by start time so the embedded chapters and the
+        // `chapters.txt` sidecar list the same order; `embed_chapters` sorts a
+        // copy internally, but the sidecar writer preserves input order.
+        chapters.sort_by_key(|c| c.start_time);
 
         // Stage 3: Merge
         progress_handler.on_progress(ProcessingProgress {

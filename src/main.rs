@@ -58,9 +58,11 @@ struct Args {
     #[arg(short = 'a', long = "metadata-id", value_name = "ID")]
     pub metadata_id: Option<String>,
 
-    /// Process from a versioned JSON job file (authoritative metadata base,
-    /// per-field write policies, cover/chapter policies). Mutually exclusive
-    /// with -i, -a, -o, -p, and --completed-directory.
+    /// Process a book from a versioned JSON job file. The job is the
+    /// authoritative source for the metadata base (a provider id with an
+    /// optional exact release, or fully supplied values) plus a manual
+    /// overrides layer and the output root/template. Mutually exclusive with
+    /// -i, -a, -o, -p, and --completed-directory.
     #[arg(long = "job", value_name = "FILE")]
     pub job: Option<PathBuf>,
 

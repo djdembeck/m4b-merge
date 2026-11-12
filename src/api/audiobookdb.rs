@@ -1392,6 +1392,77 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_explicit_release_selection_over_loopback() {
+        // The pinned-release path: the requested release id is verified as a
+        // member of the book and fetched; a non-member pin is rejected; and a
+        // failed fetch of an explicit release is a diagnosed error.
+        let book = r#"{
+            "id": "abc123def456",
+            "title": "T",
+            "people": [{"role": {"name": "author"}, "person": {"name": "Author A"}}],
+            "releases": [{"id": "relAaa1111"}, {"id": "relBbb2222"}]
+        }"#;
+        let release = r#"{
+            "id": "relAaa1111",
+            "chapterDetail": {"chapters": [
+                {"ordinal": 1, "title": "One", "startOffsetMs": 0, "lengthMs": 1000}
+            ]}
+        }"#;
+        let responses: std::collections::HashMap<String, (u16, String)> = [
+            (
+                "/books/abc123def456?include=people,releases,series,genres,images".to_string(),
+                (200, book.to_string()),
+            ),
+            // relBbb2222 is a member (membership passes) but its fetch 404s,
+            // which must be a diagnosed error for an explicit pin.
+            ("/releases/relAaa1111".to_string(), (200, release.to_string())),
+            ("/releases/relBbb2222".to_string(), (404, String::new())),
+        ]
+        .into_iter()
+        .collect();
+        let (base, requests): (String, Arc<std::sync::Mutex<Vec<String>>>) =
+            mock_book_api(responses).await;
+        let client = AudiobookdbClient::with_base_url(&base).expect("client should build");
+
+        // (1) A verified member release is fetched and mapped.
+        let meta = client
+            .fetch_book_with_release("abc123def456", Some("relAaa1111"))
+            .await
+            .expect("a member release resolves");
+        assert_eq!(meta.chapters.len(), 1, "the pinned release's chapters are mapped");
+        assert_eq!(
+            requests.lock().unwrap().clone(),
+            vec![
+                "/books/abc123def456?include=people,releases,series,genres,images",
+                "/releases/relAaa1111",
+            ],
+            "a pinned release fetches the book then that exact release"
+        );
+
+        // (2) A release id the book does not carry is ReleaseNotFound — and no
+        // release endpoint is touched (membership fails before any fetch).
+        let err = client
+            .fetch_book_with_release("abc123def456", Some("relZzz9999"))
+            .await
+            .expect_err("a non-member pin must be rejected");
+        assert!(
+            matches!(&err, AudiobookdbError::ReleaseNotFound { release_id, .. } if release_id == "relZzz9999"),
+            "expected ReleaseNotFound(relZzz9999), got {err:?}"
+        );
+
+        // (3) A verified member whose fetch fails is a diagnosed error, not a
+        // silent fall back to chapter-less metadata.
+        let err = client
+            .fetch_book_with_release("abc123def456", Some("relBbb2222"))
+            .await
+            .expect_err("a failed explicit release fetch must error");
+        assert!(
+            matches!(&err, AudiobookdbError::NotFound(_)),
+            "expected a release fetch failure, got {err:?}"
+        );
+    }
+
     #[test]
     fn test_release_cover_wins_over_book_cover() {
         // A release that ships its own edition cover wins over the book's.

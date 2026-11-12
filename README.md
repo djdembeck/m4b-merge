@@ -143,6 +143,9 @@ Field semantics:
 - `source` (optional) — `{"source": "audiobookdb" | "audnexus",
   "api_url": "…", "region": "…"}`; defaults to the CLI defaults when omitted
   in provider mode, and is irrelevant in supplied mode.
+- `completed_directory` (optional) — after successful processing, the source
+  files are moved here; when omitted, the CLI `--completed-directory` setting
+  applies.
 - `overrides` (optional) — same shape as `input_supplied`.
 
 Every supported scalar metadata field is written from the effective
