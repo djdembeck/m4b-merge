@@ -537,10 +537,9 @@ impl Job {
         }
     }
 
-    /// The metadata source a job's provider mode builds (or `None` in
-    /// supplied mode). Shared by execution (`Processor::for_job`) and the
-    /// preview, so both see the same client construction — and supplied mode
-    /// performs no catalog request in either.
+    /// The metadata source a job's provider mode builds (`None` in supplied
+    /// mode). Shared by execution and the preview so both construct the same
+    /// client — and supplied mode performs no catalog request in either.
     pub fn metadata_source(
         &self,
         config: &crate::config::Config,
@@ -633,10 +632,8 @@ impl Job {
 }
 
 /// A non-mutating preview of a job's resolved output path and effective
-/// metadata. The `relative_path` is the exact sanitized relative path (inside
-/// `output_root`) that execution will produce from this job's effective
-/// metadata; it is produced by the same resolver and the same effective
-/// metadata as execution, so preview and execution agree.
+/// metadata. `relative_path` is the exact sanitized relative path (inside
+/// `output_root`) execution produces from the same effective metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JobPreview {
     pub schema_version: u32,
@@ -1167,12 +1164,17 @@ mod tests {
                    "authors": ["A"], "year": 2020 }},
                "overrides": {{ "authors": ["C"] }},
                "output_root": {output_root:?},
+               "source": {{ "source": "audiobookdb" }},
                "path_format": "{{author}}/{{title}} - {{subtitle}} ({{year}})" }}"#
         );
         let job: Job = serde_json::from_str(&raw).unwrap();
         let preview = job.preview(&preview_config()).await.unwrap();
-        // The preview's path is the exact string execution's resolver
-        // produces from the same effective metadata (override wins).
+        // Supplied mode previews with no catalog request (a `source` object
+        // is irrelevant to supplied input) and carries no provider IDs.
+        assert!(preview.metadata.metadata_id.is_empty());
+        assert!(preview.metadata.book_id.is_empty());
+        // The path is the exact string execution's resolver produces from
+        // the same effective metadata (override wins).
         let effective = job.resolve(None).await.unwrap();
         assert_eq!(
             preview.relative_path,
@@ -1193,29 +1195,10 @@ mod tests {
         // Non-mutating: no output root, no media.
         assert!(!output_root.exists(), "preview must not create the output root");
         assert!(input.exists(), "input untouched");
-    }
 
-    #[tokio::test]
-    async fn preview_supplied_needs_no_catalog_and_rejects_unknown_token() {
-        // A supplied job previews with no client at all (catalog-unavailable
-        // is a non-event in supplied mode) and an unknown token is rejected
-        // before any mutation.
-        let temp = tempfile::TempDir::new().unwrap();
-        let output_root = temp.path().join("out");
-        let ok = format!(
-            r#"{{ "schema_version": 1, "inputs": ["in.m4b"],
-               "input_supplied": {{ "title": "T", "authors": ["A"] }},
-               "output_root": {output_root:?},
-               "source": {{ "source": "audiobookdb" }} }}"#
-        );
-        let job: Job = serde_json::from_str(&ok).unwrap();
-        let preview = job.preview(&preview_config()).await.unwrap();
-        assert_eq!(preview.relative_path, "A/T.m4b");
-        assert!(preview.metadata.metadata_id.is_empty());
-        assert!(preview.metadata.book_id.is_empty());
-
+        // An unknown token is rejected before any mutation.
         let bad = format!(
-            r#"{{ "schema_version": 1, "inputs": ["in.m4b"],
+            r#"{{ "schema_version": 1, "inputs": [{input:?}],
                "input_supplied": {{ "title": "T" }},
                "output_root": {output_root:?},
                "path_format": "{{author}}/{{bogus}}" }}"#

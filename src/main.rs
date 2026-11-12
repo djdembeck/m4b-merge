@@ -70,20 +70,17 @@ struct Args {
     #[arg(long = "dry-run")]
     pub dry_run: bool,
 
-    /// Non-mutating job preview: resolve the job's effective metadata and
-    /// print the exact sanitized relative output path (plus the effective
-    /// values) as JSON, using the same resolver and metadata as execution.
-    /// Creates no output directories, writes no media, and reserves no
-    /// names; collisions and media errors are execution-time. Job mode only,
-    /// mutually exclusive with `--machine`.
+    /// Non-mutating job preview: print the exact sanitized relative output
+    /// path (plus effective values) as JSON, from the same resolver and
+    /// metadata as execution. No directories, media, or name reservations.
+    /// Job mode only; mutually exclusive with `--machine`.
     #[arg(long = "job-preview")]
     pub job_preview: bool,
 
-    /// Machine-readable execution results: stable JSON on stdout only (all
-    /// logs and progress go to stderr), enumerating every produced output
-    /// and sidecar, per-group outcome, and diagnosed errors. Job mode only;
-    /// exits nonzero on partial or total failure. Mutually exclusive with
-    /// `--job-preview`.
+    /// Machine-readable execution results: stable JSON on stdout only (logs
+    /// and progress go to stderr), enumerating every produced output and
+    /// sidecar, per-group outcome, and diagnosed errors. Job mode only;
+    /// exits nonzero on any failure. Mutually exclusive with `--job-preview`.
     #[arg(long = "machine")]
     pub machine: bool,
 

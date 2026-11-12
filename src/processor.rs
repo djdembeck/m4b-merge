@@ -81,8 +81,7 @@ pub enum ProcessorError {
     #[error("Partial processing complete: {detail}")]
     PartialFailure { results: Vec<ProcessingResult>, outcomes: Vec<GroupOutcomes>, detail: String },
 
-    /// Every group failed; the per-group diagnostics survive on the outcome
-    /// list so a machine result can name each failure without guessing.
+    /// Every group failed; per-group diagnostics survive on `outcomes`.
     #[error("Group processing failed: {detail}")]
     AllGroupsFailed { outcomes: Vec<GroupOutcomes>, detail: String },
 
@@ -104,15 +103,13 @@ pub struct RunOutcome {
 }
 
 /// The per-group outcome: identity, every produced artifact, inputs, and the
-/// diagnosed error. Used by the machine result and by `PartialFailure`/
-/// `AllGroupsFailed` so no produced artifact or failure is ever undisclosed.
+/// diagnosed error, so no artifact or failure is ever undisclosed.
 #[derive(Debug, Clone)]
 pub struct GroupOutcomes {
     /// The group's identity as discovered.
     pub group: String,
-    /// Every produced output and sidecar for this group, relative to the
-    /// job's `output_root`; empty when the group failed before producing
-    /// anything.
+    /// Every produced output and sidecar, relative to the job's
+    /// `output_root`; empty when the group failed before producing anything.
     pub artifacts: Vec<crate::job::Artifact>,
     pub input_files: Vec<PathBuf>,
     pub files_moved: bool,
@@ -356,8 +353,8 @@ impl Processor {
     }
 
     /// The full run outcome: every group's result and diagnosed failure, so
-    /// a machine result can enumerate all groups without guessing. This is
-    /// the single entry point the `--machine` flow uses; `process*` wrap it.
+    /// a machine result can enumerate all groups. The single entry point the
+    /// `--machine` flow uses; `process*` wrap it.
     pub async fn run(
         &self,
         inputs: Vec<PathBuf>,
@@ -429,11 +426,10 @@ impl Processor {
             return Err(ProcessorError::NoInputs);
         }
 
-        // Best-effort: each group is processed independently. Every group's
-        // outcome — artifacts, inputs, files_moved, and the diagnosed error
-        // on failure — is recorded so a machine result can enumerate all
-        // groups and artifacts, including on partial failure, and never
-        // claims a failed group succeeded.
+        // Best-effort: each group is processed independently, and every
+        // group's outcome is recorded (artifacts, inputs, files_moved, and
+        // the diagnosed error on failure) so a machine result can enumerate
+        // all groups without claiming a failed group succeeded.
         let mut results = Vec::new();
         let mut failed_groups: Vec<(String, String)> = Vec::new();
         let mut outcomes: Vec<GroupOutcomes> = Vec::new();
@@ -463,12 +459,11 @@ impl Processor {
                 Err(e) => {
                     warn!("Group '{}' failed: {}", group.name, e);
                     failed_groups.push((group.name.clone(), e.to_string()));
+                    // The pipeline discards a rejected merged output before a
+                    // group fails, so no artifact survives; the diagnosed
+                    // error carries the truth.
                     outcomes.push(GroupOutcomes {
                         group: group.name.clone(),
-                        // The pipeline discards a rejected merged output before
-                        // a group fails (a failed book must not look complete),
-                        // so no artifact survives; the diagnosed error carries
-                        // the truth.
                         artifacts: Vec::new(),
                         input_files: group.files.iter().map(|f| f.path.clone()).collect(),
                         files_moved: false,
@@ -911,11 +906,8 @@ impl Processor {
         // audio ends.
 
         // Engine-side no-clobber: the output name is claimed with
-        // `O_CREAT|O_EXCL` immediately before the write. No silent suffixing,
-        // no exists-then-rename race (nothing is renamed into place), and the
-        // merge writes to the exact claimed path. A claim failure — the path
-        // exists, as a file or directory — is a diagnosed collision, and the
-        // existing file is left untouched.
+        // `O_CREAT|O_EXCL` immediately before the write; a claim failure is
+        // a diagnosed collision that leaves the existing file untouched.
         self.claim_output_name(&output_path)?;
 
         // Stage 3: Merge
@@ -1238,14 +1230,12 @@ impl Processor {
     }
 
     /// Claim the output file name before any write: `O_CREAT|O_EXCL`
-    /// atomically reserves the exact path. If the path already exists — as a
-    /// file, a directory, or via a race with another run — the claim fails
-    /// with a diagnosed collision and nothing is written, renamed, or
-    /// suffixed. The merge then writes to the claimed path (truncating the
-    /// engine-owned placeholder it just created, never a pre-existing file).
-    /// After creating the parent directories, their canonical location is
-    /// re-validated against the output root so a directory that was a
-    /// missing (or swapped-to-symlink) component during the pre-check cannot
+    /// atomically reserves the exact path, so a pre-existing file or
+    /// directory (or a concurrent claim) fails with a diagnosed collision —
+    /// nothing is written, renamed, or suffixed. The merge writes to the
+    /// engine-owned placeholder it just created, never a pre-existing file.
+    /// After creating parent directories, their canonical location is
+    /// re-validated against the output root so a swapped-in symlink cannot
     /// carry the write outside the root.
     fn claim_output_name(&self, output_path: &std::path::Path) -> Result<()> {
         // Job-mode only: the claim runs inside a job run.

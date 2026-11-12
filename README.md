@@ -267,11 +267,11 @@ Job execution claims the exact resolved output name with
 `O_CREAT|O_EXCL` before any write: no silent suffixing, no
 exists-then-rename race, and no overwrite rename. If the path already exists
 (as a file or directory), the run fails with a diagnosed collision and the
-existing file is left untouched; a failed group also leaves no falsely
-successful partial output and never destroys its source files. Root
-containment (above) applies before the write as well. This protects the
-job's staging area only: publishing a staged output into a shared,
-externally-owned destination still needs the caller's own race-safe
+existing file is left untouched; a failed group leaves no falsely successful
+partial output and never destroys its source files. Created parent
+directories are re-validated against the output root at claim time. This
+protects the job's staging area only: publishing a staged output into a
+shared, externally-owned destination still needs the caller's own race-safe
 no-replace publication — staging alone does not protect that path.
 
 ### Verify Environment
