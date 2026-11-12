@@ -76,6 +76,15 @@ Provide a metadata ID (ASIN or AudiobookDB book ID) to automatically fetch metad
 m4b-merge -i input/book_folder/ -a B012345678
 ```
 
+The looked-up edition is release-first: the selected release's title, subtitle,
+and release date win when present, and the book-level title/subtitle are the
+fallback (year falls back to the book copyright, then original publication; the
+subtitle falls back to the book subtitle, then the book's disambiguation). This
+applies to the legacy `--metadata-id` CLI path as well as the `--job`
+`input_provider` path, so for reissued editions the embedded title and year are
+the release's. An explicit `release_id` that the book does not carry is a
+diagnosed failure — never a silent fall back to the book's first release.
+
 Non-US Audible books need `--region` with `--metadata-source audnexus` (default `us`; accepted: `au ca de es fr in it jp us uk`).
 
 ### Custom Output & Organization
@@ -98,6 +107,60 @@ m4b-merge -i input/book_folder/ \
   --num-cpus 8 \
   --completed-directory /path/to/done
 ```
+
+### Authoritative Job File
+
+Process a book from a versioned JSON job file. The job is the single source
+of truth for the metadata base, the manual overrides, and the output; it is
+mutually exclusive with `-i`, `-o`, `-p`, `-a`, and `--completed-directory`.
+
+```bash
+m4b-merge --job job.json
+```
+
+The job selects its metadata base exactly one of two ways:
+
+- `input_provider` — an explicit catalog id (`book_id`, plus an exact
+  `release_id` for `audiobookdb`). An unresolvable id, a release the book
+  does not carry, or a missing client fails the job before any file is
+  touched.
+- `input_supplied` — the values are authoritative as-is; no catalog lookup
+  is attempted and the job runs fully offline.
+
+An optional `overrides` object replaces individual fields; present
+non-blank values win over the base.
+
+```json
+{
+  "schema_version": 1,
+  "inputs": ["/data/book/track1.m4a"],
+  "input_supplied": {
+    "title": "The Great Gatsby",
+    "authors": ["F. Scott Fitzgerald"]
+  },
+  "output_root": "/library",
+  "path_format": "{author}/{title}"
+}
+```
+
+Field semantics:
+
+- `inputs` (required, non-empty) — the audio files to merge.
+- `output_root` (required) — the output directory root; created if missing.
+- `path_format` (optional) — output template inside the root; default
+  `{author}/{title}` (see Path Format Variables).
+- `source` (optional) — `{"source": "audiobookdb" | "audnexus",
+  "api_url": "…", "region": "…"}`; defaults to the CLI defaults when omitted
+  in provider mode, and is irrelevant in supplied mode.
+- `completed_directory` (optional) — after successful processing, the source
+  files are moved here. In job mode the CLI `--completed-directory` flag is
+  rejected (the job file owns it), so omitting this field means the sources
+  are not moved.
+- `overrides` (optional) — same shape as `input_supplied`.
+
+Every supported scalar metadata field is written from the effective
+metadata; the provider cover URL (when present) is embedded, and the resolved
+chapters are embedded with a `chapters.txt` sidecar.
 
 ### Verify Environment
 

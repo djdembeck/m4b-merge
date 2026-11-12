@@ -16,7 +16,18 @@ use super::client::{
 pub const DEFAULT_API_URL: &str = "https://api.audnex.us";
 
 /// Audible region for Audnexus lookups (`?region=` query parameter).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    clap::ValueEnum,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum MetadataRegion {
     Au,
     Ca,

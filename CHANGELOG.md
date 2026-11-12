@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file. See [standa
 
 
 ### Added
+- `--job FILE` processes a book from a versioned JSON job file (schema
+  `schema_version: 1`). The job is the single source of truth for the
+  metadata base — an explicit catalog id via `input_provider`, or
+  authoritative `input_supplied` values with no catalog lookup — the manual
+  `overrides` layer, and the output (`inputs`, `output_root`,
+  `path_format`, default `{author}/{title}`). It is mutually exclusive with
+  the legacy `-i`/`-o`/`-p`/`-a`/`--completed-directory` flags. An
+  unresolvable explicit id, a release the book does not carry, or a missing
+  client fails the job before discovery, merge, or source moves. Every
+  supported scalar metadata field is written from the effective metadata,
+  the provider cover URL (when present) is embedded, and the resolved
+  chapters are embedded with a `chapters.txt` sidecar.
 - Chapter embedding into M4B files using native mp4ameta library
 - Chapters are now embedded directly into the M4B container, not just written to chapters.txt
 - Full chapter metadata round-trip: extraction from source → embedding in output
@@ -53,6 +65,15 @@ All notable changes to this project will be documented in this file. See [standa
   selected source's default API URL. `--api-url` no longer implies the Audnexus
   source: it only overrides the URL for the source chosen by `--metadata-source`,
   and m4b-merge warns when a URL is passed to the AudiobookDB client.
+- **Deliberate behavior change:** looked-up editions are now release-first. The
+  selected release's title, subtitle, and release date win when present, with the
+  book-level title/subtitle as fallback (year falls back to the book copyright,
+  then original publication; subtitle to the book subtitle, then its
+  disambiguation). This applies to the legacy `--metadata-id` CLI path as well as
+  the `--job` `input_provider` path, so reissued editions now embed the release
+  title and `©day` where they previously embedded the book title and copyright
+  year. A pinned `release_id` the book does not carry fails with a diagnosed
+  error rather than silently falling back to the book's first release.
 
 ## [1.0.1](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.1) (2026-08-03)
 

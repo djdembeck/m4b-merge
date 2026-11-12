@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 use crate::api::{MetadataError, MetadataSource};
 use crate::audio::ffmpeg::{FFmpeg, FFmpegError};
 use crate::config::Config;
-use crate::discovery::{AudioFile, AudioGroup, DiscoveryError, discover_and_group};
+use crate::discovery::{AudioFile, AudioGroup, DiscoveryError};
 use crate::merge::{MergeError, MergeJob, Merger};
 use crate::metadata::BookMetadata;
 use crate::tagging::{Tagger, TaggingError, describe_out_of_range_chapters, format_duration};
@@ -47,6 +47,9 @@ pub enum ProcessorError {
 
     #[error("No input files provided")]
     NoInputs,
+
+    #[error("Job input error: {0}")]
+    Job(#[from] crate::job::JobError),
 
     #[error("No output directory specified")]
     NoOutputDir,
@@ -171,6 +174,9 @@ pub struct Processor {
     api_client: Option<MetadataSource>,
     merger: Merger,
     tagger: Tagger,
+    /// Structured job input (authoritative metadata base, overrides, and
+    /// per-field write policies); `None` for the legacy standalone CLI.
+    job: Option<crate::job::Job>,
     /// Test-only substitute for [`Tagger::embed_chapters`], so the
     /// chapter-embed failure path can be exercised without a real file.
     #[cfg(test)]
@@ -219,6 +225,59 @@ impl Processor {
             api_client,
             merger,
             tagger,
+            job: None,
+            #[cfg(test)]
+            embed_hook,
+        })
+    }
+
+    /// Create a processor for a structured job file.
+    ///
+    /// The job supplies its own metadata base and output; its inputs drive
+    /// discovery. The CLI's `--metadata-source`/`--api-url`/`--region` flags
+    /// are ignored in favor of the job's own `source` selection (provider
+    /// mode) or the absence of a client (supplied mode), so a supplied job
+    /// runs fully offline.
+    pub fn for_job(job: crate::job::Job, config: Config) -> Result<Self> {
+        // Only a provider job constructs a metadata client. A supplied job is
+        // fully offline: a `source` object, if present, is irrelevant and must
+        // not build a client.
+        let source = match (&job.input_provider, job.source.as_ref()) {
+            (Some(_), Some(src)) => Some(
+                MetadataSource::new_with_region(
+                    src.source,
+                    src.api_url.as_deref(),
+                    src.region.unwrap_or(crate::api::MetadataRegion::Us),
+                )
+                .map_err(|e| ProcessorError::Job(crate::job::JobError::Metadata(e)))?,
+            ),
+            (Some(_), None) => Some(
+                MetadataSource::new_with_region(
+                    config.metadata_source,
+                    config.api_url.as_deref(),
+                    config.region,
+                )
+                .map_err(|e| ProcessorError::Job(crate::job::JobError::Metadata(e)))?,
+            ),
+            // Supplied input never needs a client, regardless of `source`.
+            (None, _) => None,
+        };
+
+        let ffmpeg = Arc::new(
+            FFmpeg::discover().map_err(|e| ProcessorError::FFmpegNotFound(e.to_string()))?,
+        );
+        let merger = Merger::new(ffmpeg.clone());
+        let tagger = Tagger::new();
+        #[cfg(test)]
+        let embed_hook = None;
+
+        Ok(Self {
+            config,
+            ffmpeg,
+            api_client: source,
+            merger,
+            tagger,
+            job: Some(job),
             #[cfg(test)]
             embed_hook,
         })
@@ -240,6 +299,7 @@ impl Processor {
             config,
             ffmpeg,
             api_client,
+            job: None,
             merger,
             tagger,
             #[cfg(test)]
@@ -262,12 +322,21 @@ impl Processor {
             return Err(ProcessorError::NoInputs);
         }
 
-        // Skip creating output directory in dry-run mode
-        if !self.config.dry_run {
-            if let Some(output) = &self.config.output {
-                std::fs::create_dir_all(output)
-                    .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))?;
-            }
+        // A structured job is one book. Resolve it exactly once, before
+        // discovery and before the output root is created: an unresolvable
+        // provider id (or a disabled client) fails before any directory,
+        // merge, or source move. In provider mode this is the only catalog
+        // fetch of the run; in supplied mode no client exists at all. Dry-run
+        // never resolves, so it stays network-free.
+        let resolved_job: Option<crate::job::EffectiveJob> = match &self.job {
+            Some(job) if !self.config.dry_run => Some(job.resolve(self.api_client.as_ref()).await?),
+            _ => None,
+        };
+        if resolved_job.is_some() {
+            info!(
+                "Job resolved; processing '{}' as one book",
+                self.job.as_ref().unwrap().output_root.display()
+            );
         }
 
         // Stage 1: Discovery
@@ -279,7 +348,27 @@ impl Processor {
             message: "Discovering audio files...".to_string(),
         });
 
-        let groups = self.discover_files(&inputs)?;
+        let job_mode = self.job.is_some();
+        let groups = if job_mode {
+            Self::group_job_inputs(&inputs, self.config.dry_run)?
+        } else {
+            if !self.config.dry_run {
+                if let Some(output) = &self.config.output {
+                    std::fs::create_dir_all(output)
+                        .map_err(|e| ProcessorError::OutputDirCreation(e.to_string()))?;
+                }
+            }
+            // Dry-run is tolerant of discovery errors: they become an empty
+            // group list (and a warning) rather than failing the run.
+            match crate::discovery::discover_and_group(&inputs) {
+                Ok(groups) => groups,
+                Err(e) if self.config.dry_run => {
+                    warn!("Discovery error in dry-run mode: {e}");
+                    Vec::new()
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
         info!("Discovered {} audio groups to process", groups.len());
 
         if groups.is_empty() {
@@ -304,7 +393,7 @@ impl Processor {
                 message: format!("Processing group '{}'...", group.name),
             });
 
-            match self.process_group(group, progress_handler).await {
+            match self.process_group(group, progress_handler, resolved_job.as_ref()).await {
                 Ok(result) => {
                     results.push(result);
                 }
@@ -360,7 +449,12 @@ impl Processor {
         &self,
         group: &AudioGroup,
         progress_handler: &dyn ProgressHandler,
+        resolved_job: Option<&crate::job::EffectiveJob>,
     ) -> Result<ProcessingResult> {
+        if let Some(job) = &self.job {
+            return self.process_group_job(group, job, resolved_job, progress_handler).await;
+        }
+
         let input_paths: Vec<PathBuf> = group.files.iter().map(|f| f.path.clone()).collect();
 
         debug!("Processing group '{}' with {} files", group.name, input_paths.len());
@@ -613,6 +707,214 @@ impl Processor {
         })
     }
 
+    /// Process one audio group under a structured job.
+    ///
+    /// Differs from the legacy path deliberately:
+    /// - Metadata comes from the job's base + overrides. Resolution failure
+    ///   (unknown id, release the book does not carry, missing client) fails
+    ///   the group before any merge or source move.
+    /// - Tag writes follow per-field policies; a `write` without a value and
+    ///   an unresolvable preserved title/subtitle component are group
+    ///   failures, not warnings.
+    /// - `preserve` chapters on a multi-file group is refused: a merge cannot
+    ///   byte-preserve per-file chapters, so the strict promise is only valid
+    ///   for a single input.
+    /// - The source files move only after every write succeeded.
+    async fn process_group_job(
+        &self,
+        group: &AudioGroup,
+        job: &crate::job::Job,
+        resolved_job: Option<&crate::job::EffectiveJob>,
+        progress_handler: &dyn ProgressHandler,
+    ) -> Result<ProcessingResult> {
+        let input_paths: Vec<PathBuf> = group.files.iter().map(|f| f.path.clone()).collect();
+        let is_single_input = group.files.len() == 1;
+
+        // Output path from the job's root and template. Resolving it needs no
+        // metadata in dry-run; naming uses the effective metadata below.
+        if self.config.dry_run {
+            info!(
+                "DRY RUN (job): would process {} file(s) from '{}'",
+                group.files.len(),
+                group.name
+            );
+            return Ok(ProcessingResult {
+                input_files: input_paths,
+                output_file: PathBuf::new(),
+                metadata_applied: false,
+                files_moved: false,
+            });
+        }
+
+        // The job was resolved exactly once in `process_with_progress`, before
+        // discovery and output creation; that EffectiveJob is authoritative
+        // here. No catalog touch happens in this function. Dry-run returned
+        // above, so the job is resolved by this point.
+        let effective = resolved_job.expect("job resolved before the dry-run return");
+
+        // Output path from the job's root and template.
+        let output_path = self.determine_job_output_path(&job.output_root, effective)?;
+
+        // PR1 baseline for chapters (the documented default): resolved
+        // chapters (provider → input → generated per-track), embedded, plus
+        // the `chapters.txt` sidecar. A per-field chapter policy arrives in a
+        // follow-up; PR1 has no `chapters` job field. Range validation is
+        // owned by `Tagger::embed_chapters` against the merged container's
+        // actual duration: a chapter-derived bound would reject valid
+        // zero-length final markers, and it would not catch a chapter past the
+        // real playlength.
+        let mut chapters = effective.metadata.chapters.clone();
+        if chapters.is_empty() {
+            chapters = self.input_chapters(group);
+        }
+        // Normalize once by start time so the embedded chapters and the
+        // `chapters.txt` sidecar list the same order; `embed_chapters` sorts a
+        // copy internally, but the sidecar writer preserves input order.
+        chapters.sort_by_key(|c| c.start_time);
+
+        // Stage 3: Merge
+        progress_handler.on_progress(ProcessingProgress {
+            stage: ProcessingStage::Merging,
+            current_file: Some(input_paths[0].clone()),
+            total_files: 1,
+            completed_files: 0,
+            message: "Merging audio files...".to_string(),
+        });
+
+        let merge_job = MergeJob::new(group.files.clone(), output_path.clone())
+            .with_threads(self.config.num_cpus);
+        let merged_path = self.merger.merge(&merge_job).map_err(ProcessorError::Merge)?;
+        info!("Successfully merged to: {}", merged_path.display());
+
+        // Stage 4: Policy-driven writes. Any failure here discards the merged
+        // output and fails the group before the sources move.
+        progress_handler.on_progress(ProcessingProgress {
+            stage: ProcessingStage::Tagging,
+            current_file: Some(merged_path.clone()),
+            total_files: 1,
+            completed_files: 0,
+            message: "Applying write policies...".to_string(),
+        });
+
+        // Tag writes: the documented baseline — every supported scalar field
+        // is written from the effective metadata (the legacy all-fields
+        // behavior). Per-field preserve/write/clear policies arrive in a
+        // follow-up.
+        self.tagger.write_metadata(&merged_path, &effective.metadata).map_err(|e| {
+            Self::discard_output(&merged_path);
+            ProcessorError::Tagging(e)
+        })?;
+
+        // Cover: PR1 keeps the legacy provider-URL behavior (a supplied job
+        // carries no cover URL, so nothing is downloaded). A cover policy
+        // (preserve / local file / URL / clear) arrives in a follow-up.
+        if let Some(cover_url) = effective.metadata.cover_url.clone() {
+            if is_single_input {
+                let source_sidecar = input_paths[0].with_extension("cover.txt");
+                if source_sidecar.is_file() {
+                    let dest = merged_path.with_extension("cover.txt");
+                    if let Err(e) = std::fs::copy(&source_sidecar, &dest) {
+                        warn!("Failed to carry source cover sidecar: {e}");
+                    }
+                }
+            }
+            if let Err(e) = self.tagger.embed_cover(&merged_path, &cover_url).await {
+                Self::discard_output(&merged_path);
+                return Err(ProcessorError::Tagging(e));
+            }
+        }
+
+        // Chapters: PR1 baseline — embed the resolved chapters and write the
+        // sidecar (the documented default). A chapter policy (preserve /
+        // explicit write / clear) arrives in a follow-up. The sidecar is
+        // written from the same resolved vector that was embedded — never from
+        // `effective.metadata.chapters`, which stays empty whenever the
+        // chapters came from the inputs (always for supplied jobs).
+        if !chapters.is_empty() {
+            if let Err(e) = self.tagger.embed_chapters(&merged_path, &chapters) {
+                Self::discard_output(&merged_path);
+                return Err(ProcessorError::Tagging(e));
+            }
+            let artist = if effective.metadata.authors.is_empty() {
+                None
+            } else {
+                Some(effective.metadata.authors.join(", "))
+            };
+            let sidecar = merged_path.with_extension("chapters.txt");
+            if let Err(e) = self.tagger.write_chapters_txt_with(
+                &sidecar,
+                &effective.metadata.title,
+                artist.as_deref(),
+                &chapters,
+            ) {
+                warn!("Failed to write chapters.txt: {e}");
+            }
+        }
+
+        // Stage 5: Move source files only after every write succeeded.
+        let completed_dir =
+            effective.completed_directory.as_ref().or(self.config.completed_directory.as_ref());
+        let files_moved = if let Some(completed_dir) = completed_dir {
+            progress_handler.on_progress(ProcessingProgress {
+                stage: ProcessingStage::MovingFiles,
+                current_file: Some(input_paths[0].clone()),
+                total_files: 1,
+                completed_files: 0,
+                message: "Moving source files to completed directory...".to_string(),
+            });
+            match self.tagger.move_completed_files(&input_paths, completed_dir) {
+                Ok(moved) => {
+                    info!("Moved {} files to completed directory", moved.len());
+                    true
+                }
+                Err(e) => {
+                    warn!("Failed to move source files: {e}");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        Ok(ProcessingResult {
+            input_files: input_paths,
+            output_file: merged_path,
+            metadata_applied: true,
+            files_moved,
+        })
+    }
+
+    /// Output path for a job: the job's root plus its template (default
+    /// `{author}/{title}`), sanitized per component like the legacy path.
+    fn determine_job_output_path(
+        &self,
+        output_root: &std::path::Path,
+        effective: &crate::job::EffectiveJob,
+    ) -> Result<PathBuf> {
+        let template = if effective.path_format.is_empty() {
+            "{author}/{title}".to_string()
+        } else {
+            effective.path_format.clone()
+        };
+        let formatted = self.format_path(&template, &effective.metadata);
+
+        let path_components: Vec<String> = formatted
+            .split('/')
+            .map(sanitize_filename::sanitize)
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut output_path = output_root.to_path_buf();
+        for component in &path_components[..path_components.len().saturating_sub(1)] {
+            output_path = output_path.join(component);
+        }
+        let filename = path_components
+            .last()
+            .map(|s| format!("{}.m4b", s))
+            .unwrap_or_else(|| "output.m4b".to_string());
+        Ok(output_path.join(filename))
+    }
+
     /// Remove a merged output that failed post-merge validation.
     ///
     /// The output keeps its final name once merged, so leaving it behind makes a
@@ -623,19 +925,23 @@ impl Processor {
         }
     }
 
-    /// Discover audio files from input paths
-    fn discover_files(&self, inputs: &[PathBuf]) -> Result<Vec<AudioGroup>> {
-        let groups = match discover_and_group(inputs) {
-            Ok(g) => g,
-            Err(e) => {
-                if self.config.dry_run {
-                    warn!("Discovery error in dry-run mode: {}", e);
-                    return Ok(Vec::new());
-                }
-                return Err(e.into());
+    /// Discover a job's inputs as a single group.
+    ///
+    /// A structured job is one book, so every discovered file is combined into
+    /// one group in the discovery's stable natural (numeric) order; the group
+    /// is never split by parent directory into multiple groups that would
+    /// share a single output path. Empty discovery is a dry-run no-op or a
+    /// `NoInputs` error.
+    fn group_job_inputs(inputs: &[PathBuf], dry_run: bool) -> Result<Vec<AudioGroup>> {
+        let files = crate::discovery::discover_files(inputs)?;
+        if files.is_empty() {
+            if dry_run {
+                println!("Dry run: No audio files discovered in input paths. Inputs: {:?}", inputs);
+                return Ok(Vec::new());
             }
-        };
-        Ok(groups)
+            return Err(ProcessorError::NoInputs);
+        }
+        Ok(vec![AudioGroup { name: "job".to_string(), files, disc_number: None }])
     }
 
     /// Resolve chapters for a group from its input files.
@@ -1145,14 +1451,44 @@ mod tests {
 
     #[test]
     fn test_no_inputs_returns_empty_groups() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = create_test_config(&temp_dir);
-        let processor = Processor::new(config).unwrap();
-
         // Empty inputs returns empty groups (not an error at discovery stage)
-        let result = processor.discover_files(&[]);
+        let result = crate::discovery::discover_files(&[]);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn job_inputs_across_directories_form_one_group_in_natural_order() {
+        // A job's inputs are one book: files spread across several parent
+        // directories must combine into a single group (never one group per
+        // directory sharing a single output path), in stable natural order.
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        std::fs::create_dir_all(root.join("disc1")).unwrap();
+        std::fs::create_dir_all(root.join("disc2")).unwrap();
+        for name in ["part1.mp3", "part2.mp3"] {
+            std::fs::write(root.join("disc1").join(name), b"").unwrap();
+        }
+        for name in ["part3.mp3", "part10.mp3"] {
+            std::fs::write(root.join("disc2").join(name), b"").unwrap();
+        }
+
+        let groups = Processor::group_job_inputs(&[root.to_path_buf()], false).unwrap();
+        assert_eq!(groups.len(), 1, "a job is one book: exactly one group");
+        let files = &groups[0].files;
+        assert_eq!(files.len(), 4);
+        // Natural (numeric) order: part1, part2, part3, part10.
+        let names: Vec<&str> =
+            files.iter().map(|f| f.path.file_name().unwrap().to_str().unwrap()).collect();
+        assert_eq!(names, ["part1.mp3", "part2.mp3", "part3.mp3", "part10.mp3"]);
+    }
+
+    #[test]
+    fn job_inputs_empty_list_errors_no_inputs() {
+        // An empty input list is a `NoInputs` error (not a discovery success
+        // with zero groups), so the job fails before any merge.
+        let err = Processor::group_job_inputs(&[], false).unwrap_err();
+        assert!(matches!(err, ProcessorError::NoInputs));
     }
 
     #[tokio::test]
@@ -1182,7 +1518,7 @@ mod tests {
             disc_number: None,
         };
 
-        let result = processor.process_group(&group, &NoOpProgressHandler).await;
+        let result = processor.process_group(&group, &NoOpProgressHandler, None).await;
         assert!(result.is_ok());
     }
 
@@ -1210,7 +1546,7 @@ mod tests {
             disc_number: None,
         };
 
-        let result = processor.process_group(&group, &NoOpProgressHandler).await;
+        let result = processor.process_group(&group, &NoOpProgressHandler, None).await;
         assert!(result.is_ok());
     }
 
@@ -1231,12 +1567,170 @@ mod tests {
             let group =
                 AudioGroup { name: name.to_string(), files: vec![audio_file], disc_number: None };
 
-            let result = processor.process_group(&group, &NoOpProgressHandler).await;
+            let result = processor.process_group(&group, &NoOpProgressHandler, None).await;
             assert!(result.is_ok());
             let result = result.unwrap();
             assert!(result.output_file.starts_with(&output_dir));
             assert_eq!(result.output_file.extension().unwrap(), "m4b");
         }
+    }
+
+    // A job dry-run must not panic: the job is not resolved in dry-run (it
+    // stays network-free), so the `EffectiveJob` must not be required before
+    // the dry-run early return. Regression for a `resolved_job.expect` that
+    // fired before that return.
+    #[tokio::test]
+    async fn job_dry_run_with_input_file_does_not_panic() {
+        let temp_dir = TempDir::new().unwrap();
+        // An existing input file so discovery produces a group that reaches the
+        // job dry-run return.
+        let input_path = temp_dir.path().join("book");
+        std::fs::create_dir(&input_path).unwrap();
+        let _ = create_test_audio_file(&temp_dir, "book/chapter1.mp3", b"dummy");
+        let output_dir = temp_dir.path().join("output");
+
+        let job_path = temp_dir.path().join("job.json");
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],
+                  "input_supplied": {{ "title": "T", "authors": ["A"] }},
+                  "output_root": {:?}, "path_format": "{{author}}/{{title}}" }}"#,
+            input_path.join("chapter1.mp3"),
+            output_dir
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let job = crate::job::Job::load(&job_path).unwrap();
+
+        let config = test_config(Some(output_dir), None, true, None);
+        let processor = Processor::for_job(job, config).unwrap();
+
+        let result = processor
+            .process(vec![input_path.join("chapter1.mp3")])
+            .await
+            .expect("a job dry-run must not panic or fail");
+        // The dry-run group is reported as processed without touching metadata.
+        assert_eq!(result.len(), 1);
+        assert!(!result[0].metadata_applied);
+    }
+
+    /// Build a non-dry-run config with an explicit completed directory so the
+    /// job's completed-directory precedence can be asserted against it.
+    fn job_config(temp_dir: &TempDir, completed: &std::path::Path) -> Config {
+        Config::new(
+            vec![],
+            Some(temp_dir.path().join("output")),
+            None,
+            MetadataSourceKind::Audiobookdb,
+            MetadataRegion::Us,
+            Some(completed.to_path_buf()),
+            1,
+            "info".to_string(),
+            "{author}/{title}".to_string(),
+            false,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn supplied_single_track_job_embeds_and_writes_sidecar() {
+        let temp_dir = TempDir::new().unwrap();
+        let book_dir = temp_dir.path().join("Book");
+        let input = create_test_m4b(&book_dir, 10);
+        let output_root = temp_dir.path().join("out");
+        let job_path = temp_dir.path().join("job.json");
+        // All default policies (preserve), supplied base: no catalog, no
+        // provider chapters, so the chapter list is generated per input track.
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],
+                  "input_supplied": {{ "title": "The Book", "authors": ["The Author"] }},
+                  "output_root": {:?}, "path_format": "{{author}}/{{title}}" }}"#,
+            input, output_root
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let job = crate::job::Job::load(&job_path).unwrap();
+        let processor =
+            Processor::for_job(job, job_config(&temp_dir, &temp_dir.path().join("cfg-done")))
+                .unwrap();
+        let result =
+            processor.process(vec![input.clone()]).await.expect("supplied job must process");
+        assert_eq!(result.len(), 1);
+        let output = &result[0].output_file;
+        assert!(output.exists(), "merged output missing: {}", output.display());
+        assert_eq!(output.as_path(), &output_root.join("The Author").join("The Book.m4b"));
+        // Chapters were embedded into the merged container (one generated per
+        // input track), not only listed.
+        let tag = mp4ameta::Tag::read_from_path(output).unwrap();
+        assert!(tag.info.duration > std::time::Duration::ZERO);
+        // The sidecar lists the resolved (generated) chapters, not the empty
+        // supplied-metadata chapters.
+        let sidecar = output.with_extension("chapters.txt");
+        let text = std::fs::read_to_string(&sidecar).expect("sidecar written");
+        assert!(text.contains("## album: The Book"), "sidecar album header: {text}");
+        assert!(text.contains("## artist: The Author"), "sidecar artist header: {text}");
+        assert!(text.contains("Chapter 01"), "sidecar generated chapter: {text}");
+    }
+
+    #[tokio::test]
+    async fn supplied_multi_track_job_is_one_group() {
+        let temp_dir = TempDir::new().unwrap();
+        let book_dir = temp_dir.path().join("Book");
+        std::fs::create_dir_all(&book_dir).unwrap();
+        // Two audio files in one directory: discovery collects both, and the
+        // job combines them into a single group (never one group per file).
+        for (name, secs) in [("01.m4b", 5), ("02.m4b", 5)] {
+            let path = book_dir.join(name);
+            let status = std::process::Command::new("ffmpeg")
+                .args(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", &secs.to_string()])
+                .args(["-c:a", "aac", "-b:a", "64k", "-y"])
+                .arg(&path)
+                .status()
+                .expect("run ffmpeg");
+            assert!(status.success(), "ffmpeg failed to create test audio");
+        }
+        let output_root = temp_dir.path().join("out");
+        let job_path = temp_dir.path().join("job.json");
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],
+                  "input_supplied": {{ "title": "Multi Track", "authors": ["A"] }},
+                  "output_root": {:?}, "path_format": "{{author}}/{{title}}" }}"#,
+            book_dir, output_root
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let job = crate::job::Job::load(&job_path).unwrap();
+        let processor =
+            Processor::for_job(job, job_config(&temp_dir, &temp_dir.path().join("cfg-done")))
+                .unwrap();
+        let result = processor
+            .process(vec![book_dir.clone()])
+            .await
+            .expect("a multi-track job is one book, not one group per directory");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].input_files.len(), 2, "both tracks in the single group");
+        assert_eq!(result[0].output_file, output_root.join("A").join("Multi Track.m4b"));
+    }
+
+    #[tokio::test]
+    async fn job_completed_directory_wins_over_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let book_dir = temp_dir.path().join("Book");
+        let input = create_test_m4b(&book_dir, 5);
+        let output_root = temp_dir.path().join("out");
+        let job_completed = temp_dir.path().join("job-done");
+        let cfg_completed = temp_dir.path().join("cfg-done");
+        let job_path = temp_dir.path().join("job.json");
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],
+                  "input_supplied": {{ "title": "Done Book", "authors": ["A"] }},
+                  "output_root": {:?}, "path_format": "{{author}}/{{title}}",
+                  "completed_directory": {:?} }}"#,
+            input, output_root, job_completed
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let job = crate::job::Job::load(&job_path).unwrap();
+        let processor = Processor::for_job(job, job_config(&temp_dir, &cfg_completed)).unwrap();
+        let result = processor.process(vec![input.clone()]).await.expect("job must process");
+        assert!(result[0].files_moved, "sources moved to the job's completed directory");
+        assert!(job_completed.join("audio.m4b").exists(), "source moved to the job's directory");
+        assert!(!cfg_completed.join("audio.m4b").exists(), "not the config's directory");
     }
 
     fn test_metadata_with_genres() -> BookMetadata {
@@ -1370,7 +1864,7 @@ mod tests {
             disc_number: None,
         };
 
-        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+        let err = processor.process_group(&group, &NoOpProgressHandler, None).await.unwrap_err();
 
         match &err {
             ProcessorError::ChaptersOutOfRange { count, playlength, details, .. } => {
@@ -1415,7 +1909,7 @@ mod tests {
             disc_number: None,
         };
 
-        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+        let err = processor.process_group(&group, &NoOpProgressHandler, None).await.unwrap_err();
 
         match &err {
             ProcessorError::ChaptersOutOfRange { details, .. } => {
@@ -1443,7 +1937,7 @@ mod tests {
             disc_number: None,
         };
 
-        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+        let err = processor.process_group(&group, &NoOpProgressHandler, None).await.unwrap_err();
         let message = err.to_string();
 
         match &err {
@@ -1517,7 +2011,7 @@ mod tests {
         // Chapters are generated from the input tracks (no API client), and
         // in range, so the ffprobe guard passes — but the hook makes the
         // actual embed fail.
-        let err = processor.process_group(&group, &NoOpProgressHandler).await.unwrap_err();
+        let err = processor.process_group(&group, &NoOpProgressHandler, None).await.unwrap_err();
 
         assert!(
             matches!(err, ProcessorError::Tagging(TaggingError::Mp4Meta(_))),

@@ -733,3 +733,80 @@ fn test_non_us_region_warns_for_audiobookdb() {
         "no region warning for the default US region, stdout: {us_stdout}"
     );
 }
+
+/// End-to-end `--job` behavior: parse the job file, load its supplied (offline)
+/// metadata, process a real M4B through the pipeline, and assert the written
+/// output path and the embedded tags. This is the CLI surface the plan
+/// requires; the processor-level tests construct the `Processor` directly and
+/// never exercise argument parsing or the job-loading path.
+#[test]
+fn test_job_supplied_metadata_cli_end_to_end() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("chapter1.m4b");
+    let status = Command::new("ffmpeg")
+        .args(&[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=5",
+            "-acodec",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-y",
+        ])
+        .arg(&input_file)
+        .status()
+        .expect("Failed to run FFmpeg");
+    assert!(status.success(), "FFmpeg should generate test M4B");
+
+    let output_dir = temp_dir.path().join("output");
+    std::fs::create_dir(&output_dir).unwrap();
+
+    // Supplied mode is authoritative and offline: no provider fetch, no
+    // rematching. Title + author drive the default `{author}/{title}` path.
+    let job_path = temp_dir.path().join("job.json");
+    let job_json = format!(
+        r#"{{ "schema_version": 1,
+             "inputs": [{:?}],
+             "input_supplied": {{ "title": "The Test Book",
+                                  "authors": ["Jane Author"] }},
+             "output_root": {:?} }}"#,
+        input_file, output_dir
+    );
+    std::fs::write(&job_path, job_json).unwrap();
+
+    let output = Command::new(bin_path())
+        .args(["--job", job_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run m4b-merge");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "m4b-merge --job should succeed, stdout: {stdout} stderr: {stderr}"
+    );
+
+    // The output path is derived from the supplied metadata via the default
+    // `{author}/{title}` template, proving the job's metadata base drove naming.
+    let expected = output_dir.join("Jane Author").join("The Test Book.m4b");
+    assert!(expected.exists(), "expected output {} to exist; stdout: {stdout}", expected.display());
+
+    // The supplied metadata must be embedded into the output M4B.
+    let tag = mp4ameta::Tag::read_from_path(&expected).expect("read output tags");
+    // The tagger writes title and album as separate atoms; assert both so a
+    // missing `©nam` cannot pass unnoticed (a subtitle-less book carries the
+    // base title in both).
+    assert_eq!(tag.title(), Some("The Test Book"));
+    assert_eq!(tag.album(), Some("The Test Book"));
+    assert_eq!(tag.artist(), Some("Jane Author"));
+}
