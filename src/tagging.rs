@@ -558,8 +558,9 @@ impl Tagger {
 
         // A subtitle without a title is represented as the subtitle alone in
         // both atoms (no fabricated title separator); the unselected
-        // component is never erased by the other's clear.
-        let subtitle = subtitle.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        // component is never erased by the other's clear. The value is used
+        // verbatim (no trim) so a preserved subtitle round-trips exactly.
+        let subtitle = subtitle.as_deref().filter(|s| !s.trim().is_empty());
         match (title.as_deref(), subtitle) {
             (Some(title), Some(subtitle)) => {
                 tag.set_title(format!("{title} - {subtitle}"));
@@ -755,8 +756,12 @@ impl Tagger {
                                 path: path.to_path_buf(),
                             });
                         };
-                        let sub = stripped.trim().to_string();
-                        (!sub.is_empty()).then_some(sub)
+                        // Preserve the subtitle verbatim (no trim): an all-preserve
+                        // job must not rewrite the file, so the recovered suffix
+                        // keeps its exact bytes. Only an all-whitespace suffix is
+                        // treated as "no subtitle", not an error.
+                        let sub = stripped.to_string();
+                        (!sub.trim().is_empty()).then_some(sub)
                     }
                     // No title to subtract from, or an album without a title:
                     // the subtitle cannot be established — refuse.
@@ -776,7 +781,9 @@ impl Tagger {
     /// segments. `Preserve` never touches `©grp`; `Write` adds the segment
     /// (validated to have a series name); `Clear` removes only the `Series:`
     /// segment. The tool-generated `Narrator:` legacy segment is filtered out
-    /// on a write, matching [`Tagger::apply_metadata`].
+    /// on a write, matching [`Tagger::apply_metadata`]. A clear keeps any
+    /// `Narrator:` and unrelated segments — it must not erase content that
+    /// this field does not own.
     fn write_series_policy(
         &self,
         tag: &mut mp4ameta::Tag,
@@ -786,10 +793,23 @@ impl Tagger {
         if policy == crate::job::FieldPolicy::Preserve {
             return;
         }
-        let mut segments = Self::preserved_grouping_segments(tag.grouping().map(|s| s as &str));
-        if policy == crate::job::FieldPolicy::Write {
-            segments.push(Self::series_info(metadata).expect("validated: series write"));
+        if policy == crate::job::FieldPolicy::Clear {
+            let grouping = tag.grouping().map(|g| g.to_string()).unwrap_or_default();
+            let kept = grouping
+                .split(" | ")
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty() && !segment.starts_with("Series:"))
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            if kept.is_empty() {
+                tag.remove_groupings();
+            } else {
+                tag.set_grouping(kept.join(" | "));
+            }
+            return;
         }
+        let mut segments = Self::preserved_grouping_segments(tag.grouping().map(|s| s as &str));
+        segments.push(Self::series_info(metadata).expect("validated: series write"));
         if segments.is_empty() {
             tag.remove_groupings();
         } else {
@@ -2699,5 +2719,73 @@ mod tests {
         };
         let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
         assert!(matches!(err, TaggingError::PreserveUnresolvable { field: "subtitle", .. }));
+    }
+
+    #[test]
+    fn policy_preserve_subtitle_keeps_verbatim_bytes() {
+        // A preserved subtitle must round-trip exactly: trailing whitespace in
+        // the `©nam` suffix is tag data, not noise to trim.
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Book - Sub  ", "Book");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Book - Sub  ");
+        assert_eq!(tag.album().unwrap(), "Book");
+    }
+
+    #[test]
+    fn policy_clear_series_keeps_narrator_and_unrelated() {
+        // Clearing `series` removes only the `Series:` segment; the
+        // `Narrator:` and unrelated segments are not this field's to erase.
+        let temp_dir = TempDir::new().unwrap();
+        // Title extends album by the documented ` - ` separator so the
+        // preserved subtitle resolves.
+        let path = tagged_m4b(&temp_dir, "Base - Sub", "Base");
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_grouping("Narrator: X | Series: Y | Custom");
+        tag.write_to_path(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Clear,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.grouping().unwrap(), "Narrator: X | Custom");
+    }
+
+    #[test]
+    fn write_all_without_subtitle_clears_it() {
+        // A standalone write with no subtitle must be usable (clears the
+        // subtitle component), not a `Write` without a value.
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies::write_all("New Title".into(), None);
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "New Title");
+        assert_eq!(tag.album().unwrap(), "New Title");
     }
 }

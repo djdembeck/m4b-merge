@@ -92,10 +92,16 @@ pub struct WritePolicies {
 
 impl WritePolicies {
     /// The standalone CLI's documented behavior: write every supported field.
+    /// A `None` subtitle writes the title with no subtitle component (a
+    /// `Clear`), so the helper is usable for metadata that has no subtitle
+    /// instead of producing a `Write` without a value.
     pub fn write_all(title: String, subtitle: Option<String>) -> Self {
         Self {
             title: TitlePolicy::Write(title),
-            subtitle: SubtitlePolicy::Write(subtitle),
+            subtitle: match subtitle {
+                Some(sub) => SubtitlePolicy::Write(Some(sub)),
+                None => SubtitlePolicy::Clear,
+            },
             authors: FieldPolicy::Write,
             narrators: FieldPolicy::Write,
             series: FieldPolicy::Write,
