@@ -251,6 +251,18 @@ impl Job {
                 ));
             }
         }
+        // Supplied mode: the series value is known now, so reject a blank
+        // write here, mirroring title/subtitle. Provider mode's value is only
+        // known after the fetch, so the tagger's pre-mutation check covers it.
+        if self.series == FieldPolicy::Write {
+            if let Some(supplied) = &self.input_supplied {
+                if supplied.series_name.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+                    return Err(JobError::Invalid(
+                        "series policy 'write' requires a series name".into(),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -453,6 +465,14 @@ mod tests {
         let job: Job = serde_json::from_str(raw).unwrap();
         let err = job.validate().unwrap_err().to_string();
         assert!(err.contains("subtitle"), "{err}");
+
+        // A series write with no (or blank) supplied series name is rejected
+        // at job validation, not after the merge.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T", "series_name": "  "},
+            "output_root": "/o", "series": "write" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        let err = job.validate().unwrap_err().to_string();
+        assert!(err.contains("series"), "{err}");
     }
 
     #[test]
