@@ -3077,6 +3077,9 @@ mod tests {
         let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
         assert_eq!(tag.title().unwrap(), "New Title");
         assert_eq!(tag.album().unwrap(), "New Title");
+    }
+
+    #[test]
     fn clear_chapters_removes_both_representations() {
         let temp_dir = TempDir::new().unwrap();
         let path = create_minimal_m4b(&temp_dir);

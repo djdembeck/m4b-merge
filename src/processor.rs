@@ -807,13 +807,18 @@ impl Processor {
                 // `embed_chapters` sorts a copy internally, but the sidecar
                 // writer preserves input order.
                 chapters.sort_by_key(|c| c.start_time);
-                // The range guard runs before the merge: mp4ameta writes
-                // start times verbatim, so a chapter at or past the
-                // estimated duration would become an unplayable entry.
-                // Reject the group now, with nothing merged and nothing
-                // moved. The post-merge guard in `embed_chapters` still
-                // covers the container's authoritative duration.
-                if !chapters.is_empty()
+                // Pre-merge range guard for the *resolved* list only: the
+                // resolved chapters come from the provider, so the provider's
+                // `total_duration()` is the consistent reference and an
+                // out-of-range entry is rejected before anything is merged.
+                // An explicit list is NOT checked here: the provider's chapter
+                // ends do not bound the input's real playlength, so a valid
+                // explicit chapter would be wrongly rejected. It is validated
+                // post-merge against the merged container's authoritative
+                // duration (the `embed_chapters` write-boundary guard, which
+                // discards the output before the sources move).
+                if explicit.is_none()
+                    && !chapters.is_empty()
                     && let Some(total) = effective.metadata.total_duration()
                     && let Some((count, details)) = describe_out_of_range_chapters(&chapters, total)
                 {
@@ -2047,6 +2052,45 @@ mod tests {
         let completed = temp_dir.path().join("completed");
         let moved = std::fs::read_dir(&completed).map(|entries| entries.count()).unwrap_or(0);
         assert_eq!(moved, 0);
+    }
+
+    // An explicit chapter list is bounded by the input's real playlength, not
+    // the provider's chapter total. The stub provider's chapter ends at 10s,
+    // so a pre-merge guard comparing against the provider duration would
+    // wrongly reject a valid explicit chapter that sits in 10–30s of a 30s
+    // input; the authoritative check is post-merge against the merged
+    // container's duration.
+    #[tokio::test]
+    async fn test_job_explicit_chapters_validated_against_input_not_provider_duration() {
+        let temp_dir = TempDir::new().unwrap();
+        let api_url = spawn_metadata_api();
+        let book_dir = temp_dir.path().join("Job Book");
+        let input = create_test_m4b(&book_dir, 30);
+        let output_root = temp_dir.path().join("output");
+
+        let job_path = temp_dir.path().join("job.json");
+        // The explicit chapter spans 15s–25s: within the 30s input, but past
+        // the provider's 10s chapter total (which would reject it pre-merge).
+        // A non-`abc123def456` id resolves to the stub's single 0–10s chapter,
+        // so the provider `total_duration()` is 10s, not the input's 30s.
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],
+                  "input_provider": {{"book_id": "jobprovider0001"}},
+                  "output_root": {:?}, "path_format": "{{author}}/{{title}}",
+                  "chapters": {{"write": {{"chapters": [
+                      {{"title": "Ch", "start_millis": 15000, "duration_millis": 10000}}
+                  ]}}}} }}"#,
+            input, output_root
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let job = crate::job::Job::load(&job_path).unwrap();
+
+        let processor = Processor::for_job(job, api_test_config(&temp_dir, &api_url)).unwrap();
+        let result = processor.process(vec![input.clone()]).await.expect(
+            "a valid explicit chapter within the input duration must not be rejected pre-merge",
+        );
+        assert!(!result.is_empty());
+        assert_eq!(result[0].input_files, vec![input.clone()]);
     }
 
     #[tokio::test]
