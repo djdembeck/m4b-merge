@@ -16,12 +16,17 @@ All notable changes to this project will be documented in this file. See [standa
   paths are relative to the job's `output_root` and validated inside it,
   never absolute; failure exits 1; stdout always parses.
 - Engine-side no-clobber for `--job` runs: the output name is claimed with
-  `O_CREAT|O_EXCL` before any write, parents are re-validated at claim time
-  and again immediately before the merge (after the progress callback), and
-  the produced file after the merge must be regular, non-empty, and inside
-  the canonical root. A collision leaves the existing file untouched; a
-  failed merge removes its placeholder; rejected outputs are discarded
-  root-aware, so cleanup can never delete a file outside the root.
+  `O_CREAT|O_EXCL` before any write, the merge writes a hidden staging
+  sibling inside the validated parent, and the final name appears only
+  through a `renameat` relative to the pinned, root-validated parent — so a
+  swapped final entry is replaced (not followed) and the media pipeline's
+  path-based write cannot be redirected at an external file. Parents are
+  re-validated at claim time and again immediately before the merge (after
+  the progress callback); the staged result must be regular, non-empty, and
+  inside the canonical root. A collision leaves the existing file
+  untouched; a failed merge removes its placeholder; rejected outputs are
+  discarded root-aware and pinned, so cleanup can never delete a file
+  outside the root.
 - `ProcessorError` variants consolidated: a group failure now carries its
   diagnosed error and produced artifacts at the `RunOutcome`/group-outcome
   level (the machine contract) instead of the previous lossy group-failure

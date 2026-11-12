@@ -263,13 +263,15 @@ after it: it must be a regular, non-empty file inside the canonical output
 root, so a swapped symlinked parent cannot redirect the accepted output
 outside the root. A rejected output is removed through the parent directory
 pinned at cleanup, so a parent swapped for a symlink cannot redirect the
-removal at an external file. The merge itself writes through the resolved
-pathname (the media pipeline is path-based), so a local attacker with a
-sub-millisecond rename window between the pre-merge check and the merge
-opening the file can redirect that one write; the post-merge zero-byte and
-containment check then discards the result, so a redirected output is never
-accepted as successful. Closing that window requires a descriptor-bound
-merge, which is out of scope for the current pipeline. This protects the
+removal at an external file. The merge writes a hidden staging sibling
+inside the validated parent, and the final name appears only through a
+publication that moves the staged file with `renameat` relative to the
+pinned, root-validated parent: a swapped final entry is replaced (not
+followed), so the media pipeline's path-based write can never be redirected
+at an external file. The `chapters.txt`/`cover.txt` sidecars are separate,
+unclaimed names written after publication; a local attacker who swaps one of
+those names in the same window can redirect that one write, which is
+documented as a known limitation of the current pipeline. This protects the
 job's staging area only; publishing into a shared destination still needs
 the caller's race-safe publication.
 
