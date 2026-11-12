@@ -249,6 +249,13 @@ impl AudiobookdbClient {
             .or_else(|| book.releases.first().map(|r| r.id.clone()))
     }
 
+    /// Whether `release_id` is a member of `book`'s releases. An explicit pin
+    /// must be verified: a book whose release list is empty carries no
+    /// verifiable release, so a nonempty id is never a member there.
+    fn is_release_of_book(book: &AudiobookdbBook, release_id: &str) -> bool {
+        book.releases.iter().any(|r| r.id == release_id)
+    }
+
     /// Look up book metadata by identifier.
     ///
     /// ASIN-shaped identifiers (10 alphanumeric characters) are resolved via
@@ -306,8 +313,11 @@ impl AudiobookdbClient {
         // deliberately.
         let (release_id, explicit) = match release_id {
             Some(rid) if !rid.is_empty() => {
-                let known = book.releases.iter().any(|r| r.id == rid);
-                if !book.releases.is_empty() && !known {
+                // An explicit pin must be verified as a member of the book's
+                // releases. A book whose release list is empty carries no
+                // release that can be verified, so an explicit id is rejected
+                // there too — never fetched and used unverified.
+                if !Self::is_release_of_book(&book, rid) {
                     return Err(AudiobookdbError::ReleaseNotFound {
                         book_id: book_id.to_string(),
                         release_id: rid.to_string(),
@@ -1175,6 +1185,21 @@ mod tests {
         let bare: AudiobookdbBook =
             serde_json::from_value(json(r#"{"id": "b2", "title": "T"}"#)).unwrap();
         assert_eq!(AudiobookdbClient::release_id_for(&bare, None), None);
+    }
+
+    #[test]
+    fn test_release_membership_requires_a_verifiable_release() {
+        let book: AudiobookdbBook = serde_json::from_value(json(
+            r#"{"id": "b1", "title": "T", "releases": [{"id": "rel1"}, {"id": "rel2"}]}"#,
+        ))
+        .unwrap();
+        assert!(AudiobookdbClient::is_release_of_book(&book, "rel1"));
+        assert!(AudiobookdbClient::is_release_of_book(&book, "rel2"));
+        assert!(!AudiobookdbClient::is_release_of_book(&book, "rel-unknown"));
+        // A book with no releases cannot verify any explicit pin.
+        let bare: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"id": "b2", "title": "T"}"#)).unwrap();
+        assert!(!AudiobookdbClient::is_release_of_book(&bare, "rel-any"));
     }
 
     #[test]
