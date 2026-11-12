@@ -144,7 +144,7 @@ fields; present non-blank values win over the base.
   "subtitle": "preserve",
   "authors": "write",
   "year": "clear",
-  "cover": "preserve",
+  "cover": "write_url",
   "chapters": "write"
 }
 ```
@@ -191,8 +191,9 @@ Field semantics:
   `chapters.txt` sidecar: an explicit
   `{"write": {"chapters": [{"title", "start_millis", "duration_millis"}]}}`
   list when given, otherwise the resolved chapters; an empty explicit list
-  clears), `preserve` (single input only; skips all chapter mutation so the
-  source chapters survive), or `clear` (removes existing chapters, no
+  clears, while a list that resolved to nothing leaves the source chapters
+  untouched), `preserve` (single input only; skips all chapter mutation so
+  the source chapters survive), or `clear` (removes existing chapters, no
   sidecar). A `preserve` chapters policy on a multi-file group is rejected; a
   strict preserve promise can only be made for a single input.
 

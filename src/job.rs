@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use serde::de::Error as _;
 
 use crate::api::MetadataSource;
 use crate::metadata::BookMetadata;
@@ -103,12 +104,10 @@ pub struct WritePolicies {
 /// "https://…"}` overrides the URL (under the existing SSRF guards), and
 /// `clear` removes the cover. `preserve` (single input only) keeps the
 /// source M4B's embedded cover without a download.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoverPolicy {
     Preserve,
     Write(PathBuf),
-    #[serde(rename = "write_url")]
     WriteUrl(Option<String>),
     Clear,
 }
@@ -116,6 +115,63 @@ pub enum CoverPolicy {
 impl Default for CoverPolicy {
     fn default() -> Self {
         Self::WriteUrl(None)
+    }
+}
+
+impl<'de> Deserialize<'de> for CoverPolicy {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // `"preserve" | "clear" | "write" | "write_url"`, `{"write":
+        // "path"}`, or `{"write_url": "https://…"}`. A bare `write_url` is
+        // the documented default (use the provider cover); it cannot be
+        // expressed by the derived newtype form, so the policy is parsed by
+        // hand. A misspelled object field is rejected, never silently dropped.
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(word) => match word.as_str() {
+                "preserve" => Ok(Self::Preserve),
+                "clear" => Ok(Self::Clear),
+                "write_url" => Ok(Self::WriteUrl(None)),
+                "write" => Err(D::Error::invalid_value(
+                    serde::de::Unexpected::Str("write"),
+                    &"a cover file needs a path: {\"write\": \"/absolute/path\"}",
+                )),
+                other => Err(D::Error::invalid_value(
+                    serde::de::Unexpected::Str(other),
+                    &"\"preserve\", \"clear\", \"write\", or \"write_url\"",
+                )),
+            },
+            serde_json::Value::Object(map) => {
+                let mut entries = map.into_iter();
+                let Some((key, val)) = entries.next() else {
+                    return Ok(Self::default());
+                };
+                if entries.next().is_some() {
+                    return Err(D::Error::unknown_field(&key, &["write", "write_url"]));
+                }
+                match key.as_str() {
+                    "write" => {
+                        let path = PathBuf::deserialize(val).map_err(D::Error::custom)?;
+                        Ok(Self::Write(path))
+                    }
+                    "write_url" => match val {
+                        serde_json::Value::Null => Ok(Self::WriteUrl(None)),
+                        serde_json::Value::String(url) => Ok(Self::WriteUrl(Some(url))),
+                        _ => Err(D::Error::invalid_value(
+                            serde::de::Unexpected::Other("write_url value"),
+                            &"a URL string",
+                        )),
+                    },
+                    other => Err(D::Error::unknown_field(other, &["write", "write_url"])),
+                }
+            }
+            _ => Err(D::Error::invalid_value(
+                serde::de::Unexpected::Other("cover policy"),
+                &"a word or a {\"write\": \"path\"} / {\"write_url\": \"https://…\"} object",
+            )),
+        }
     }
 }
 
@@ -656,6 +712,60 @@ mod tests {
             "chapters": { "write": { "chapters": [ { "title": "C", "start_millis": 0, "duration_millis": 100 } ] } } }"#;
         let job: Job = serde_json::from_str(raw).unwrap();
         assert!(matches!(job.chapters, ChaptersPolicy::Write { explicit: Some(_) }));
+    }
+
+    #[test]
+    fn parses_cover_policy_forms() {
+        // The documented default is the bare word `write_url`: it selects the
+        // provider cover (no explicit URL), and it must parse — a derived
+        // newtype form would require `{"write_url": null}` and silently break
+        // the documented example.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o", "cover": "write_url" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        assert_eq!(job.cover, CoverPolicy::WriteUrl(None));
+
+        // The other bare words.
+        for (word, expected) in [("preserve", CoverPolicy::Preserve), ("clear", CoverPolicy::Clear)]
+        {
+            let raw = format!(
+                r#"{{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {{"title": "T"}},
+                    "output_root": "/o", "cover": "{word}" }}"#
+            );
+            let job: Job = serde_json::from_str(&raw).unwrap();
+            assert_eq!(job.cover, expected, "cover {word:?}");
+        }
+
+        // A local-file write carries its path.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o", "cover": { "write": "/data/book/cover.png" } }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        assert_eq!(job.cover, CoverPolicy::Write(PathBuf::from("/data/book/cover.png")));
+
+        // A URL override carries its value; a bare `write_url` (null) does not.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o", "cover": { "write_url": "https://cdn.example/c.jpg" } }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        assert_eq!(job.cover, CoverPolicy::WriteUrl(Some("https://cdn.example/c.jpg".into())));
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o", "cover": { "write_url": null } }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        assert_eq!(job.cover, CoverPolicy::WriteUrl(None));
+    }
+
+    #[test]
+    fn rejects_invalid_cover_policy_forms() {
+        // A bare `write` has no path: it is rejected, not defaulted.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o", "cover": "write" }"#;
+        let err: serde_json::Error = serde_json::from_str::<Job>(raw).unwrap_err();
+        assert!(err.to_string().contains("path"), "{}", err.to_string());
+
+        // A misspelled object field is rejected, never silently dropped.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T"},
+            "output_root": "/o", "cover": { "writ": "/data/cover.png" } }"#;
+        let err: serde_json::Error = serde_json::from_str::<Job>(raw).unwrap_err();
+        assert!(err.to_string().contains("writ"), "{}", err.to_string());
     }
 
     #[test]

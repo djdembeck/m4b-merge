@@ -24,7 +24,10 @@ All notable changes to this project will be documented in this file. See [standa
   read, and the read is bounded to 5 MiB), `{"write_url": "https://…"}`,
   `preserve` (single input only), or `clear`. Chapters: `write` (default; explicit list
   with integer-millisecond times, or the resolved chapters, plus the
-  `chapters.txt` sidecar), `preserve` (single input only; the source sidecar
+  `chapters.txt` sidecar; an explicit empty list clears, while a list that
+  resolved to nothing leaves the source chapters untouched — clearing is a
+  deliberate policy, never the result of an empty resolve), `preserve`
+  (single input only; the source sidecar
   is carried when present, and a stale sidecar at the output path is removed
   when the source has none), or `clear`. Both
   policies reject `preserve` on a multi-file group, where a strict

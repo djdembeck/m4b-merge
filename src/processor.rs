@@ -767,7 +767,7 @@ impl Processor {
                 group.files.len()
             ))));
         }
-        if matches!(effective.cover, crate::job::CoverPolicy::Preserve) && !is_single_input {
+        if effective.preserve_cover_requires_single_input() && !is_single_input {
             return Err(ProcessorError::Job(crate::job::JobError::Invalid(format!(
                 "cover policy 'preserve' requires a single input file; group '{}' has {} — a \
                  merge carries no cover, so a strict cover-preservation promise is impossible",
@@ -776,63 +776,63 @@ impl Processor {
             ))));
         }
 
-        // Chapters to embed (and to the sidecar), per policy. `write` with an
-        // explicit list embeds exactly that list (an empty list clears);
-        // `write` with no list, and the documented default, resolve to
-        // provider → input → generated per-track. `preserve`/`clear` embed
-        // nothing new.
-        let chapters_to_write: Option<Vec<crate::metadata::Chapter>> = match &effective.chapters {
-            crate::job::ChaptersPolicy::Write { explicit } => {
-                let mut chapters = match explicit {
-                    Some(list) => list
-                        .iter()
-                        .map(|ch| {
-                            crate::metadata::Chapter::new(
-                                ch.title.clone(),
-                                std::time::Duration::from_millis(ch.start_millis),
-                                std::time::Duration::from_millis(ch.duration_millis),
-                            )
-                        })
-                        .collect(),
-                    None => {
-                        let mut resolved = effective.metadata.chapters.clone();
-                        if resolved.is_empty() {
-                            resolved = self.input_chapters(group);
-                        }
-                        resolved
+        // The chapter list a `write` embeds (and writes to the sidecar): the
+        // explicit list when given, otherwise provider → input → generated
+        // per-track (the documented default). `preserve`/`clear` resolve to an
+        // empty list; their arms handle the file themselves.
+        //
+        // A resolved list that came out empty is left untouched, not cleared:
+        // an empty resolve (e.g. a duration-probe failure while the merge
+        // succeeds) must not delete the source's chapters — clearing is a
+        // deliberate policy (an explicit empty list, or the `clear` policy),
+        // never the result of an empty resolve.
+        let mut write_chapters: Vec<crate::metadata::Chapter> = match &effective.chapters {
+            crate::job::ChaptersPolicy::Write { explicit } => match explicit {
+                Some(list) => list
+                    .iter()
+                    .map(|ch| {
+                        crate::metadata::Chapter::new(
+                            ch.title.clone(),
+                            std::time::Duration::from_millis(ch.start_millis),
+                            std::time::Duration::from_millis(ch.duration_millis),
+                        )
+                    })
+                    .collect(),
+                None => {
+                    let mut resolved = effective.metadata.chapters.clone();
+                    if resolved.is_empty() {
+                        resolved = self.input_chapters(group);
                     }
-                };
-                // Normalize once by start time so the embedded chapters and
-                // the `chapters.txt` sidecar list the same order;
-                // `embed_chapters` sorts a copy internally, but the sidecar
-                // writer preserves input order.
-                chapters.sort_by_key(|c| c.start_time);
-                // Pre-merge range guard for the *resolved* list only: the
-                // resolved chapters come from the provider, so the provider's
-                // `total_duration()` is the consistent reference and an
-                // out-of-range entry is rejected before anything is merged.
-                // An explicit list is NOT checked here: the provider's chapter
-                // ends do not bound the input's real playlength, so a valid
-                // explicit chapter would be wrongly rejected. It is validated
-                // post-merge against the merged container's authoritative
-                // duration (the `embed_chapters` write-boundary guard, which
-                // discards the output before the sources move).
-                if explicit.is_none()
-                    && !chapters.is_empty()
-                    && let Some(total) = effective.metadata.total_duration()
-                    && let Some((count, details)) = describe_out_of_range_chapters(&chapters, total)
-                {
-                    return Err(ProcessorError::ChaptersOutOfRange {
-                        path: output_path.clone(),
-                        count,
-                        playlength: format_duration(total),
-                        details,
-                    });
+                    resolved
                 }
-                Some(chapters)
-            }
-            crate::job::ChaptersPolicy::Preserve | crate::job::ChaptersPolicy::Clear => None,
+            },
+            crate::job::ChaptersPolicy::Preserve | crate::job::ChaptersPolicy::Clear => Vec::new(),
         };
+        // Normalize once by start time so the embedded chapters and the
+        // `chapters.txt` sidecar list the same order; `embed_chapters` sorts a
+        // copy internally, but the sidecar writer preserves input order.
+        write_chapters.sort_by_key(|c| c.start_time);
+        // Pre-merge range guard for the *resolved* list only: the resolved
+        // chapters come from the provider, so the provider's `total_duration()`
+        // is the consistent reference and an out-of-range entry is rejected
+        // before anything is merged. An explicit list is NOT checked here: the
+        // provider's chapter ends do not bound the input's real playlength, so
+        // a valid explicit chapter would be wrongly rejected. It is validated
+        // post-merge against the merged container's authoritative duration (the
+        // `embed_chapters` write-boundary guard, which discards the output
+        // before the sources move).
+        if matches!(&effective.chapters, crate::job::ChaptersPolicy::Write { explicit: None })
+            && !write_chapters.is_empty()
+            && let Some(total) = effective.metadata.total_duration()
+            && let Some((count, details)) = describe_out_of_range_chapters(&write_chapters, total)
+        {
+            return Err(ProcessorError::ChaptersOutOfRange {
+                path: output_path.clone(),
+                count,
+                playlength: format_duration(total),
+                details,
+            });
+        }
 
         // Stage 3: Merge
         progress_handler.on_progress(ProcessingProgress {
@@ -912,16 +912,17 @@ impl Processor {
             }
         }
 
-        // Chapters policy across the whole path. The sidecar is written from
-        // the chapters actually embedded (not the effective metadata, which
-        // may lack them in supplied mode), and a failed sidecar write fails
-        // the group before the sources move.
+        // Chapters across the whole path. `preserve` and `clear` are
+        // policy-specific; a `write` embeds the `write_chapters` list resolved
+        // above. The sidecar is written from the chapters actually embedded
+        // (not the effective metadata, which may lack them in supplied mode),
+        // and a failed sidecar write fails the group before the sources move.
         match &effective.chapters {
-            crate::job::ChaptersPolicy::Write { .. } => {
-                let chapters = chapters_to_write.expect("chapters resolved for write");
-                if chapters.is_empty() {
-                    // An explicit empty list clears the embedded chapters and
-                    // any stale sidecar at the deterministic output path.
+            crate::job::ChaptersPolicy::Write { explicit } => {
+                // An explicit empty list is a deliberate clear; a resolved
+                // empty list leaves the source's chapters untouched.
+                let clear = explicit.as_ref().is_some_and(Vec::is_empty);
+                if clear {
                     if let Err(e) = self.tagger.clear_chapters(&merged_path) {
                         Self::discard_output(&merged_path);
                         return Err(ProcessorError::Tagging(e));
@@ -939,8 +940,8 @@ impl Processor {
                             )))
                         })?;
                     }
-                } else {
-                    if let Err(e) = self.tagger.embed_chapters(&merged_path, &chapters) {
+                } else if !write_chapters.is_empty() {
+                    if let Err(e) = self.tagger.embed_chapters(&merged_path, &write_chapters) {
                         Self::discard_output(&merged_path);
                         return Err(ProcessorError::Tagging(e));
                     }
@@ -954,12 +955,14 @@ impl Processor {
                         &sidecar,
                         &effective.metadata.title,
                         artist.as_deref(),
-                        &chapters,
+                        &write_chapters,
                     ) {
                         Self::discard_output(&merged_path);
                         return Err(ProcessorError::Tagging(e));
                     }
                 }
+                // A resolved empty list leaves the merged copy's chapters and
+                // any carried sidecar untouched.
             }
             crate::job::ChaptersPolicy::Clear => {
                 if let Err(e) = self.tagger.clear_chapters(&merged_path) {
@@ -2280,5 +2283,164 @@ mod tests {
         // Preserve must not leave a sidecar the source lacks: the stale file is
         // removed so it cannot describe chapters absent from the copied source.
         assert!(!sidecar.exists(), "stale chapter sidecar must be removed on preserve");
+    }
+
+    /// A minimal 1x1 JPEG, for a local cover asset.
+    fn jpeg_bytes() -> Vec<u8> {
+        let mut v = Vec::from([0xFF, 0xD8, 0xFF, 0xE0]);
+        v.push(1);
+        v.push(0xFF);
+        v.push(0xD9);
+        v
+    }
+
+    #[tokio::test]
+    async fn test_job_chapters_write_policy_explicit_and_default() {
+        // Explicit-empty clears both representations; the default resolved
+        // write keeps the source chapters. The two shapes must not be
+        // conflated: the provider list is absent here (supplied job), so a
+        // default write falls through to the source's own chapters.
+        let temp_dir = TempDir::new().unwrap();
+        let output_root = temp_dir.path().join("output");
+        let config = create_test_config(&temp_dir);
+
+        for (n, (chapters_field, clear)) in [
+            (r#""chapters": { "write": { "chapters": [] } }"#, true),
+            (r#""chapters": "write""#, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // A distinct title per iteration so the two outputs (and sidecars)
+            // do not collide at the same deterministic path.
+            let title = format!("Ch{n}");
+            let book_dir = temp_dir.path().join(format!("Ch Book {n}"));
+            let input = create_test_m4b(&book_dir, 10);
+            // Give the source a chapter so the two outcomes differ.
+            let mut tag = mp4ameta::Tag::read_from_path(&input).unwrap();
+            tag.chapter_list_mut().push(mp4ameta::Chapter::new(std::time::Duration::ZERO, "Intro"));
+            tag.write_to_path(&input).unwrap();
+
+            let job: crate::job::Job = serde_json::from_str(&format!(
+                r#"{{ "schema_version": 1, "inputs": ["{input}"],
+                        "input_supplied": {{"title": "{title}", "authors": ["A"]}},
+                        "output_root": "{root}", "path_format": "{{author}}/{{title}}",
+                        {field} }}"#,
+                input = input.display(),
+                title = title,
+                root = output_root.display(),
+                field = chapters_field
+            ))
+            .unwrap();
+            let effective = job.resolve(None).await.unwrap();
+            let processor = Processor::for_job(job, config.clone()).unwrap();
+            let group = AudioGroup {
+                name: "Ch Book".to_string(),
+                files: vec![AudioFile::new(input.clone()).unwrap()],
+                disc_number: None,
+            };
+            let result = processor
+                .process_group(&group, &NoOpProgressHandler, Some(&effective))
+                .await
+                .unwrap();
+
+            let out = result.output_file.clone();
+            let out_tag = mp4ameta::Tag::read_from_path(&out).unwrap();
+            let sidecar = out.with_extension("chapters.txt");
+            if clear {
+                assert!(
+                    out_tag.chapter_list().is_empty(),
+                    "an explicit empty list must clear the embedded chapters"
+                );
+                assert!(!sidecar.exists(), "an explicit empty list must remove the sidecar");
+            } else {
+                assert_eq!(
+                    out_tag.chapter_list().len(),
+                    1,
+                    "the default write must embed the source's resolved chapter"
+                );
+                assert!(sidecar.exists(), "the default write must write the sidecar");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_job_cover_preserve_multi_input_rejected() {
+        // A merge carries no cover, so a strict preserve promise over a
+        // multi-input group is refused before any output is produced.
+        let temp_dir = TempDir::new().unwrap();
+        let output_root = temp_dir.path().join("output");
+        let config = create_test_config(&temp_dir);
+
+        let book_dir = temp_dir.path().join("Cover Book");
+        let f1 = create_test_m4b(&book_dir, 5);
+        let book_dir2 = temp_dir.path().join("Cover Book2");
+        let f2 = create_test_m4b(&book_dir2, 5);
+
+        let job: crate::job::Job = serde_json::from_str(&format!(
+            r#"{{ "schema_version": 1, "inputs": ["{a}", "{b}"],
+                    "input_supplied": {{"title": "P", "authors": ["A"]}},
+                    "output_root": "{root}", "path_format": "{{author}}/{{title}}",
+                    "cover": "preserve" }}"#,
+            a = f1.display(),
+            b = f2.display(),
+            root = output_root.display()
+        ))
+        .unwrap();
+        let effective = job.resolve(None).await.unwrap();
+        let processor = Processor::for_job(job, config).unwrap();
+        let group = AudioGroup {
+            name: "Cover Book (multi)".to_string(),
+            files: vec![AudioFile::new(f1).unwrap(), AudioFile::new(f2).unwrap()],
+            disc_number: None,
+        };
+
+        let err = processor
+            .process_group(&group, &NoOpProgressHandler, Some(&effective))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("cover policy 'preserve'"),
+            "expected the multi-input cover-preserve rejection, got {err}"
+        );
+        // The rejection happens before merge: nothing is written.
+        assert!(!output_root.join("A/P.m4b").exists());
+    }
+
+    #[tokio::test]
+    async fn test_job_cover_preserve_single_input_keeps_source_art() {
+        // Single-input preserve is a native copy: the source's embedded cover
+        // survives, and no URL is fetched (supplied jobs carry none).
+        let temp_dir = TempDir::new().unwrap();
+        let output_root = temp_dir.path().join("output");
+        let config = create_test_config(&temp_dir);
+
+        let book_dir = temp_dir.path().join("Art Book");
+        let input = create_test_m4b(&book_dir, 5);
+        let mut tag = mp4ameta::Tag::read_from_path(&input).unwrap();
+        tag.set_artwork(mp4ameta::Img::new(mp4ameta::ImgFmt::Jpeg, jpeg_bytes()));
+        tag.write_to_path(&input).unwrap();
+
+        let job: crate::job::Job = serde_json::from_str(&format!(
+            r#"{{ "schema_version": 1, "inputs": ["{input}"],
+                    "input_supplied": {{"title": "P", "authors": ["A"]}},
+                    "output_root": "{root}", "path_format": "{{author}}/{{title}}",
+                    "cover": "preserve" }}"#,
+            input = input.display(),
+            root = output_root.display()
+        ))
+        .unwrap();
+        let effective = job.resolve(None).await.unwrap();
+        let processor = Processor::for_job(job, config).unwrap();
+        let group = AudioGroup {
+            name: "Art Book".to_string(),
+            files: vec![AudioFile::new(input.clone()).unwrap()],
+            disc_number: None,
+        };
+        let result =
+            processor.process_group(&group, &NoOpProgressHandler, Some(&effective)).await.unwrap();
+
+        let out_tag = mp4ameta::Tag::read_from_path(&result.output_file).unwrap();
+        assert!(out_tag.artwork().is_some(), "preserve must keep the source's embedded cover");
     }
 }
