@@ -773,13 +773,18 @@ fn test_job_supplied_metadata_cli_end_to_end() {
 
     // Supplied mode is authoritative and offline: no provider fetch, no
     // rematching. Title + author drive the default `{author}/{title}` path.
+    // The title/author write policies are set to `write` explicitly: the
+    // policy defaults are `preserve`, which would leave the freshly-merged
+    // file (which carries no metadata) untouched and the tag assertions
+    // would fail. The other fields default to `preserve`, a no-op here.
     let job_path = temp_dir.path().join("job.json");
     let job_json = format!(
         r#"{{ "schema_version": 1,
              "inputs": [{:?}],
              "input_supplied": {{ "title": "The Test Book",
                                   "authors": ["Jane Author"] }},
-             "output_root": {:?} }}"#,
+             "output_root": {:?},
+             "title": "write", "authors": "write" }}"#,
         input_file, output_dir
     );
     std::fs::write(&job_path, job_json).unwrap();
