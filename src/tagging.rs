@@ -556,16 +556,24 @@ impl Tagger {
         let (title, subtitle) =
             Self::resolve_title_subtitle(path, &tag, &policies.title, &policies.subtitle)?;
 
-        match (title.as_deref(), subtitle.as_deref()) {
-            (Some(title), Some(subtitle)) if !subtitle.trim().is_empty() => {
+        // A subtitle without a title is represented as the subtitle alone in
+        // both atoms (no fabricated title separator); the unselected
+        // component is never erased by the other's clear.
+        let subtitle = subtitle.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        match (title.as_deref(), subtitle) {
+            (Some(title), Some(subtitle)) => {
                 tag.set_title(format!("{title} - {subtitle}"));
                 tag.set_album(title);
             }
-            (Some(title), _) => {
+            (Some(title), None) => {
                 tag.set_title(title);
                 tag.set_album(title);
             }
-            (None, _) => {
+            (None, Some(subtitle)) => {
+                tag.set_title(subtitle);
+                tag.set_album(subtitle);
+            }
+            (None, None) => {
                 tag.remove_title();
                 tag.remove_album();
             }
@@ -2529,6 +2537,54 @@ mod tests {
         // The unselected title component must survive a subtitle-only write.
         assert_eq!(tag.title().unwrap(), "Old Title - Brand New Sub");
         assert_eq!(tag.album().unwrap(), "Old Title");
+    }
+
+    #[test]
+    fn policy_clear_title_preserves_subtitle_component() {
+        // A clear-title must not erase the subtitle; the subtitle is the
+        // only surviving component, represented alone (no fabricated title).
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Clear,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Old Sub");
+        assert_eq!(tag.album().unwrap(), "Old Sub");
+    }
+
+    #[test]
+    fn policy_clear_title_with_write_subtitle() {
+        // clear-title + write-subtitle: the written subtitle is the only
+        // surviving component.
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Clear,
+            subtitle: crate::job::SubtitlePolicy::Write(Some("Written Sub".into())),
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Written Sub");
+        assert_eq!(tag.album().unwrap(), "Written Sub");
     }
 
     #[test]
