@@ -76,6 +76,15 @@ Provide a metadata ID (ASIN or AudiobookDB book ID) to automatically fetch metad
 m4b-merge -i input/book_folder/ -a B012345678
 ```
 
+The looked-up edition is release-first: the selected release's title, subtitle,
+and release date win when present, and the book-level title/subtitle are the
+fallback (year falls back to the book copyright, then original publication; the
+subtitle falls back to the book subtitle, then the book's disambiguation). This
+applies to the legacy `--metadata-id` CLI path as well as the `--job`
+`input_provider` path, so for reissued editions the embedded title and year are
+the release's. An explicit `release_id` that the book does not carry is a
+diagnosed failure — never a silent fall back to the book's first release.
+
 Non-US Audible books need `--region` with `--metadata-source audnexus` (default `us`; accepted: `au ca de es fr in it jp us uk`).
 
 ### Custom Output & Organization
@@ -124,7 +133,7 @@ non-blank values win over the base.
 ```json
 {
   "schema_version": 1,
-  "inputs": ["/data/book/track1.m4a", "/data/book/track2.m4a"],
+  "inputs": ["/data/book/track1.m4a"],
   "input_supplied": {
     "title": "The Great Gatsby",
     "authors": ["F. Scott Fitzgerald"]

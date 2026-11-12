@@ -1612,6 +1612,127 @@ mod tests {
         assert!(!result[0].metadata_applied);
     }
 
+    /// Build a non-dry-run config with an explicit completed directory so the
+    /// job's completed-directory precedence can be asserted against it.
+    fn job_config(temp_dir: &TempDir, completed: &std::path::Path) -> Config {
+        Config::new(
+            vec![],
+            Some(temp_dir.path().join("output")),
+            None,
+            MetadataSourceKind::Audiobookdb,
+            MetadataRegion::Us,
+            Some(completed.to_path_buf()),
+            1,
+            "info".to_string(),
+            "{author}/{title}".to_string(),
+            false,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn supplied_single_track_job_embeds_and_writes_sidecar() {
+        let temp_dir = TempDir::new().unwrap();
+        let book_dir = temp_dir.path().join("Book");
+        let input = create_test_m4b(&book_dir, 10);
+        let output_root = temp_dir.path().join("out");
+        let job_path = temp_dir.path().join("job.json");
+        // All default policies (preserve), supplied base: no catalog, no
+        // provider chapters, so the chapter list is generated per input track.
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],
+                  "input_supplied": {{ "title": "The Book", "authors": ["The Author"] }},
+                  "output_root": {:?}, "path_format": "{{author}}/{{title}}" }}"#,
+            input, output_root
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let job = crate::job::Job::load(&job_path).unwrap();
+        let processor =
+            Processor::for_job(job, job_config(&temp_dir, &temp_dir.path().join("cfg-done")))
+                .unwrap();
+        let result =
+            processor.process(vec![input.clone()]).await.expect("supplied job must process");
+        assert_eq!(result.len(), 1);
+        let output = &result[0].output_file;
+        assert!(output.exists(), "merged output missing: {}", output.display());
+        assert_eq!(output.as_path(), &output_root.join("The Author").join("The Book.m4b"));
+        // Chapters were embedded into the merged container (one generated per
+        // input track), not only listed.
+        let tag = mp4ameta::Tag::read_from_path(output).unwrap();
+        assert!(tag.info.duration > std::time::Duration::ZERO);
+        // The sidecar lists the resolved (generated) chapters, not the empty
+        // supplied-metadata chapters.
+        let sidecar = output.with_extension("chapters.txt");
+        let text = std::fs::read_to_string(&sidecar).expect("sidecar written");
+        assert!(text.contains("## album: The Book"), "sidecar album header: {text}");
+        assert!(text.contains("## artist: The Author"), "sidecar artist header: {text}");
+        assert!(text.contains("Chapter 01"), "sidecar generated chapter: {text}");
+    }
+
+    #[tokio::test]
+    async fn supplied_multi_track_job_is_one_group() {
+        let temp_dir = TempDir::new().unwrap();
+        let book_dir = temp_dir.path().join("Book");
+        std::fs::create_dir_all(&book_dir).unwrap();
+        // Two audio files in one directory: discovery collects both, and the
+        // job combines them into a single group (never one group per file).
+        for (name, secs) in [("01.m4b", 5), ("02.m4b", 5)] {
+            let path = book_dir.join(name);
+            let status = std::process::Command::new("ffmpeg")
+                .args(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", &secs.to_string()])
+                .args(["-c:a", "aac", "-b:a", "64k", "-y"])
+                .arg(&path)
+                .status()
+                .expect("run ffmpeg");
+            assert!(status.success(), "ffmpeg failed to create test audio");
+        }
+        let output_root = temp_dir.path().join("out");
+        let job_path = temp_dir.path().join("job.json");
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],
+                  "input_supplied": {{ "title": "Multi Track", "authors": ["A"] }},
+                  "output_root": {:?}, "path_format": "{{author}}/{{title}}" }}"#,
+            book_dir, output_root
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let job = crate::job::Job::load(&job_path).unwrap();
+        let processor =
+            Processor::for_job(job, job_config(&temp_dir, &temp_dir.path().join("cfg-done")))
+                .unwrap();
+        let result = processor
+            .process(vec![book_dir.clone()])
+            .await
+            .expect("a multi-track job is one book, not one group per directory");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].input_files.len(), 2, "both tracks in the single group");
+        assert_eq!(result[0].output_file, output_root.join("A").join("Multi Track.m4b"));
+    }
+
+    #[tokio::test]
+    async fn job_completed_directory_wins_over_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let book_dir = temp_dir.path().join("Book");
+        let input = create_test_m4b(&book_dir, 5);
+        let output_root = temp_dir.path().join("out");
+        let job_completed = temp_dir.path().join("job-done");
+        let cfg_completed = temp_dir.path().join("cfg-done");
+        let job_path = temp_dir.path().join("job.json");
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],
+                  "input_supplied": {{ "title": "Done Book", "authors": ["A"] }},
+                  "output_root": {:?}, "path_format": "{{author}}/{{title}}",
+                  "completed_directory": {:?} }}"#,
+            input, output_root, job_completed
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let job = crate::job::Job::load(&job_path).unwrap();
+        let processor = Processor::for_job(job, job_config(&temp_dir, &cfg_completed)).unwrap();
+        let result = processor.process(vec![input.clone()]).await.expect("job must process");
+        assert!(result[0].files_moved, "sources moved to the job's completed directory");
+        assert!(job_completed.join("audio.m4b").exists(), "source moved to the job's directory");
+        assert!(!cfg_completed.join("audio.m4b").exists(), "not the config's directory");
+    }
+
     fn test_metadata_with_genres() -> BookMetadata {
         BookMetadata::new("B08XYZ1234", "Test Book", "")
             .add_author("Test Author")
