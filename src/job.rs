@@ -283,13 +283,7 @@ mod tests {
 
     #[test]
     fn parses_valid_supplied_job() {
-        let raw = r#"{
-            "schema_version": 1,
-            "inputs": ["in.m4b"],
-            "input_supplied": { "title": "The Test" },
-            "output_root": "/tmp/out",
-            "path_format": "{author}/{title}"
-        }"#;
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": { "title": "The Test" }, "output_root": "/tmp/out", "path_format": "{author}/{title}" }"#;
         let job: Job = serde_json::from_str(raw).unwrap();
         assert_eq!(job.schema_version, 1);
         assert!(job.input_supplied.is_some());
@@ -314,10 +308,7 @@ mod tests {
 
     #[test]
     fn rejects_mutually_exclusive_bases() {
-        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
-            "input_provider": { "book_id": "B012345678" },
-            "input_supplied": { "title": "T" },
-            "output_root": "/o" }"#;
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_provider": { "book_id": "B012345678" }, "input_supplied": { "title": "T" }, "output_root": "/o" }"#;
         let job: Job = serde_json::from_str(raw).unwrap();
         let err = job.validate().unwrap_err().to_string();
         assert!(err.contains("mutually exclusive"), "{err}");
@@ -335,8 +326,7 @@ mod tests {
         // ASIN / canonical book id / selected release id stay separate fields.
         let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
             "input_provider": { "book_id": "B012345678", "release_id": "rel12345678" },
-            "source": { "source": "audiobookdb" },
-            "output_root": "/o" }"#;
+            "source": { "source": "audiobookdb" }, "output_root": "/o" }"#;
         let job: Job = serde_json::from_str(raw).unwrap();
         job.validate().unwrap();
         let provider = job.input_provider.unwrap();
@@ -348,8 +338,7 @@ mod tests {
     async fn supplied_resolve_applies_overrides() {
         let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
             "input_supplied": { "title": "Base", "subtitle": "Sub", "authors": ["A"] },
-            "overrides": { "title": "Override", "authors": ["B", "C"] },
-            "output_root": "/o" }"#;
+            "overrides": { "title": "Override", "authors": ["B", "C"] }, "output_root": "/o" }"#;
         let job: Job = serde_json::from_str(raw).unwrap();
         let effective = job.resolve(None).await.unwrap();
         assert_eq!(effective.metadata.title, "Override");
@@ -359,9 +348,7 @@ mod tests {
 
     #[tokio::test]
     async fn supplied_resolve_rejects_blank_title() {
-        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
-            "input_supplied": { "title": "   " },
-            "output_root": "/o" }"#;
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": { "title": "   " }, "output_root": "/o" }"#;
         let job: Job = serde_json::from_str(raw).unwrap();
         let err = job.resolve(None).await.unwrap_err().to_string();
         assert!(err.contains("title"), "{err}");

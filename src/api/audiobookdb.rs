@@ -300,15 +300,10 @@ impl AudiobookdbClient {
             },
         };
 
-        // Fetch release data for chapter information. An explicit release id
-        // pins the edition: it wins over the matched/first fallback and, when
-        // the book carries a release list, it must be one of them — an unknown
-        // id is an error, never a silent fall back to the first release.
-        // Without an explicit id, the matched release (ASIN-linked) is
-        // preferred, then the book's first release. Missing release data in
-        // that mode is not fatal because many books simply lack chapter
-        // metadata; with an explicit id it is, because the caller chose that
-        // edition deliberately.
+        // Fetch release data. Missing release data is not fatal in the
+        // matched/first fallback (many books lack chapter metadata) but is
+        // fatal with an explicit id, because the caller chose that edition
+        // deliberately.
         let (release_id, explicit) = match release_id {
             Some(rid) if !rid.is_empty() => {
                 let known = book.releases.iter().any(|r| r.id == rid);
@@ -392,12 +387,36 @@ impl AudiobookdbClient {
             (!pos.is_empty()).then_some(pos)
         });
 
-        let year = book.copyright.map(|c| c as u32).or_else(|| {
-            book.originally_published_at
-                .as_ref()
-                .and_then(|d| d.split('-').next())
-                .and_then(|y| y.parse().ok())
-        });
+        // Release-first precedence: the selected release is the edition the
+        // caller pinned, so its title/subtitle/date win when present; the
+        // book's own title/subtitle are the fallback, and the year falls back
+        // to copyright, then original publication, in that order.
+        let title = release_data
+            .map(|r| r.title.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| book.title.clone());
+
+        let subtitle = release_data
+            .and_then(|r| r.subtitle.as_deref())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| book.subtitle.clone().filter(|s| !s.is_empty()))
+            .or_else(|| book.disambiguation.clone().filter(|s| !s.is_empty()));
+
+        let year = release_data
+            .and_then(|r| {
+                r.release_date
+                    .as_ref()
+                    .and_then(|d| d.split('-').next())
+                    .and_then(|y| y.parse().ok())
+            })
+            .or_else(|| book.copyright.map(|c| c as u32))
+            .or_else(|| {
+                book.originally_published_at
+                    .as_ref()
+                    .and_then(|d| d.split('-').next())
+                    .and_then(|y| y.parse().ok())
+            });
 
         let genres: Vec<String> = book.genres.iter().map(|g| g.title.clone()).collect();
 
@@ -411,12 +430,6 @@ impl AudiobookdbClient {
             .or(book.cover_image.as_ref())
             .or(book.images.first())
             .map(cover_url_of);
-
-        let subtitle = book
-            .subtitle
-            .clone()
-            .filter(|s| !s.is_empty())
-            .or_else(|| book.disambiguation.clone().filter(|s| !s.is_empty()));
 
         // Skip chapters with negative offsets or lengths rather than wrapping: they
         // are data errors, and dropping them is the safer fallback. Server order is
@@ -449,7 +462,7 @@ impl AudiobookdbClient {
                 .filter(|id| !id.is_empty())
                 .unwrap_or(caller_id)
                 .to_string(),
-            title: book.title.clone(),
+            title,
             subtitle,
             authors,
             narrators,
@@ -522,6 +535,17 @@ struct AudiobookdbReleaseRef {
 
 #[derive(Debug, Deserialize, Clone)]
 struct AudiobookdbRelease {
+    /// The release's title (defaults to the book title on import; a
+    /// hand-entered edition may carry a distinct title). Treated as absent
+    /// when empty so the book title is the fallback.
+    #[serde(default)]
+    title: String,
+    /// The release's subtitle; display falls back to the book's when empty.
+    #[serde(default)]
+    subtitle: Option<String>,
+    /// The supported calendar date of this recording (ISO 8601 date).
+    #[serde(rename = "releaseDate", default)]
+    release_date: Option<String>,
     #[serde(rename = "chapterDetail", default)]
     chapter_detail: Option<AudiobookdbChapterDetail>,
     #[serde(default)]
@@ -766,6 +790,39 @@ mod tests {
         let parsed = AudiobookdbClient::parse_retry_after(&httpdate::fmt_http_date(date)).unwrap();
         assert!(parsed.as_millis() <= 30_000, "got {parsed:?}");
         assert!(parsed.as_millis() >= 29_000, "got {parsed:?}");
+    }
+
+    #[test]
+    fn test_release_first_normalization_precedence() {
+        // The selected release is the pinned edition: its title, subtitle
+        // and release date win over the book's title, subtitle and copyright
+        // year; empty/absent release fields fall back to the book's own
+        // values, and the year falls back to original publication last.
+        let book: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"id": "abc123def456", "title": "Book Title", "subtitle": "Book Subtitle", "copyright": 1999, "originallyPublishedAt": "1998-01-01"}"#)).unwrap();
+        // All release fields present: they win.
+        let rel: AudiobookdbRelease =
+            serde_json::from_value(json(r#"{"title": "Release Title", "subtitle": "Release Subtitle", "releaseDate": "2021-05-01"}"#)).unwrap();
+        let meta = AudiobookdbClient::map_book("abc123def456", &book, Some(&rel));
+        assert_eq!(meta.title, "Release Title");
+        assert_eq!(meta.subtitle.as_deref(), Some("Release Subtitle"));
+        assert_eq!(meta.year, Some(2021));
+        assert_eq!(meta.metadata_id, "abc123def456");
+        // Empty release fields: fall back to the book's title/subtitle and
+        // copyright year.
+        let rel: AudiobookdbRelease =
+            serde_json::from_value(json(r#"{"title": "", "subtitle": ""}"#)).unwrap();
+        let meta = AudiobookdbClient::map_book("abc123def456", &book, Some(&rel));
+        assert_eq!(meta.title, "Book Title");
+        assert_eq!(meta.subtitle.as_deref(), Some("Book Subtitle"));
+        assert_eq!(meta.year, Some(1999));
+        // Absent release + absent copyright: original publication is the year.
+        let no_copyright: AudiobookdbBook = serde_json::from_value(json(
+            r#"{"id": "abc123def456", "title": "T", "originallyPublishedAt": "1987-03-14"}"#,
+        ))
+        .unwrap();
+        let meta = AudiobookdbClient::map_book("abc123def456", &no_copyright, None);
+        assert_eq!(meta.year, Some(1987));
     }
 
     #[test]

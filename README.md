@@ -112,14 +112,14 @@ m4b-merge --job job.json
 The job selects its metadata base exactly one of two ways:
 
 - `input_provider` — an explicit catalog id (`book_id`, plus an exact
-  `release_id` for `audiobookdb`). The catalog is the authority; an
-  unresolvable id, a release the book does not carry, or a missing client
-  fails the job before any file is touched.
+  `release_id` for `audiobookdb`). An unresolvable id, a release the book
+  does not carry, or a missing client fails the job before any file is
+  touched.
 - `input_supplied` — the values are authoritative as-is; no catalog lookup
   is attempted and the job runs fully offline.
 
-On top of the base, an optional `overrides` object replaces individual
-fields; present non-blank values win over the base.
+An optional `overrides` object replaces individual fields; present
+non-blank values win over the base.
 
 ```json
 {
@@ -145,13 +145,9 @@ Field semantics:
   in provider mode, and is irrelevant in supplied mode.
 - `overrides` (optional) — same shape as `input_supplied`.
 
-The output path is `output_root` + the (sanitized) template, so the same job
-against the same book always lands on the same path — no worker-time catalog
-rematching is needed by callers. Every supported scalar metadata field is
-written from the effective metadata; the provider cover URL (when present) is
-embedded, and the resolved chapters are embedded with a `chapters.txt`
-sidecar. Per-field write policies and cover/chapter policies build on this
-schema in follow-up work.
+Every supported scalar metadata field is written from the effective
+metadata; the provider cover URL (when present) is embedded, and the resolved
+chapters are embedded with a `chapters.txt` sidecar.
 
 ### Verify Environment
 
