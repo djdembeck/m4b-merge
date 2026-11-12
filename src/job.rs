@@ -251,12 +251,21 @@ impl Job {
                 ));
             }
         }
-        // Supplied mode: the series value is known now, so reject a blank
-        // write here, mirroring title/subtitle. Provider mode's value is only
-        // known after the fetch, so the tagger's pre-mutation check covers it.
+        // Supplied mode: the effective series value (base, with an override
+        // winning) is known now, so reject a blank write here, mirroring
+        // title/subtitle. Provider mode's value is only known after the fetch,
+        // so the tagger's pre-mutation check covers it.
         if self.series == FieldPolicy::Write {
             if let Some(supplied) = &self.input_supplied {
-                if supplied.series_name.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+                // A non-blank override wins over the base; a blank override is
+                // treated as absent, matching the override layer's semantics.
+                let effective = self
+                    .overrides
+                    .as_ref()
+                    .and_then(|o| o.series_name.as_deref())
+                    .filter(|s| !s.trim().is_empty())
+                    .or(supplied.series_name.as_deref());
+                if effective.map(str::trim).unwrap_or_default().is_empty() {
                     return Err(JobError::Invalid(
                         "series policy 'write' requires a series name".into(),
                     ));
@@ -473,6 +482,14 @@ mod tests {
         let job: Job = serde_json::from_str(raw).unwrap();
         let err = job.validate().unwrap_err().to_string();
         assert!(err.contains("series"), "{err}");
+
+        // A blank base series is valid when a non-blank override supplies the
+        // effective value: the override wins, so validation must accept it.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "input_supplied": {"title": "T", "series_name": "  "},
+            "output_root": "/o", "series": "write",
+            "overrides": { "series_name": "Dune" } }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        assert!(job.validate().is_ok());
     }
 
     #[test]
