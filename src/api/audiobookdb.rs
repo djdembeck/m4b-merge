@@ -48,6 +48,10 @@ pub enum AudiobookdbError {
         "release {release_id} is not one of the releases of book {book_id}; an explicit release must not silently fall back"
     )]
     ReleaseNotFound { book_id: String, release_id: String },
+    #[error(
+        "release_id must be a non-blank release id, got {release_id:?}; an absent pin is None, a blank explicit pin is an invalid selection"
+    )]
+    ReleaseIdBlank { release_id: String },
     #[error("connection error: {0}")]
     Connection(String),
     #[error("serialization error: {0}")]
@@ -283,6 +287,12 @@ impl AudiobookdbClient {
         book_id: &str,
         release_id: Option<&str>,
     ) -> Result<BookMetadata, AudiobookdbError> {
+        // Reserve the fallback for an *absent* pin. A blank explicit pin is
+        // an invalid selection, not "no pin": accepting it would silently
+        // fall back to the matched/first release, hiding a caller mistake.
+        if let Some(rid) = release_id.filter(|r| r.trim().is_empty()) {
+            return Err(AudiobookdbError::ReleaseIdBlank { release_id: rid.to_string() });
+        }
         let endpoint = Self::resolve_endpoint(book_id);
         let book = match endpoint {
             BookEndpoint::ExternalAsin => match self.resolve_external(book_id).await {
@@ -310,9 +320,10 @@ impl AudiobookdbClient {
         // Fetch release data. Missing release data is not fatal in the
         // matched/first fallback (many books lack chapter metadata) but is
         // fatal with an explicit id, because the caller chose that edition
-        // deliberately.
+        // deliberately. A blank pin is rejected at the entry, so `Some` here
+        // is always a non-blank explicit selection.
         let (release_id, explicit) = match release_id {
-            Some(rid) if !rid.is_empty() => {
+            Some(rid) => {
                 // An explicit pin must be verified as a member of the book's
                 // releases. A book whose release list is empty carries no
                 // release that can be verified, so an explicit id is rejected
@@ -325,9 +336,7 @@ impl AudiobookdbClient {
                 }
                 (Some(rid.to_string()), true)
             }
-            Some(_) | None => {
-                (Self::release_id_for(&book, book.matched_release_id.as_deref()), false)
-            }
+            None => (Self::release_id_for(&book, book.matched_release_id.as_deref()), false),
         };
         let release_data = match release_id {
             Some(rid) => match self.get_release(&rid).await {
