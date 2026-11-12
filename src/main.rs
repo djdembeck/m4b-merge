@@ -93,12 +93,17 @@ struct Args {
     pub capabilities: bool,
 }
 
-/// Console progress handler that prints to stdout
+/// Console progress handler: progress on stdout, errors on stderr
+/// (the pre-existing stream behavior, preserved by the `--machine`
+/// extraction).
 struct ConsoleProgressHandler;
 
 impl ProgressHandler for ConsoleProgressHandler {
     fn on_progress(&self, progress: ProcessingProgress) {
-        write_progress(&progress, |s| println!("{s}"));
+        match progress.stage {
+            ProcessingStage::Error => write_progress(&progress, |s| eprintln!("{s}")),
+            _ => write_progress(&progress, |s| println!("{s}")),
+        }
     }
 }
 
@@ -221,10 +226,11 @@ async fn main() {
         None => args.inputs.clone(),
     };
 
-    // `--machine --dry-run` is rejected up front: the dry-run early exit
-    // below would otherwise succeed without emitting any machine JSON.
-    if args.machine && args.dry_run {
-        eprintln!("Error: --machine is a real run; drop --dry-run.");
+    // `--machine --dry-run` and `--job-preview --dry-run` are rejected up
+    // front: the dry-run early exit below would otherwise succeed without
+    // emitting any machine JSON or preview.
+    if args.dry_run && (args.machine || args.job_preview) {
+        eprintln!("Error: --machine/--job-preview are real runs; drop --dry-run.");
         std::process::exit(1);
     }
 

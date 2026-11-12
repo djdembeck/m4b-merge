@@ -17,11 +17,16 @@ All notable changes to this project will be documented in this file. See [standa
   never absolute; failure exits 1; stdout always parses.
 - Engine-side no-clobber for `--job` runs: the output name is claimed with
   `O_CREAT|O_EXCL` before any write, parents are re-validated at claim time
-  and immediately before the merge, and the produced file after the merge
-  (regular, non-empty, inside the canonical root), so a swapped parent
-  cannot redirect the accepted output. A collision is a diagnosed failure
-  that leaves the existing file untouched; a failed merge removes its
-  claimed placeholder.
+  and again immediately before the merge (after the progress callback), and
+  the produced file after the merge must be regular, non-empty, and inside
+  the canonical root. A collision leaves the existing file untouched; a
+  failed merge removes its placeholder; rejected outputs are discarded
+  root-aware, so cleanup can never delete a file outside the root.
+- `ProcessorError` variants consolidated: a group failure now carries its
+  diagnosed error and produced artifacts at the `RunOutcome`/group-outcome
+  level (the machine contract) instead of the previous lossy group-failure
+  variant; a pre-1.0 library API change (the documented contracts are the
+  CLI and README).
 - One parsed-template output-path resolver for `--job` runs (`resolver_version`
   from `--capabilities`): only template separators create directories; a
   token's value is sanitized as component data so it cannot introduce

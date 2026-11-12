@@ -454,7 +454,10 @@ impl Processor {
                 Err(e) => {
                     warn!("Group '{}' failed: {}", group.name, e);
                     // Machine output never carries an absolute path: the
-                    // job's output root is relativized at this boundary.
+                    // job's output root is relativized at this boundary (only
+                    // this process creates directories under it, so the
+                    // canonical form here is the one the output path was
+                    // joined onto).
                     let diagnosed = self
                         .job
                         .as_ref()
@@ -462,8 +465,7 @@ impl Processor {
                             let msg = e.to_string();
                             let canonical = std::fs::canonicalize(&j.output_root)
                                 .unwrap_or_else(|_| j.output_root.clone());
-                            let canonical_str = canonical.to_string_lossy().into_owned();
-                            msg.replace(&canonical_str, "output_root")
+                            msg.replace(canonical.to_string_lossy().as_ref(), "output_root")
                         })
                         .unwrap_or_else(|| e.to_string());
                     failed_groups.push((group.name.clone(), diagnosed.clone()));
@@ -666,13 +668,13 @@ impl Processor {
                         merged_path.display(),
                         e
                     );
-                    Self::discard_output(&merged_path);
+                    self.discard_output(&merged_path);
                     return Err(ProcessorError::ProbeFailed { path: merged_path, source: e });
                 }
             };
 
             if let Some((count, details)) = describe_out_of_range_chapters(&chapters, duration) {
-                Self::discard_output(&merged_path);
+                self.discard_output(&merged_path);
                 return Err(ProcessorError::ChaptersOutOfRange {
                     path: merged_path,
                     count,
@@ -727,7 +729,7 @@ impl Processor {
                 // can be shorter. A failed embed would otherwise ship a
                 // "successful" book with no chapters, so discard the merged
                 // output and fail the book.
-                Self::discard_output(&merged_path);
+                self.discard_output(&merged_path);
                 return Err(ProcessorError::Tagging(e));
             } else {
                 info!("Successfully embedded {} chapters", chapters.len());
@@ -914,12 +916,12 @@ impl Processor {
         // Engine-side no-clobber: claim with `O_CREAT|O_EXCL` immediately
         // before the write; a claim failure leaves the existing file intact.
         self.claim_output_name(&output_path)?;
-        // A parent swapped for a symlink between claim and merge would let
-        // the merge write outside the root; re-check before the merge opens
-        // anything.
-        self.recheck_claimed_placeholder(&output_path)?;
 
-        // Stage 3: Merge
+        // Stage 3: Merge. The parent is re-validated after the progress
+        // callback and before the merge opens anything, so a parent swapped
+        // for a symlink at the handler call is refused; the post-merge
+        // zero-byte + containment check is the backstop for a merge that
+        // already started writing.
         progress_handler.on_progress(ProcessingProgress {
             stage: ProcessingStage::Merging,
             current_file: Some(input_paths[0].clone()),
@@ -927,13 +929,14 @@ impl Processor {
             completed_files: 0,
             message: "Merging audio files...".to_string(),
         });
+        self.recheck_claimed_placeholder(&output_path)?;
 
         let merge_job = MergeJob::new(group.files.clone(), output_path.clone())
             .with_threads(self.config.num_cpus);
         let merged_path = self.merger.merge(&merge_job).map_err(|e| {
             // A failed merge must not leave the claimed placeholder behind:
             // it would block a retry with a false collision.
-            Self::discard_output(&output_path);
+            self.discard_output(&output_path);
             ProcessorError::Merge(e)
         })?;
         // Bind the produced output to the validated root (claim containment
@@ -958,7 +961,7 @@ impl Processor {
         self.tagger
             .write_metadata_with_policies(&merged_path, &effective.metadata, &effective.policies)
             .map_err(|e| {
-                Self::discard_output(&merged_path);
+                self.discard_output(&merged_path);
                 ProcessorError::Tagging(e)
             })?;
 
@@ -979,7 +982,7 @@ impl Processor {
             crate::job::CoverPolicy::Write(file) => {
                 if let Err(e) = self.tagger.embed_cover_local(&merged_path, file, &job.output_root)
                 {
-                    Self::discard_output(&merged_path);
+                    self.discard_output(&merged_path);
                     return Err(ProcessorError::Tagging(e));
                 }
             }
@@ -991,7 +994,7 @@ impl Processor {
                 let url = explicit.clone().or_else(|| effective.metadata.cover_url.clone());
                 if let Some(url) = url {
                     if let Err(e) = self.tagger.embed_cover(&merged_path, &url).await {
-                        Self::discard_output(&merged_path);
+                        self.discard_output(&merged_path);
                         return Err(ProcessorError::Tagging(e));
                     }
                 }
@@ -999,7 +1002,7 @@ impl Processor {
             crate::job::CoverPolicy::Clear => {
                 // Remove the copied/merged artwork so the clear promise holds.
                 if let Err(e) = self.tagger.clear_cover(&merged_path) {
-                    Self::discard_output(&merged_path);
+                    self.discard_output(&merged_path);
                     return Err(ProcessorError::Tagging(e));
                 }
             }
@@ -1017,13 +1020,13 @@ impl Processor {
                 let clear = explicit.as_ref().is_some_and(Vec::is_empty);
                 if clear {
                     if let Err(e) = self.tagger.clear_chapters(&merged_path) {
-                        Self::discard_output(&merged_path);
+                        self.discard_output(&merged_path);
                         return Err(ProcessorError::Tagging(e));
                     }
                     let sidecar = merged_path.with_extension("chapters.txt");
                     if sidecar.is_file() {
                         std::fs::remove_file(&sidecar).map_err(|e| {
-                            Self::discard_output(&merged_path);
+                            self.discard_output(&merged_path);
                             ProcessorError::Tagging(TaggingError::Io(std::io::Error::new(
                                 e.kind(),
                                 format!(
@@ -1035,7 +1038,7 @@ impl Processor {
                     }
                 } else if !write_chapters.is_empty() {
                     if let Err(e) = self.tagger.embed_chapters(&merged_path, &write_chapters) {
-                        Self::discard_output(&merged_path);
+                        self.discard_output(&merged_path);
                         return Err(ProcessorError::Tagging(e));
                     }
                     let artist = if effective.metadata.authors.is_empty() {
@@ -1052,8 +1055,8 @@ impl Processor {
                     ) {
                         // A partially written sidecar would be an undisclosed
                         // extra: the group reports no artifacts.
-                        Self::discard_output(&sidecar);
-                        Self::discard_output(&merged_path);
+                        self.discard_output(&sidecar);
+                        self.discard_output(&merged_path);
                         return Err(ProcessorError::Tagging(e));
                     }
                 }
@@ -1062,7 +1065,7 @@ impl Processor {
             }
             crate::job::ChaptersPolicy::Clear => {
                 if let Err(e) = self.tagger.clear_chapters(&merged_path) {
-                    Self::discard_output(&merged_path);
+                    self.discard_output(&merged_path);
                     return Err(ProcessorError::Tagging(e));
                 }
                 // A re-run with `clear` must not leave a sidecar that still
@@ -1070,7 +1073,7 @@ impl Processor {
                 let sidecar = merged_path.with_extension("chapters.txt");
                 if sidecar.is_file() {
                     std::fs::remove_file(&sidecar).map_err(|e| {
-                        Self::discard_output(&merged_path);
+                        self.discard_output(&merged_path);
                         ProcessorError::Tagging(TaggingError::Io(std::io::Error::new(
                             e.kind(),
                             format!(
@@ -1091,7 +1094,7 @@ impl Processor {
                 let dest = merged_path.with_extension("chapters.txt");
                 if source_sidecar.is_file() {
                     std::fs::copy(&source_sidecar, &dest).map_err(|e| {
-                        Self::discard_output(&merged_path);
+                        self.discard_output(&merged_path);
                         ProcessorError::Tagging(TaggingError::Io(std::io::Error::new(
                             e.kind(),
                             format!(
@@ -1103,7 +1106,7 @@ impl Processor {
                     })?;
                 } else if dest.is_file() {
                     std::fs::remove_file(&dest).map_err(|e| {
-                        Self::discard_output(&merged_path);
+                        self.discard_output(&merged_path);
                         ProcessorError::Tagging(TaggingError::Io(std::io::Error::new(
                             e.kind(),
                             format!(
@@ -1243,6 +1246,10 @@ impl Processor {
         Ok(candidate)
     }
 
+    /// Re-validate a claimed placeholder before the merge: the parent must
+    /// still lie inside the canonical output root (a swapped symlink is
+    /// refused); every failure path removes the placeholder, so a retried
+    /// run never hits a false collision.
     fn recheck_claimed_placeholder(&self, output_path: &std::path::Path) -> Result<()> {
         let Some(job) = self.job.as_ref() else {
             return Ok(());
@@ -1250,8 +1257,17 @@ impl Processor {
         let Some(parent) = output_path.parent() else {
             return Ok(());
         };
-        if self.parent_escapes_root(job, parent)? {
-            Self::discard_output(output_path);
+        let escapes = match self.parent_escapes_root(job, parent) {
+            Ok(e) => e,
+            Err(e) => {
+                // E.g. a dangling-symlinked parent: the placeholder is
+                // still ours (the claim created it), so remove it.
+                self.discard_output(output_path);
+                return Err(e);
+            }
+        };
+        if escapes {
+            self.discard_output(output_path);
             return Err(self.output_root_escape(output_path));
         }
         Ok(())
@@ -1314,11 +1330,10 @@ impl Processor {
         }
     }
 
-    /// Bind the produced output to the validated root after the merge: the
-    /// produced file must be a regular file inside the canonical output root
-    /// and not the untouched zero-byte claim placeholder — a redirected
-    /// merge, even one restored before this check, leaves it empty. Any
-    /// mismatch fails the group and discards the produced file.
+    /// Bind the produced output to the validated root after the merge:
+    /// the produced file must be a regular, non-empty file inside the
+    /// canonical output root; any mismatch fails the group and discards
+    /// the produced file.
     fn verify_output_in_root(&self, output_path: &std::path::Path) -> Result<()> {
         let job = self.job.as_ref().ok_or_else(|| {
             ProcessorError::Job(crate::job::JobError::Invalid(
@@ -1329,7 +1344,7 @@ impl Processor {
             ProcessorError::OutputDirCreation(format!("Failed to stat output: {e}"))
         })?;
         if final_meta.file_type().is_symlink() {
-            Self::discard_output(output_path);
+            self.discard_output(output_path);
             return Err(self.output_root_escape(output_path));
         }
         let produced = std::fs::canonicalize(output_path).map_err(|e| {
@@ -1347,7 +1362,7 @@ impl Processor {
         // A real merge always writes audio into the claimed file; a
         // redirected merge leaves the zero-byte placeholder behind.
         if !in_root || produced_meta.len() == 0 {
-            Self::discard_output(output_path);
+            self.discard_output(output_path);
             return Err(self.output_root_escape(output_path));
         }
         Ok(())
@@ -1376,11 +1391,32 @@ impl Processor {
             .collect()
     }
 
-    /// Remove a merged output that failed post-merge validation.
-    ///
-    /// The output keeps its final name once merged, so leaving it behind makes a
-    /// rejected book look like a finished one. Source files are never touched.
-    fn discard_output(path: &std::path::Path) {
+    /// Remove a merged output that failed validation. The output keeps its
+    /// final name once merged, so leaving it behind makes a rejected book
+    /// look like a finished one. In job mode the removal is root-aware: the
+    /// entry is deleted only if it is a regular file whose parent still lies
+    /// inside the output root, so a parent swapped for a symlink after the
+    /// claim can never make cleanup delete an external file. Source files
+    /// are never touched.
+    fn discard_output(&self, path: &std::path::Path) {
+        if let Some(job) = &self.job {
+            let root =
+                std::fs::canonicalize(&job.output_root).unwrap_or_else(|_| job.output_root.clone());
+            let inside = path
+                .parent()
+                .and_then(|p| std::fs::canonicalize(p).ok())
+                .map(|p| p.starts_with(&root))
+                .unwrap_or(false);
+            let regular =
+                std::fs::symlink_metadata(path).map(|m| m.file_type().is_file()).unwrap_or(false);
+            if !inside || !regular {
+                warn!(
+                    "Rejected output {} escaped the root or is not a regular file; left in place",
+                    path.display()
+                );
+                return;
+            }
+        }
         if let Err(e) = std::fs::remove_file(path) {
             warn!("Failed to remove rejected output {}: {}", path.display(), e);
         }
@@ -2216,6 +2252,42 @@ mod tests {
         assert_eq!(entries, vec![std::ffi::OsString::from("Clash.m4b")], "{entries:?}");
         // The source input is never destroyed by a collision.
         assert!(input.exists(), "source retained for recovery");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recheck_escaped_parent_leaves_external_file_untouched() {
+        // A parent swapped for a symlink after the claim must not let
+        // recheck/discard delete a same-named file outside the root.
+        let temp_dir = TempDir::new().unwrap();
+        let input = create_test_m4b(&temp_dir.path().join("Book"), 5);
+        let output_root = temp_dir.path().join("out");
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let job_path = temp_dir.path().join("job.json");
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],"input_supplied": {{ "title": "Esc", "authors": ["A"] }},"output_root": {:?}, "path_format": "{{author}}/{{title}}" }}"#,
+            input, output_root
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let processor = Processor::for_job(
+            crate::job::Job::load(&job_path).unwrap(),
+            job_config(&temp_dir, &temp_dir.path().join("cfg-done")),
+        )
+        .unwrap();
+
+        let output_path = processor.job_output_path_for(&output_root, "A/Esc.m4b").unwrap();
+        processor.claim_output_name(&output_path).unwrap();
+        let external = outside.join("Esc.m4b");
+        std::fs::write(&external, b"external").unwrap();
+        let parent = output_path.parent().unwrap();
+        let stashed = parent.with_extension("stashed");
+        std::fs::rename(parent, &stashed).unwrap();
+        std::os::unix::fs::symlink(&outside, parent).unwrap();
+
+        let err = processor.recheck_claimed_placeholder(&output_path).unwrap_err();
+        assert!(err.to_string().contains("output root"), "{err}");
+        assert_eq!(std::fs::read(&external).expect("external file survived"), b"external");
     }
 
     #[tokio::test]
