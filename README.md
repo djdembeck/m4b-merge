@@ -202,6 +202,78 @@ The output path is `output_root` + the (sanitized) template, so the same job
 against the same book always lands on the same path — no worker-time catalog
 rematching is needed by callers.
 
+#### Preview (`--job-preview`)
+
+A non-mutating preview of a job:
+
+```bash
+m4b-merge --job job.json --job-preview
+```
+
+It resolves the effective metadata exactly as execution does (base +
+overrides; a supplied job performs **no catalog request**) and resolves the
+same parsed template with the same resolver, printing the exact sanitized
+relative output path (plus the effective values for diagnostics) as JSON. It
+creates no output or completed directories, writes no media, and reserves no
+names, and it makes no execution success promise: collisions, media errors,
+and filesystem failures are execution-time. Because the preview and the run
+share one resolver and one effective-metadata resolution, the previewed
+relative path is the path execution produces — provided the metadata is the
+same. A **provider** preview that refetches at execution is therefore
+**advisory** unless the caller captures the supplied resolved metadata
+(supplied mode has no fetch, so its preview is exact).
+
+#### Machine results (`--machine`)
+
+Machine-readable execution results for a job:
+
+```bash
+m4b-merge --job job.json --machine
+```
+
+Stable JSON on **stdout only** — all logs and progress go to stderr, so the
+stdout document parses cleanly on success and on failure. The document
+enumerates **every** produced output and sidecar, with per-group identity,
+outcome, and diagnosed errors:
+
+```json
+{
+  "status": "succeeded | partial_failure | failed",
+  "groups": [
+    {
+      "group": "job",
+      "outcome": "succeeded | failed",
+      "input_files": ["/abs/path/track1.m4b"],
+      "artifacts": [
+        { "relative_path": "Author/Title.m4b", "kind": "audio", "exists": true },
+        { "relative_path": "Author/Title.chapters.txt", "kind": "sidecar", "exists": true }
+      ],
+      "files_moved": true,
+      "error": null
+    }
+  ]
+}
+```
+
+Artifact paths are **relative to the job's `output_root`** and validated to
+lie inside it — there is no absolute-path fallback, so a caller can
+contain-check every artifact against its own job staging tree. `status`
+never claims success for a group that failed, and a partial or total failure
+exits nonzero (1) after the document is printed.
+
+#### No-clobber
+
+Job execution claims the exact resolved output name with
+`O_CREAT|O_EXCL` before any write: no silent suffixing, no
+exists-then-rename race, and no overwrite rename. If the path already exists
+(as a file or directory), the run fails with a diagnosed collision and the
+existing file is left untouched; a failed group also leaves no falsely
+successful partial output and never destroys its source files. Root
+containment (above) applies before the write as well. This protects the
+job's staging area only: publishing a staged output into a shared,
+externally-owned destination still needs the caller's own race-safe
+no-replace publication — staging alone does not protect that path.
+
 ### Verify Environment
 
 Check FFmpeg installation and version.
@@ -291,13 +363,16 @@ substitution semantics, and the field/cover/chapter policy vocabulary.
 Callers build pickers, examples, and validation from this document instead of
 maintaining their own registry, and reject protocol/resolver versions they do
 not understand. The command is self-contained (no FFmpeg, job, or network).
+The `--job-preview` and `--machine` surfaces carry the same
+`schema_version`/`resolver_version` identity, so a caller can verify that a
+previewed or produced path came from the resolver version it validated.
 
 ## Exit Codes
 
-| Code | Description                                                 |
-|------|------------------------------------------------------------|
-| `0`  | Success                                                     |
-| `1`  | Error (missing input, FFmpeg not found, processing failed) |
+| Code | Description                                                                                                     |
+|------|-----------------------------------------------------------------------------------------------------------------|
+| `0`  | Success (in `--machine` mode: every group succeeded)                                                            |
+| `1`  | Error (missing input, FFmpeg not found, processing failed; in `--machine` mode: partial or total failure)       |
 
 ## Contributing
 

@@ -70,6 +70,23 @@ struct Args {
     #[arg(long = "dry-run")]
     pub dry_run: bool,
 
+    /// Non-mutating job preview: resolve the job's effective metadata and
+    /// print the exact sanitized relative output path (plus the effective
+    /// values) as JSON, using the same resolver and metadata as execution.
+    /// Creates no output directories, writes no media, and reserves no
+    /// names; collisions and media errors are execution-time. Job mode only,
+    /// mutually exclusive with `--machine`.
+    #[arg(long = "job-preview")]
+    pub job_preview: bool,
+
+    /// Machine-readable execution results: stable JSON on stdout only (all
+    /// logs and progress go to stderr), enumerating every produced output
+    /// and sidecar, per-group outcome, and diagnosed errors. Job mode only;
+    /// exits nonzero on partial or total failure. Mutually exclusive with
+    /// `--job-preview`.
+    #[arg(long = "machine")]
+    pub machine: bool,
+
     /// Check FFmpeg installation and display version information
     #[arg(long = "check-ffmpeg")]
     pub check_ffmpeg: bool,
@@ -85,23 +102,42 @@ struct ConsoleProgressHandler;
 
 impl ProgressHandler for ConsoleProgressHandler {
     fn on_progress(&self, progress: ProcessingProgress) {
-        match progress.stage {
-            ProcessingStage::Complete => {
-                println!("✓ {}", progress.message);
-            }
-            ProcessingStage::Error => {
-                eprintln!("✗ {}", progress.message);
-            }
-            _ => {
-                println!(
-                    "[{}/{}] [{}] {}",
-                    progress.completed_files,
-                    progress.total_files,
-                    progress.stage,
-                    progress.message
-                );
-            }
-        }
+        write_progress(&progress, |s| println!("{s}"));
+    }
+}
+
+/// Progress handler for `--machine` mode: every line goes to stderr so the
+/// stdout stream stays a single clean JSON document.
+struct StderrProgressHandler;
+
+impl ProgressHandler for StderrProgressHandler {
+    fn on_progress(&self, progress: ProcessingProgress) {
+        write_progress(&progress, |s| eprintln!("{s}"));
+    }
+}
+
+fn write_progress(progress: &ProcessingProgress, write: impl Fn(&str)) {
+    match progress.stage {
+        ProcessingStage::Complete => write(&format!("✓ {}", progress.message)),
+        ProcessingStage::Error => write(&format!("✗ {}", progress.message)),
+        _ => write(&format!(
+            "[{}/{}] [{}] {}",
+            progress.completed_files, progress.total_files, progress.stage, progress.message
+        )),
+    }
+}
+
+/// Tracing writer: stderr in `--machine`/`--job-preview` mode (stdout must
+/// stay a single clean JSON document), stdout elsewhere.
+#[derive(Clone)]
+struct LogWriter {
+    stderr: bool,
+}
+
+impl tracing_subscriber::fmt::MakeWriter<'_> for LogWriter {
+    type Writer = Box<dyn std::io::Write + Send>;
+    fn make_writer(&self) -> Self::Writer {
+        if self.stderr { Box::new(std::io::stderr()) } else { Box::new(std::io::stdout()) }
     }
 }
 
@@ -116,13 +152,15 @@ async fn main() {
         std::process::exit(0);
     }
 
-    // Initialize tracing with the requested log level
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&args.log_level)),
-        )
-        .finish();
+    // Initialize tracing with the requested log level. In `--machine` and
+    // `--job-preview` mode the stdout stream is a single JSON document, so
+    // every log line goes to stderr.
+    let builder = tracing_subscriber::fmt().with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&args.log_level)),
+    );
+    let writer = LogWriter { stderr: args.machine || args.job_preview };
+    let subscriber = builder.with_writer(writer).finish();
 
     if let Err(err) = tracing::subscriber::set_global_default(subscriber) {
         eprintln!("Warning: Failed to set tracing subscriber: {}", err);
@@ -224,10 +262,15 @@ async fn main() {
         args.metadata_id,
     );
 
-    // Validate configuration
-    if let Err(e) = config.validate() {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
+    // Validate configuration. The preview skips this deliberately:
+    // `validate` creates the output and completed directories, and the
+    // preview must mutate nothing (in job mode the CLI paths are unused
+    // anyway; the job file is already validated at load).
+    if !args.job_preview {
+        if let Err(e) = config.validate() {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
     }
 
     // `--api-url` no longer implies the audnexus source; with the default
@@ -244,6 +287,66 @@ async fn main() {
         warn!(
             "--region only applies to the audnexus metadata source; it is ignored for AudiobookDB lookups"
         );
+    }
+
+    // --job-preview and --machine are job-mode-only surfaces; both need the
+    // job and are mutually exclusive with each other.
+    if args.job_preview || args.machine {
+        let Some(job) = job.as_ref() else {
+            eprintln!("Error: --job-preview/--machine require --job.");
+            std::process::exit(1);
+        };
+        if args.job_preview && args.machine {
+            eprintln!("Error: --job-preview and --machine are mutually exclusive.");
+            std::process::exit(1);
+        }
+        if args.machine && args.dry_run {
+            // A dry run produces no artifacts; emitting an empty
+            // `succeeded` document would be a false claim.
+            eprintln!("Error: --machine is a real run; drop --dry-run.");
+            std::process::exit(1);
+        }
+        if args.job_preview {
+            // Non-mutating: resolves the effective metadata (a supplied job
+            // needs no catalog) and the exact sanitized relative path via the
+            // same resolver execution uses. No output/completed directories,
+            // no media, no name reservation, no success promise.
+            let preview = match job.preview(&config).await {
+                Ok(preview) => preview,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&preview).expect("preview serializes"));
+            std::process::exit(0);
+        }
+        // --machine: stable JSON on stdout only; progress goes to stderr via
+        // StderrProgressHandler. A partial or total failure exits nonzero
+        // after the result is printed, with the truth in `status`.
+        let processor_result = Processor::for_job(job.clone(), config);
+        let processor = match processor_result {
+            Ok(processor) => processor,
+            Err(e) => {
+                error!("Failed to create processor: {}", e);
+                eprintln!("Error: Failed to initialize: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let run = match processor.run(job.inputs.clone(), &StderrProgressHandler).await {
+            Ok(run) => run,
+            Err(e) => {
+                error!("Processing failed: {}", e);
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let result = m4b_merge::job::JobResult::from_run(&run);
+        println!("{}", serde_json::to_string_pretty(&result).expect("result serializes"));
+        if !result.all_succeeded() {
+            std::process::exit(1);
+        }
+        std::process::exit(0);
     }
 
     info!("m4b-merge starting with {} input(s)", run_inputs.len());

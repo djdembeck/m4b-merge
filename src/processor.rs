@@ -78,11 +78,47 @@ pub enum ProcessorError {
     #[error("Cleanup failed: {0}")]
     CleanupFailed(String),
 
-    #[error("Group processing failed: {group}")]
-    GroupProcessingFailed { group: String, source: Box<dyn std::error::Error + Send + Sync> },
-
     #[error("Partial processing complete: {detail}")]
-    PartialFailure { results: Vec<ProcessingResult>, detail: String },
+    PartialFailure { results: Vec<ProcessingResult>, outcomes: Vec<GroupOutcomes>, detail: String },
+
+    /// Every group failed; the per-group diagnostics survive on the outcome
+    /// list so a machine result can name each failure without guessing.
+    #[error("Group processing failed: {detail}")]
+    AllGroupsFailed { outcomes: Vec<GroupOutcomes>, detail: String },
+
+    #[error("Output path already exists; refusing to overwrite: {path}")]
+    OutputCollision { path: PathBuf },
+}
+
+/// The full outcome of a run: the succeeded results plus every group's
+/// recorded outcome (successful and failed), so a machine result can
+/// enumerate all groups without guessing.
+#[derive(Debug, Clone)]
+pub struct RunOutcome {
+    pub results: Vec<ProcessingResult>,
+    pub outcomes: Vec<GroupOutcomes>,
+    /// `true` when every group succeeded.
+    pub complete: bool,
+    /// A human-readable summary of the failures.
+    pub detail: String,
+}
+
+/// The per-group outcome: identity, every produced artifact, inputs, and the
+/// diagnosed error. Used by the machine result and by `PartialFailure`/
+/// `AllGroupsFailed` so no produced artifact or failure is ever undisclosed.
+#[derive(Debug, Clone)]
+pub struct GroupOutcomes {
+    /// The group's identity as discovered.
+    pub group: String,
+    /// Every produced output and sidecar for this group, relative to the
+    /// job's `output_root`; empty when the group failed before producing
+    /// anything.
+    pub artifacts: Vec<crate::job::Artifact>,
+    pub input_files: Vec<PathBuf>,
+    pub files_moved: bool,
+    pub outcome: crate::job::GroupOutcome,
+    /// A diagnosed error when the group failed.
+    pub error: Option<String>,
 }
 
 /// Result type for processor operations
@@ -99,6 +135,9 @@ pub struct ProcessingResult {
     pub metadata_applied: bool,
     /// Whether source files were moved to completed directory
     pub files_moved: bool,
+    /// Every produced output and sidecar (the merged file and each
+    /// `chapters.txt`/`cover.txt` carried or written), absolute.
+    pub artifacts: Vec<PathBuf>,
 }
 
 /// Progress information during processing
@@ -241,27 +280,8 @@ impl Processor {
     pub fn for_job(job: crate::job::Job, config: Config) -> Result<Self> {
         // Only a provider job constructs a metadata client. A supplied job is
         // fully offline: a `source` object, if present, is irrelevant and must
-        // not build a client.
-        let source = match (&job.input_provider, job.source.as_ref()) {
-            (Some(_), Some(src)) => Some(
-                MetadataSource::new_with_region(
-                    src.source,
-                    src.api_url.as_deref(),
-                    src.region.unwrap_or(crate::api::MetadataRegion::Us),
-                )
-                .map_err(|e| ProcessorError::Job(crate::job::JobError::Metadata(e)))?,
-            ),
-            (Some(_), None) => Some(
-                MetadataSource::new_with_region(
-                    config.metadata_source,
-                    config.api_url.as_deref(),
-                    config.region,
-                )
-                .map_err(|e| ProcessorError::Job(crate::job::JobError::Metadata(e)))?,
-            ),
-            // Supplied input never needs a client, regardless of `source`.
-            (None, _) => None,
-        };
+        // not build a client. The preview path builds the client the same way.
+        let source = job.metadata_source(&config)?;
 
         let ffmpeg = Arc::new(
             FFmpeg::discover().map_err(|e| ProcessorError::FFmpegNotFound(e.to_string()))?,
@@ -318,6 +338,31 @@ impl Processor {
         inputs: Vec<PathBuf>,
         progress_handler: &dyn ProgressHandler,
     ) -> Result<Vec<ProcessingResult>> {
+        let run = self.run(inputs, progress_handler).await?;
+        if !run.complete {
+            if !run.results.is_empty() {
+                return Err(ProcessorError::PartialFailure {
+                    results: run.results,
+                    outcomes: run.outcomes,
+                    detail: run.detail,
+                });
+            }
+            return Err(ProcessorError::AllGroupsFailed {
+                outcomes: run.outcomes,
+                detail: run.detail,
+            });
+        }
+        Ok(run.results)
+    }
+
+    /// The full run outcome: every group's result and diagnosed failure, so
+    /// a machine result can enumerate all groups without guessing. This is
+    /// the single entry point the `--machine` flow uses; `process*` wrap it.
+    pub async fn run(
+        &self,
+        inputs: Vec<PathBuf>,
+        progress_handler: &dyn ProgressHandler,
+    ) -> Result<RunOutcome> {
         if inputs.is_empty() {
             return Err(ProcessorError::NoInputs);
         }
@@ -374,14 +419,24 @@ impl Processor {
         if groups.is_empty() {
             if self.config.dry_run {
                 println!("Dry run: No audio files discovered in input paths. Inputs: {:?}", inputs);
-                return Ok(Vec::new());
+                return Ok(RunOutcome {
+                    results: Vec::new(),
+                    outcomes: Vec::new(),
+                    complete: true,
+                    detail: String::new(),
+                });
             }
             return Err(ProcessorError::NoInputs);
         }
 
-        // Best-effort: each group is processed independently
+        // Best-effort: each group is processed independently. Every group's
+        // outcome — artifacts, inputs, files_moved, and the diagnosed error
+        // on failure — is recorded so a machine result can enumerate all
+        // groups and artifacts, including on partial failure, and never
+        // claims a failed group succeeded.
         let mut results = Vec::new();
         let mut failed_groups: Vec<(String, String)> = Vec::new();
+        let mut outcomes: Vec<GroupOutcomes> = Vec::new();
         let total_groups = groups.len();
 
         for (idx, group) in groups.iter().enumerate() {
@@ -395,11 +450,31 @@ impl Processor {
 
             match self.process_group(group, progress_handler, resolved_job.as_ref()).await {
                 Ok(result) => {
+                    outcomes.push(GroupOutcomes {
+                        group: group.name.clone(),
+                        artifacts: self.artifacts_for_result(&result),
+                        input_files: result.input_files.clone(),
+                        files_moved: result.files_moved,
+                        outcome: crate::job::GroupOutcome::Succeeded,
+                        error: None,
+                    });
                     results.push(result);
                 }
                 Err(e) => {
                     warn!("Group '{}' failed: {}", group.name, e);
                     failed_groups.push((group.name.clone(), e.to_string()));
+                    outcomes.push(GroupOutcomes {
+                        group: group.name.clone(),
+                        // The pipeline discards a rejected merged output before
+                        // a group fails (a failed book must not look complete),
+                        // so no artifact survives; the diagnosed error carries
+                        // the truth.
+                        artifacts: Vec::new(),
+                        input_files: group.files.iter().map(|f| f.path.clone()).collect(),
+                        files_moved: false,
+                        outcome: crate::job::GroupOutcome::Failed,
+                        error: Some(e.to_string()),
+                    });
                     progress_handler.on_progress(ProcessingProgress {
                         stage: ProcessingStage::Error,
                         current_file: Some(group.files[0].path.clone()),
@@ -413,10 +488,12 @@ impl Processor {
         }
 
         if results.is_empty() {
-            return Err(ProcessorError::GroupProcessingFailed {
-                group: failed_groups.first().map(|(g, _)| g.clone()).unwrap_or_default(),
-                source: Box::new(std::io::Error::other("All groups failed to process")),
-            });
+            let detail = outcomes
+                .iter()
+                .map(|o| format!("{}: {}", o.group, o.error.as_deref().unwrap_or("unknown error")))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Ok(RunOutcome { results, outcomes, complete: false, detail });
         }
 
         if !failed_groups.is_empty() {
@@ -430,7 +507,7 @@ impl Processor {
                     .collect::<Vec<_>>()
                     .join("; ")
             );
-            return Err(ProcessorError::PartialFailure { results, detail });
+            return Ok(RunOutcome { results, outcomes, complete: false, detail });
         }
 
         progress_handler.on_progress(ProcessingProgress {
@@ -441,7 +518,7 @@ impl Processor {
             message: format!("Completed processing {} audiobooks", results.len()),
         });
 
-        Ok(results)
+        Ok(RunOutcome { results, outcomes, complete: true, detail: String::new() })
     }
 
     /// Process a single audio group (audiobook)
@@ -539,6 +616,7 @@ impl Processor {
                 input_files: input_paths,
                 output_file: output_path,
                 metadata_applied: false,
+                artifacts: Vec::new(),
                 files_moved: false,
             });
         }
@@ -699,11 +777,20 @@ impl Processor {
             false
         };
 
+        // The legacy pipeline writes the sidecar as a warning-level best
+        // effort; report exactly what landed so nothing is silently omitted.
+        let mut artifacts = vec![merged_path.clone()];
+        let sidecar = merged_path.with_extension("chapters.txt");
+        if sidecar.is_file() {
+            artifacts.push(sidecar);
+        }
+
         Ok(ProcessingResult {
             input_files: input_paths,
             output_file: merged_path,
             metadata_applied,
             files_moved,
+            artifacts,
         })
     }
 
@@ -743,6 +830,7 @@ impl Processor {
                 output_file: PathBuf::new(),
                 metadata_applied: false,
                 files_moved: false,
+                artifacts: Vec::new(),
             });
         }
 
@@ -821,6 +909,14 @@ impl Processor {
         // wrongly reject a valid zero-length final marker that starts at the
         // end of the provider's chapter list but before the longer merged
         // audio ends.
+
+        // Engine-side no-clobber: the output name is claimed with
+        // `O_CREAT|O_EXCL` immediately before the write. No silent suffixing,
+        // no exists-then-rename race (nothing is renamed into place), and the
+        // merge writes to the exact claimed path. A claim failure — the path
+        // exists, as a file or directory — is a diagnosed collision, and the
+        // existing file is left untouched.
+        self.claim_output_name(&output_path)?;
 
         // Stage 3: Merge
         progress_handler.on_progress(ProcessingProgress {
@@ -1033,11 +1129,21 @@ impl Processor {
             false
         };
 
+        // Enumerate every produced file (the merged output and the
+        // `chapters.txt` sidecar when one exists on disk) so the machine
+        // result never silently omits a sidecar.
+        let mut artifacts = vec![merged_path.clone()];
+        let sidecar = merged_path.with_extension("chapters.txt");
+        if sidecar.is_file() {
+            artifacts.push(sidecar);
+        }
+
         Ok(ProcessingResult {
             input_files: input_paths,
             output_file: merged_path,
             metadata_applied: true,
             files_moved,
+            artifacts,
         })
     }
 
@@ -1121,6 +1227,55 @@ impl Processor {
             }
         }
         Ok(candidate)
+    }
+
+    /// Claim the output file name before any write: `O_CREAT|O_EXCL`
+    /// atomically reserves the exact path. If the path already exists — as a
+    /// file, a directory, or via a race with another run — the claim fails
+    /// with a diagnosed collision and nothing is written, renamed, or
+    /// suffixed. The merge then writes to the claimed path (truncating the
+    /// engine-owned placeholder it just created, never a pre-existing file).
+    fn claim_output_name(&self, output_path: &std::path::Path) -> Result<()> {
+        if output_path.exists() {
+            return Err(ProcessorError::OutputCollision { path: output_path.to_path_buf() });
+        }
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                ProcessorError::OutputDirCreation(format!(
+                    "Failed to create output directory {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+        // `create_new` maps to `O_CREAT|O_EXCL`: the create fails if the path
+        // exists, closing the exists-then-write race without a rename.
+        match std::fs::OpenOptions::new().create_new(true).write(true).open(output_path) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(ProcessorError::OutputCollision { path: output_path.to_path_buf() })
+            }
+            Err(e) => Err(ProcessorError::OutputDirCreation(format!(
+                "Failed to claim output path {}: {e}",
+                output_path.display()
+            ))),
+        }
+    }
+
+    /// The produced artifacts of a result, relative to the job's
+    /// `output_root`. Job mode only: the machine result requires root
+    /// containment and has no absolute-path fallback, so a produced path
+    /// that is not inside the canonical root is not emitted.
+    fn artifacts_for_result(&self, result: &ProcessingResult) -> Vec<crate::job::Artifact> {
+        let Some(job) = &self.job else {
+            return Vec::new();
+        };
+        let root =
+            std::fs::canonicalize(&job.output_root).unwrap_or_else(|_| job.output_root.clone());
+        result
+            .artifacts
+            .iter()
+            .filter_map(|p| crate::job::Artifact::from_absolute(&root, p))
+            .collect()
     }
 
     /// Remove a merged output that failed post-merge validation.
@@ -1884,6 +2039,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn job_preview_and_execution_yield_the_same_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let book_dir = temp_dir.path().join("Book");
+        let input = create_test_m4b(&book_dir, 5);
+        let output_root = temp_dir.path().join("out");
+        let job_path = temp_dir.path().join("job.json");
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],
+                  "input_supplied": {{ "title": "Parity", "authors": ["PA"],
+                      "subtitle": "SS", "year": 2019 }},
+                  "output_root": {:?},
+                  "path_format": "{{author}}/{{title}} - {{subtitle}} ({{year}})" }}"#,
+            input, output_root
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let job = crate::job::Job::load(&job_path).unwrap();
+        let config = job_config(&temp_dir, &temp_dir.path().join("cfg-done"));
+        // Preview: non-mutating, resolves the exact relative path.
+        let preview = job.preview(&config).await.unwrap();
+        assert_eq!(preview.relative_path, "PA/Parity - SS (2019).m4b");
+        assert!(!output_root.exists(), "preview created nothing");
+        // Execution: the artifact is the previewed relative path, exactly.
+        let processor = Processor::for_job(job, config.clone()).unwrap();
+        let run = processor.run(vec![input.clone()], &NoOpProgressHandler).await.unwrap();
+        assert!(run.complete, "run must complete");
+        let outcomes = &run.outcomes[0];
+        let art = outcomes.artifacts.iter().find(|a| a.kind == "audio").expect("audio artifact");
+        assert_eq!(art.relative_path, preview.relative_path, "preview and execution agree");
+        assert!(output_root.join(&art.relative_path).exists(), "artifact on disk");
+        // The sidecar is enumerated, not silently omitted.
+        assert!(
+            outcomes
+                .artifacts
+                .iter()
+                .any(|a| a.kind == "sidecar" && a.relative_path.ends_with(".chapters.txt")),
+            "chapters sidecar enumerated: {:?}",
+            outcomes.artifacts
+        );
+    }
+
+    #[tokio::test]
+    async fn job_output_collision_refuses_to_clobber() {
+        let temp_dir = TempDir::new().unwrap();
+        let book_dir = temp_dir.path().join("Book");
+        let input = create_test_m4b(&book_dir, 5);
+        let output_root = temp_dir.path().join("out");
+        let job_path = temp_dir.path().join("job.json");
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}],
+                  "input_supplied": {{ "title": "Clash", "authors": ["A"] }},
+                  "output_root": {:?}, "path_format": "{{author}}/{{title}}" }}"#,
+            input, output_root
+        );
+        std::fs::write(&job_path, job_json).unwrap();
+        let config = job_config(&temp_dir, &temp_dir.path().join("cfg-done"));
+
+        // A file that a foreign process placed at the resolved path must
+        // survive untouched; no silent suffixing, no rename, no partial
+        // "successful" output.
+        let existing = output_root.join("A").join("Clash.m4b");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        std::fs::write(&existing, b"foreign content").unwrap();
+
+        let job = crate::job::Job::load(&job_path).unwrap();
+        let processor = Processor::for_job(job, config).unwrap();
+        let err = processor
+            .run(vec![input.clone()], &NoOpProgressHandler)
+            .await
+            .expect("run reports the outcome, not a panic")
+            .outcomes[0]
+            .error
+            .clone()
+            .expect("group failed");
+        assert!(err.contains("refusing to overwrite"), "{err}");
+        let content = std::fs::read(&existing).expect("foreign file survived");
+        assert_eq!(content, b"foreign content", "existing file untouched");
+        // No falsely successful output: the claimed name is the foreign one;
+        // nothing else was written under the resolved directory.
+        let entries: Vec<_> = std::fs::read_dir(output_root.join("A"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("Clash.m4b")], "{entries:?}");
+        // The source input is never destroyed by a collision.
+        assert!(input.exists(), "source retained for recovery");
+    }
+
+    #[tokio::test]
     async fn supplied_multi_track_job_is_one_group() {
         let temp_dir = TempDir::new().unwrap();
         let book_dir = temp_dir.path().join("Book");
@@ -2221,8 +2464,9 @@ mod tests {
             processor.process_with_progress(vec![bad_dir, good_dir], &NoOpProgressHandler).await;
 
         match result {
-            Err(ProcessorError::PartialFailure { results, detail }) => {
+            Err(ProcessorError::PartialFailure { results, outcomes, detail }) => {
                 assert_eq!(results.len(), 1, "only the valid group should complete");
+                assert_eq!(outcomes.len(), 2, "every group outcome is recorded");
                 assert!(detail.contains("Refusing to embed chapters"), "{detail}");
                 let tag = mp4ameta::Tag::read_from_path(&results[0].output_file).unwrap();
                 assert_eq!(tag.chapter_list()[0].title, "Intro");

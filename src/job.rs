@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use serde::Serialize;
 use serde::de::Error as _;
 
 use crate::api::MetadataSource;
@@ -536,6 +537,75 @@ impl Job {
         }
     }
 
+    /// The metadata source a job's provider mode builds (or `None` in
+    /// supplied mode). Shared by execution (`Processor::for_job`) and the
+    /// preview, so both see the same client construction — and supplied mode
+    /// performs no catalog request in either.
+    pub fn metadata_source(
+        &self,
+        config: &crate::config::Config,
+    ) -> Result<Option<MetadataSource>> {
+        let source = match (&self.input_provider, self.source.as_ref()) {
+            (Some(_), Some(src)) => Some(
+                MetadataSource::new_with_region(
+                    src.source,
+                    src.api_url.as_deref(),
+                    src.region.unwrap_or(crate::api::MetadataRegion::Us),
+                )
+                .map_err(JobError::Metadata)?,
+            ),
+            (Some(_), None) => Some(
+                MetadataSource::new_with_region(
+                    config.metadata_source,
+                    config.api_url.as_deref(),
+                    config.region,
+                )
+                .map_err(JobError::Metadata)?,
+            ),
+            // Supplied input never needs a client, regardless of `source`.
+            (None, _) => None,
+        };
+        Ok(source)
+    }
+
+    /// Non-mutating preview: resolve the effective metadata exactly as
+    /// execution does and the same parsed template with the same resolver,
+    /// returning the exact sanitized relative path plus the effective values
+    /// for diagnostics. No directories, media, or name reservations happen,
+    /// and no execution success is promised. Supplied mode performs no
+    /// catalog request; a provider preview that refetches at execution is
+    /// advisory unless the caller captures the supplied resolved metadata.
+    pub async fn preview(&self, config: &crate::config::Config) -> Result<JobPreview> {
+        let source = self.metadata_source(config)?;
+        let effective = self.resolve(source.as_ref()).await?;
+        let relative_path = crate::path_resolver::PathResolver::resolve_output(
+            effective.template(),
+            &effective.metadata,
+        )
+        .map_err(|e| JobError::Invalid(e.to_string()))?;
+        Ok(JobPreview {
+            schema_version: self.schema_version,
+            resolver_version: crate::path_resolver::RESOLVER_VERSION,
+            path_format: effective.template().to_string(),
+            relative_path,
+            metadata: PreviewMetadata {
+                title: effective.metadata.title.clone(),
+                subtitle: effective.metadata.subtitle.clone(),
+                authors: effective.metadata.authors.clone(),
+                narrators: effective.metadata.narrators.clone(),
+                series_name: effective.metadata.series_name.clone(),
+                series_position: effective.metadata.series_position.clone(),
+                description: effective.metadata.description.clone(),
+                genres: effective.metadata.genres.clone(),
+                year: effective.metadata.year,
+                metadata_id: effective.metadata.metadata_id.clone(),
+                book_id: effective.metadata.book_id.clone(),
+                chapters: effective.metadata.chapters.len(),
+                cover_url: effective.metadata.cover_url.clone(),
+            },
+        })
+    }
+
     /// Build the supplied (authoritative) base metadata. No catalog lookup and
     /// no provider dependency: a supplied job resolves fully offline. The
     /// override layer is applied by [`Self::resolve`], exactly once, so a
@@ -559,6 +629,162 @@ impl Job {
             cover_url: None,
             chapters: Vec::new(),
         })
+    }
+}
+
+/// A non-mutating preview of a job's resolved output path and effective
+/// metadata. The `relative_path` is the exact sanitized relative path (inside
+/// `output_root`) that execution will produce from this job's effective
+/// metadata; it is produced by the same resolver and the same effective
+/// metadata as execution, so preview and execution agree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JobPreview {
+    pub schema_version: u32,
+    pub resolver_version: &'static str,
+    /// The effective template that was resolved.
+    pub path_format: String,
+    /// The exact sanitized relative output path inside the job's
+    /// `output_root`, including the output extension.
+    pub relative_path: String,
+    /// The effective (base + overrides) metadata the path was resolved from.
+    pub metadata: PreviewMetadata,
+}
+
+/// The effective supported metadata a preview resolved, for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreviewMetadata {
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub authors: Vec<String>,
+    pub narrators: Vec<String>,
+    pub series_name: Option<String>,
+    pub series_position: Option<String>,
+    pub description: String,
+    pub genres: Vec<String>,
+    pub year: Option<u32>,
+    /// Provider-dependent looked-up ID; empty in supplied mode.
+    pub metadata_id: String,
+    /// Canonical catalog book ID; empty when the base does not carry one.
+    pub book_id: String,
+    /// The number of resolved chapters (provider chapters when present).
+    pub chapters: usize,
+    pub cover_url: Option<String>,
+}
+
+/// Machine-readable execution result: every produced output and sidecar,
+/// per-group identity and outcome, diagnosed errors. Paths are relative to
+/// the job's `output_root`; there is no absolute-path fallback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JobResult {
+    /// `succeeded` when every group succeeded, `partial_failure` when some
+    /// did and some did not, `failed` when none did.
+    pub status: &'static str,
+    pub groups: Vec<GroupResult>,
+}
+
+impl JobResult {
+    /// `true` when every group succeeded.
+    pub fn all_succeeded(&self) -> bool {
+        self.status == "succeeded"
+    }
+
+    /// Build the machine result from a run outcome: every group in run order
+    /// with its artifacts and diagnosed error; the status never claims
+    /// success for a failed group.
+    pub fn from_run(run: &crate::processor::RunOutcome) -> Self {
+        let groups = run
+            .outcomes
+            .iter()
+            .map(|o| GroupResult {
+                group: o.group.clone(),
+                outcome: o.outcome,
+                input_files: o.input_files.clone(),
+                artifacts: o.artifacts.clone(),
+                files_moved: o.files_moved,
+                error: o.error.clone(),
+            })
+            .collect();
+        let status = if run.complete {
+            "succeeded"
+        } else if run.results.is_empty() {
+            "failed"
+        } else {
+            "partial_failure"
+        };
+        Self { status, groups }
+    }
+}
+
+/// The outcome of one processed group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GroupResult {
+    /// The group's identity as discovered.
+    pub group: String,
+    pub outcome: GroupOutcome,
+    /// The input files that were processed, relative where they sit under a
+    /// path the caller owns.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub input_files: Vec<PathBuf>,
+    /// Every produced output and sidecar, relative to the job's
+    /// `output_root` and validated to lie inside it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
+    /// `true` when the group's source files were moved to the completed
+    /// directory.
+    pub files_moved: bool,
+    /// A diagnosed error when the group failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A single produced file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Artifact {
+    /// The artifact's relative path inside the job's `output_root`.
+    pub relative_path: String,
+    /// `audio` for the merged output, `sidecar` for the chapter list.
+    pub kind: &'static str,
+    /// True when the file exists on disk at result time.
+    pub exists: bool,
+}
+
+impl Artifact {
+    /// An artifact from an absolute produced path, validated to lie inside
+    /// the job's `output_root`. There is no absolute-path fallback: a path
+    /// that does not contain `root` yields no artifact (the caller must not
+    /// emit it), and a relative input is refused.
+    pub fn from_absolute(root: &std::path::Path, path: &std::path::Path) -> Option<Self> {
+        if !path.is_absolute() {
+            return None;
+        }
+        let relative = path.strip_prefix(root).ok()?;
+        let relative_path = relative.to_string_lossy().replace('\\', "/");
+        Some(Self { kind: kind_of(&relative_path), exists: path.exists(), relative_path })
+    }
+}
+
+fn kind_of(path: &str) -> &'static str {
+    match std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+        Some("m4b") => "audio",
+        Some(_) => "sidecar",
+        None => "audio",
+    }
+}
+
+/// A group's outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupOutcome {
+    Succeeded,
+    Failed,
+}
+
+impl GroupOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
     }
 }
 
@@ -899,5 +1125,164 @@ mod tests {
         job.validate().unwrap();
         let err = job.resolve(None).await.unwrap_err().to_string();
         assert!(err.contains("metadata source"), "{err}");
+    }
+
+    fn preview_config() -> crate::config::Config {
+        crate::config::Config::new(
+            Vec::new(),
+            None,
+            None,
+            crate::api::MetadataSourceKind::Audiobookdb,
+            crate::api::MetadataRegion::Us,
+            None,
+            1,
+            "info".to_string(),
+            "{author}/{title}".to_string(),
+            false,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn preview_matches_execution_path_and_mutates_nothing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let input = temp.path().join("in.m4b");
+        std::fs::write(&input, b"dummy").unwrap();
+        let output_root = temp.path().join("out");
+        let raw = format!(
+            r#"{{ "schema_version": 1, "inputs": [{input:?}],
+               "input_supplied": {{ "title": "The Book", "subtitle": "Sub",
+                   "authors": ["A"], "year": 2020 }},
+               "overrides": {{ "authors": ["C"] }},
+               "output_root": {output_root:?},
+               "path_format": "{{author}}/{{title}} - {{subtitle}} ({{year}})" }}"#
+        );
+        let job: Job = serde_json::from_str(&raw).unwrap();
+        let preview = job.preview(&preview_config()).await.unwrap();
+        // The preview's path is the exact string execution's resolver
+        // produces from the same effective metadata (override wins).
+        let effective = job.resolve(None).await.unwrap();
+        assert_eq!(
+            preview.relative_path,
+            crate::path_resolver::PathResolver::resolve_output(
+                effective.template(),
+                &effective.metadata
+            )
+            .unwrap()
+        );
+        assert_eq!(preview.relative_path, "C/The Book - Sub (2020).m4b");
+        // Effective-value diagnostics reflect base + overrides.
+        assert_eq!(preview.metadata.title, "The Book");
+        assert_eq!(preview.metadata.subtitle.as_deref(), Some("Sub"));
+        assert_eq!(preview.metadata.authors, vec!["C".to_string()]);
+        assert_eq!(preview.metadata.year, Some(2020));
+        assert_eq!(preview.schema_version, 1);
+        assert_eq!(preview.resolver_version, crate::path_resolver::RESOLVER_VERSION);
+        // Non-mutating: no output root, no media.
+        assert!(!output_root.exists(), "preview must not create the output root");
+        assert!(input.exists(), "input untouched");
+    }
+
+    #[tokio::test]
+    async fn preview_supplied_needs_no_catalog_and_rejects_unknown_token() {
+        // A supplied job previews with no client at all (catalog-unavailable
+        // is a non-event in supplied mode) and an unknown token is rejected
+        // before any mutation.
+        let temp = tempfile::TempDir::new().unwrap();
+        let output_root = temp.path().join("out");
+        let ok = format!(
+            r#"{{ "schema_version": 1, "inputs": ["in.m4b"],
+               "input_supplied": {{ "title": "T", "authors": ["A"] }},
+               "output_root": {output_root:?},
+               "source": {{ "source": "audiobookdb" }} }}"#
+        );
+        let job: Job = serde_json::from_str(&ok).unwrap();
+        let preview = job.preview(&preview_config()).await.unwrap();
+        assert_eq!(preview.relative_path, "A/T.m4b");
+        assert!(preview.metadata.metadata_id.is_empty());
+        assert!(preview.metadata.book_id.is_empty());
+
+        let bad = format!(
+            r#"{{ "schema_version": 1, "inputs": ["in.m4b"],
+               "input_supplied": {{ "title": "T" }},
+               "output_root": {output_root:?},
+               "path_format": "{{author}}/{{bogus}}" }}"#
+        );
+        let job: Job = serde_json::from_str(&bad).unwrap();
+        let err = job.preview(&preview_config()).await.unwrap_err().to_string();
+        assert!(err.contains("{bogus}"), "diagnostic names the token: {err}");
+        assert!(!output_root.exists());
+    }
+
+    #[test]
+    fn artifact_validates_containment() {
+        let root = std::path::PathBuf::from("/library/book");
+        // Inside the root: the relative path is kept.
+        let inside = root.join("Author/Book.m4b");
+        let art = Artifact::from_absolute(&root, &inside).unwrap();
+        assert_eq!(art.relative_path, "Author/Book.m4b");
+        assert_eq!(art.kind, "audio");
+        // A sidecar is classified as a sidecar.
+        let sidecar = root.join("Author/Book.chapters.txt");
+        assert_eq!(Artifact::from_absolute(&root, &sidecar).unwrap().kind, "sidecar");
+        // Outside the root: refused, no absolute-path fallback.
+        let outside = std::path::PathBuf::from("/elsewhere/Book.m4b");
+        assert!(Artifact::from_absolute(&root, &outside).is_none());
+        // A sibling prefix that merely shares text must not count:
+        // /library/book-2 is not inside /library/book.
+        let sibling = std::path::PathBuf::from("/library/book-2/Book.m4b");
+        assert!(Artifact::from_absolute(&root, &sibling).is_none());
+        // Relative input is refused.
+        assert!(Artifact::from_absolute(&root, std::path::Path::new("Book.m4b")).is_none());
+    }
+
+    #[test]
+    fn job_result_statuses_are_truthful() {
+        use crate::processor::{GroupOutcomes, RunOutcome};
+        let outcome = |group: &str, ok: bool, err: &str| GroupOutcomes {
+            group: group.into(),
+            artifacts: Vec::new(),
+            input_files: Vec::new(),
+            files_moved: false,
+            outcome: if ok { GroupOutcome::Succeeded } else { GroupOutcome::Failed },
+            error: (!ok).then(|| err.to_string()),
+        };
+        let run = |complete: bool, results: usize, outcomes: Vec<GroupOutcomes>| RunOutcome {
+            results: (0..results)
+                .map(|i| crate::processor::ProcessingResult {
+                    input_files: Vec::new(),
+                    output_file: format!("g{i}.m4b").into(),
+                    metadata_applied: true,
+                    files_moved: false,
+                    artifacts: vec![format!("g{i}.m4b").into()],
+                })
+                .collect(),
+            outcomes,
+            complete,
+            detail: String::new(),
+        };
+
+        let res = JobResult::from_run(&run(
+            true,
+            2,
+            vec![outcome("g1", true, ""), outcome("g2", true, "")],
+        ));
+        assert!(res.all_succeeded(), "all groups succeeded");
+        assert_eq!(res.status, "succeeded");
+        assert_eq!(res.groups.len(), 2);
+
+        let res = JobResult::from_run(&run(
+            false,
+            1,
+            vec![outcome("g1", true, ""), outcome("g2", false, "boom")],
+        ));
+        assert!(!res.all_succeeded(), "partial must not claim full success");
+        assert_eq!(res.status, "partial_failure");
+        assert_eq!(res.groups.len(), 2, "every group is enumerated");
+        assert_eq!(res.groups[1].error.as_deref(), Some("boom"));
+
+        let res = JobResult::from_run(&run(false, 0, vec![outcome("g1", false, "nope")]));
+        assert_eq!(res.status, "failed");
+        assert!(!res.all_succeeded());
     }
 }
