@@ -915,10 +915,24 @@ impl Processor {
             crate::job::ChaptersPolicy::Write { .. } => {
                 let chapters = chapters_to_write.expect("chapters resolved for write");
                 if chapters.is_empty() {
-                    // An explicit empty list clears the embedded chapters.
+                    // An explicit empty list clears the embedded chapters and
+                    // any stale sidecar at the deterministic output path.
                     if let Err(e) = self.tagger.clear_chapters(&merged_path) {
                         Self::discard_output(&merged_path);
                         return Err(ProcessorError::Tagging(e));
+                    }
+                    let sidecar = merged_path.with_extension("chapters.txt");
+                    if sidecar.is_file() {
+                        std::fs::remove_file(&sidecar).map_err(|e| {
+                            Self::discard_output(&merged_path);
+                            ProcessorError::Tagging(TaggingError::Io(std::io::Error::new(
+                                e.kind(),
+                                format!(
+                                    "failed to remove stale chapter sidecar {}: {e}",
+                                    sidecar.display()
+                                ),
+                            )))
+                        })?;
                     }
                 } else {
                     if let Err(e) = self.tagger.embed_chapters(&merged_path, &chapters) {
@@ -947,6 +961,21 @@ impl Processor {
                     Self::discard_output(&merged_path);
                     return Err(ProcessorError::Tagging(e));
                 }
+                // A re-run with `clear` must not leave a sidecar that still
+                // advertises chapters at the deterministic output path.
+                let sidecar = merged_path.with_extension("chapters.txt");
+                if sidecar.is_file() {
+                    std::fs::remove_file(&sidecar).map_err(|e| {
+                        Self::discard_output(&merged_path);
+                        ProcessorError::Tagging(TaggingError::Io(std::io::Error::new(
+                            e.kind(),
+                            format!(
+                                "failed to remove stale chapter sidecar {}: {e}",
+                                sidecar.display()
+                            ),
+                        )))
+                    })?;
+                }
             }
             crate::job::ChaptersPolicy::Preserve => {
                 // Single-input only (enforced above): the merge is a native
@@ -955,9 +984,17 @@ impl Processor {
                 let source_sidecar = input_paths[0].with_extension("chapters.txt");
                 if source_sidecar.is_file() {
                     let dest = merged_path.with_extension("chapters.txt");
-                    if let Err(e) = std::fs::copy(&source_sidecar, &dest) {
-                        warn!("Failed to carry source chapters sidecar: {e}");
-                    }
+                    std::fs::copy(&source_sidecar, &dest).map_err(|e| {
+                        Self::discard_output(&merged_path);
+                        ProcessorError::Tagging(TaggingError::Io(std::io::Error::new(
+                            e.kind(),
+                            format!(
+                                "failed to carry source chapter sidecar {} to {}: {e}",
+                                source_sidecar.display(),
+                                dest.display()
+                            ),
+                        )))
+                    })?;
                 }
             }
         }

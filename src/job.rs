@@ -108,6 +108,7 @@ pub struct WritePolicies {
 pub enum CoverPolicy {
     Preserve,
     Write(PathBuf),
+    #[serde(rename = "write_url")]
     WriteUrl(Option<String>),
     Clear,
 }
