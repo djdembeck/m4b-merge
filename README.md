@@ -143,7 +143,9 @@ fields; present non-blank values win over the base.
   "title": "write",
   "subtitle": "preserve",
   "authors": "write",
-  "year": "clear"
+  "year": "clear",
+  "cover": "write_url",
+  "chapters": "write"
 }
 ```
 
@@ -175,12 +177,29 @@ Field semantics:
   `preserve` (default), `write`, or `clear`. A `write` requires the effective
   value to be non-blank, and fails the job if it is not. `preserve` fields
   keep the file's existing values even when the effective metadata lacks them.
+- `cover` — `write_url` (default; embeds the provider cover URL when the
+  resolved metadata carries one — the legacy baseline), `{"write":
+  "/absolute/path"}` (local file; the path must lie inside the job's
+  `output_root`, which is the only asset area the job owns, and must be at
+  most 5 MiB — a path that escapes the root, including via a symlink, is
+  rejected before any read), `{"write_url": "https://…"}` (override, under
+  the existing SSRF guards), `preserve` (single input only; keeps the source
+  M4B's embedded cover without a download), or `clear` (removes the cover).
+  `preserve` on a multi-file group is rejected, because a merge carries no
+  cover and a strict preservation promise is impossible.
+- `chapters` — `write` (default; embeds chapters and writes the
+  `chapters.txt` sidecar: an explicit
+  `{"write": {"chapters": [{"title", "start_millis", "duration_millis"}]}}`
+  list when given, otherwise the resolved chapters; an empty explicit list
+  clears, while a list that resolved to nothing leaves the source chapters
+  untouched), `preserve` (single input only; skips all chapter mutation so
+  the source chapters survive), or `clear` (removes existing chapters, no
+  sidecar). A `preserve` chapters policy on a multi-file group is rejected; a
+  strict preserve promise can only be made for a single input.
 
 The output path is `output_root` + the (sanitized) template, so the same job
 against the same book always lands on the same path — no worker-time catalog
-rematching is needed by callers. Only the fields whose policy is `write` or
-`clear` are touched; the provider cover URL (when present) is embedded, and
-the resolved chapters are embedded with a `chapters.txt` sidecar.
+rematching is needed by callers.
 
 ### Verify Environment
 
