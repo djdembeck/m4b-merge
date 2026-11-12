@@ -1440,8 +1440,11 @@ mod tests {
             "a pinned release fetches the book then that exact release"
         );
 
-        // (2) A release id the book does not carry is ReleaseNotFound — and no
-        // release endpoint is touched (membership fails before any fetch).
+        // (2) A release id the book does not carry is ReleaseNotFound — and
+        // no release endpoint is fetched for it (membership fails before the
+        // fetch). Capture the request count first; only a book lookup may be
+        // added by this call.
+        let requests_before = requests.lock().unwrap().len();
         let err = client
             .fetch_book_with_release("abc123def456", Some("relZzz9999"))
             .await
@@ -1450,6 +1453,14 @@ mod tests {
             matches!(&err, AudiobookdbError::ReleaseNotFound { release_id, .. } if release_id == "relZzz9999"),
             "expected ReleaseNotFound(relZzz9999), got {err:?}"
         );
+        {
+            let reqs = requests.lock().unwrap();
+            let new: Vec<String> = reqs[requests_before..].to_vec();
+            assert!(
+                !new.iter().any(|p| p.contains("/releases/")),
+                "a non-member pin must not fetch any release endpoint: {new:?}"
+            );
+        }
 
         // (3) A verified member whose fetch fails is a diagnosed error, not a
         // silent fall back to chapter-less metadata.

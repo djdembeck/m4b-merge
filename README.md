@@ -144,8 +144,9 @@ Field semantics:
   "api_url": "…", "region": "…"}`; defaults to the CLI defaults when omitted
   in provider mode, and is irrelevant in supplied mode.
 - `completed_directory` (optional) — after successful processing, the source
-  files are moved here; when omitted, the CLI `--completed-directory` setting
-  applies.
+  files are moved here. In job mode the CLI `--completed-directory` flag is
+  rejected (the job file owns it), so omitting this field means the sources
+  are not moved.
 - `overrides` (optional) — same shape as `input_supplied`.
 
 Every supported scalar metadata field is written from the effective
