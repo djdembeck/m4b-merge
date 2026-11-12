@@ -803,6 +803,10 @@ fn test_job_supplied_metadata_cli_end_to_end() {
 
     // The supplied metadata must be embedded into the output M4B.
     let tag = mp4ameta::Tag::read_from_path(&expected).expect("read output tags");
+    // The tagger writes title and album as separate atoms; assert both so a
+    // missing `©nam` cannot pass unnoticed (a subtitle-less book carries the
+    // base title in both).
+    assert_eq!(tag.title(), Some("The Test Book"));
     assert_eq!(tag.album(), Some("The Test Book"));
     assert_eq!(tag.artist(), Some("Jane Author"));
 }
