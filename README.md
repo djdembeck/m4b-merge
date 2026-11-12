@@ -243,7 +243,7 @@ outcome, and diagnosed errors:
     {
       "group": "job",
       "outcome": "succeeded | failed",
-      "input_files": ["/abs/path/track1.m4b"],
+      "input_files": ["track1.m4b"],
       "artifacts": [
         { "relative_path": "Author/Title.m4b", "kind": "audio", "exists": true },
         { "relative_path": "Author/Title.chapters.txt", "kind": "sidecar", "exists": true }
@@ -257,7 +257,9 @@ outcome, and diagnosed errors:
 
 Artifact paths are **relative to the job's `output_root`** and validated to
 lie inside it — there is no absolute-path fallback, so a caller can
-contain-check every artifact against its own job staging tree. `status`
+contain-check every artifact against its own job staging tree.
+`input_files` are the paths the job's inputs resolved to (as written in the
+job file), not artifacts. `status`
 never claims success for a group that failed, and a partial or total failure
 exits nonzero (1) after the document is printed.
 
