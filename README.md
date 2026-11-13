@@ -11,6 +11,8 @@ The tool automates metadata lookup by ASIN or AudiobookDB book ID through [Audio
 
 - [Install](#install)
 - [Usage](#usage)
+  - [Authoritative Job File](#authoritative-job-file)
+- [Embedded Tags](#embedded-tags)
 - [Path Format Variables](#path-format-variables)
 - [Capabilities](#capabilities)
 - [Exit Codes](#exit-codes)
@@ -171,7 +173,13 @@ Field semantics:
   diverge from the file name — and fails the job if that value is blank.
   Title and subtitle share the `©nam`/`©alb` atom pair: a write of one
   component preserves the other, and `clear` of one removes only that
-  component. `preserve` recovers the component from the existing tags; a file
+  component. Clearing the title while the subtitle survives is the
+  subtitle-only state: the subtitle is written alone to `©nam` and `©alb` is
+  removed (a base title no longer exists). A re-run that preserves both
+  components leaves the subtitle-only file unchanged, and a job that
+  preserves the title while writing or clearing the subtitle is refused with
+  a diagnosed error before mutation, because the state has no base title to
+  preserve. `preserve` recovers the component from the existing tags; a file
   whose tags cannot establish it fails before mutation rather than erasing
   data.
 - `authors`, `narrators`, `series`, `description`, `genres`, `year` —
@@ -184,19 +192,22 @@ Field semantics:
   `output_root`, which is the only asset area the job owns, and must be at
   most 5 MiB — a path that escapes the root, including via a symlink, is
   rejected before any read), `{"write_url": "https://…"}` (override, under
-  the existing SSRF guards), `preserve` (single input only; keeps the source
+  the existing SSRF guards), `preserve` (a single natively-copyable input
+  file only; keeps the source
   M4B's embedded cover without a download), or `clear` (removes the cover).
-  `preserve` on a multi-file group is rejected, because a merge carries no
-  cover and a strict preservation promise is impossible.
+  A `preserve` cover policy on a multi-file group is rejected; a strict
+  preserve promise is only possible with a single natively-copyable input
+  file.
 - `chapters` — `write` (default; embeds chapters and writes the
   `chapters.txt` sidecar: an explicit
   `{"write": {"chapters": [{"title", "start_millis", "duration_millis"}]}}`
   list when given, otherwise the resolved chapters; an empty explicit list
   clears, while a list that resolved to nothing leaves the source chapters
-  untouched), `preserve` (single input only; skips all chapter mutation so
-  the source chapters survive), or `clear` (removes existing chapters, no
-  sidecar). A `preserve` chapters policy on a multi-file group is rejected; a
-  strict preserve promise can only be made for a single input.
+  untouched), `preserve` (a single natively-copyable input file only; skips
+  all chapter mutation so the source chapters survive), or `clear` (removes
+  existing chapters, no sidecar). A `preserve` chapters policy on a
+  multi-file group is rejected; a strict preserve promise is only possible
+  with a single natively-copyable input file.
 
 The output path is `output_root` + the (sanitized) template, so the same job
 against the same book always lands on the same path — no worker-time catalog
@@ -230,13 +241,20 @@ m4b-merge --job job.json --machine
 ```
 
 Stable JSON on **stdout only** — all logs and progress go to stderr, so the
-document parses cleanly on success and on failure:
+document parses cleanly on success and on failure. Three rejections exit with
+a human error on stderr and empty stdout before the document is guaranteed:
+malformed arguments, `--dry-run` combined with `--machine` or
+`--job-preview`, and `--check-ffmpeg`, which exits before the machine path;
+every setup and run-level failure of a machine-accepted invocation
+(`--machine --job` without `--dry-run`) emits a `failed` document:
 
 ```json
-{ "status": "succeeded | partial_failure | failed",
+{ "schema_version": 1, "resolver_version": "1",
+  "status": "succeeded | partial_failure | failed",
   "groups": [{ "group": "job", "outcome": "succeeded", "input_files": ["track1.m4b"],
     "artifacts": [ { "relative_path": "Author/Title.m4b", "kind": "audio", "exists": true },
-                    { "relative_path": "Author/Title.chapters.txt", "kind": "sidecar", "exists": true } ] } ] }
+                    { "relative_path": "Author/Title.chapters.txt", "kind": "sidecar", "exists": true } ],
+    "files_moved": false } ] }
 ```
 
 Every produced output and sidecar is enumerated; artifact paths are
@@ -246,7 +264,9 @@ lie inside it and `[redacted]` otherwise; they are not artifacts. Errors use
 `output_root` in place of the root and redact other absolute filesystem paths.
 On job failure, `preserved_artifacts` lists recoverable non-empty staging
 files retained on disk, also relative to the validated root. Empty or invalid
-stages remain on disk but are not reported as recoverable artifacts. `status`
+stages remain on disk but are not reported as recoverable artifacts. A
+failed group carries a diagnosed `error` (omitted when the group
+succeeded). `status`
 never claims success for a failed group; a partial or
 total failure exits 1 after the document is printed, and setup/run-level
 failures emit a `failed` document with a top-level `error` and empty
@@ -256,74 +276,38 @@ multi-group library consumers of `Processor::run`.
 
 #### No-clobber
 
-Job execution reserves no name at the final output path: an advisory
+Job execution reserves no name at the final output path. An advisory
 precheck reports an already-taken final name early and validates the created
 parent directories against the canonical output root, and the parent is
 re-validated immediately before the merge. The binding guarantee is the
-atomic no-replace publication below — no silent suffixing, rename, or
-overwrite, at any point. The engine never unlinks its staging pathnames;
-an occupied staging name is a collision, even if it carries this attempt's
-visible token. On success, each staging entry remains as a hard link
-alongside the published output or sidecar, owned by the job's staging-tree
-cleanup (the caller, B1). On failure, the completed media stage is retained
-and reported in `preserved_artifacts`. **Staging entries are not auto-cleaned
-by the engine**: callers must clean their job-owned staging tree, accepting
-retained entries to avoid deleting another writer's replacement. Each job
+atomic no-replace publication: the final name is created only by that step,
+and a foreign entry, including a late arrival, fails with a diagnosed
+collision.
+
+The caller-facing guarantees:
+
+- **No overwrite**: an existing final name is never read, renamed, or
+  replaced; a collision leaves it untouched and retains the completed
+  stage in `preserved_artifacts`.
+- **No suffixing, no rename**: a taken name is never silently suffixed,
+  renamed, or overwritten, at any point.
+- **Staging entries are never deleted by the engine**: on success, each
+  staging entry remains as a hard link alongside the published output,
+  owned by the job's staging-tree cleanup, which the caller performs; on
+  failure, the completed media stage is retained and reported in
+  `preserved_artifacts`. Callers must clean their job-owned staging tree,
+  accepting retained entries to avoid deleting another writer's
+  replacement. An occupied staging name is a collision, even if it carries
+  this attempt's visible token.
+- **Stale sidecars are removed only after the media publication has won
+  the final name**: a sidecar that cannot be removed fails the run with a
+  diagnosed cleanup error, while the already-published media is retained
+  and reported in the machine result, so a surviving entry never
+  contradicts the requested policy.
+
+Source files and a winning job's final names are never discarded. Each job
 attempt gets a fresh staging token, so retries do not collide with retained
-entries. Source files and a winning job's final names are never discarded.
-Policy-required stale sidecar deletions (chapter/cover `clear`, explicit-empty
-chapter writes, preserve-without-source-sidecar) are fallible and apply only
-after the media publication has won the final name: a sidecar that cannot be
-removed fails the run with a diagnosed cleanup error, while the already-published
-media is retained and reported in the machine result, so a surviving entry never
-contradicts the requested policy.
-
-The merge writes an exclusively created hidden staging sibling. The
-destination parent is re-pinned after the merge-progress callback, and the
-stage is created with `openat` relative to that pinned descriptor: a parent
-swapped for a symlink to an external directory in that window cannot
-redirect the creation, so the stage always lands inside the output root.
-**On Linux**, the reserved descriptor then stays open through every step:
-native copies write directly to it, FFmpeg inherits it and opens
-`/proc/self/fd/N` with an explicit MP4 muxer, and every post-merge tag,
-cover, and chapter mutation is bound to the same descriptor — a replacement
-installed at the staging pathname after the post-merge verification (even
-during the Tagging progress callback) cannot redirect a write at an
-external file. **Descriptor-bound merging requires Linux procfs: job
-execution is refused on every other platform** rather than accepted with a
-known-redirectable pathname write.
-
-After all mutations succeed, publication pins and validates the destination
-parent and creates the final name no-replace: if the staging path still
-names the reserved inode, Linux binds the link source to the open descriptor
-through procfs; if a post-verification swap deleted the staging entry, the
-reserved inode's contents are materialized at the final name with `O_EXCL`
-and a verified full-size copy. The final name is never inspected, removed,
-or released before that creation: a foreign file or symlink at the final
-name, including a late arrival, fails with a diagnosed collision instead of
-being read, renamed, or overwritten. If publication fails, valid staged
-media is retained and listed in `preserved_artifacts` for recovery.
-Artifact relatives use the root captured at publication, not a later
-retarget of a symlinked root.
-
-Chapter and cover sidecars are staged as hidden siblings of the media and
-are exposed at their final sibling names only after the media publication
-has won. Publication links the open inode this run created at the final name
-no-replace through the pinned parent: replacing the staging entry cannot
-redirect the link to a foreign file. A foreign entry at the final name —
-installed by a concurrent winner, or any other actor — is never read,
-replaced, followed, or deleted. A job that loses the media race never writes,
-overwrites, or deletes a winner's sidecar. Unpublished staged sidecars are
-left in place without separate artifact entries; the media and every sidecar
-already published are retained and reported in the machine result.
-Policy-required removal of a stale final sidecar (chapter `clear`, cover
-`clear`, cover `preserve` without a source sidecar) happens only after the
-media publication has won, so a losing job can never remove a winner's
-sidecar. (Job execution is Linux-only, so these paths are the only ones
-exercised; the library's non-Unix fallbacks remain for direct `Processor`
-consumers outside job mode.) This protects the job's staging area and
-final sibling names only; publishing into another shared destination still
-needs the caller's own race-safe publication.
+entries.
 
 ### Verify Environment
 
@@ -337,15 +321,15 @@ m4b-merge --check-ffmpeg
 
 | Atom    | Source                                                        |
 |---------|---------------------------------------------------------------|
-| `©nam`  | Title; subtitle appended as `title - subtitle` when present   |
+| `©nam`  | Title; subtitle appended as `title - subtitle` when present; the subtitle alone when no base title exists |
 | `©ART`  | All authors, joined by `, `                                   |
 | `©aART` | Same as `©ART` (album artist)                                 |
-| `©alb`  | Base title only (never the subtitle)                           |
+| `©alb`  | Base title only (never the subtitle); removed when a base title does not exist (the subtitle-only state) |
 | `©gen`  | All genres, joined by `/` (single `©gen` value)                |
 | `©day`  | Release year                                                  |
 | `©cmt`  | Description                                                   |
 | `©wrt`  | All narrators, joined by `, `                                 |
-| `©grp`  | `Series: <name> #<position>`                                  |
+| `©grp`  | `Series: <name>`, with ` #<position>` appended when a position exists; multiple kept segments joined with ` | ` |
 
 A tag with no corresponding metadata is removed, so retagging from a different
 source cannot leave stale values behind. The one exception is `©grp`: the group

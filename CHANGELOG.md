@@ -15,43 +15,14 @@ All notable changes to this project will be documented in this file. See [standa
   sidecar with per-group identity/outcome and diagnosed errors; artifact
   paths are relative to the job's `output_root` and validated inside it,
   never absolute; failure exits 1; stdout always parses.
-- Engine-side no-clobber for `--job` runs: no name is reserved at the final
-  output path. An advisory precheck reports a taken final name early and
-  validates the created parents, and the merge writes a hidden staging
-  sibling, created with `openat` relative to the re-validated (pinned)
-  parent descriptor, so a parent swapped for a symlink to an external
-  directory in that window cannot redirect the creation outside the root;
-  on Linux every media mutation (merge, tag, cover, chapter embedding) is
-  bound to the reserved descriptor, so a replacement installed at the
-  staging pathname after the post-merge verification cannot redirect a
-  write at an external file —
-  descriptor-bound merging requires Linux procfs, so job execution is
-  refused on other platforms. The final name appears only through an
-  atomic no-replace publication (procfs-bound `linkat`, or an `O_EXCL`
-  full-size copy when the staging entry was deleted out from under the
-  descriptor) relative to the pinned, root-validated parent — so a foreign
-  final entry, including a late arrival, is diagnosed as a collision
-  without being read, renamed, or overwritten. A collision leaves the
-  existing file untouched and retains the completed stage as a recoverable
-  artifact; a staging entry swapped for a symlink is refused at verification
-  without following or removing it, so an external target is never
-  published. Sidecars are staged as hidden siblings and exposed at their
-  final names only after the media publication has won: publication links
-  the open inode this run created at the final name no-replace, so replacing
-  the staging entry cannot redirect the link and a sidecar collision is
-  diagnosed without touching the foreign entry; when publication or a
-  required cleanup fails after the media won, the published media and every
-  already-published sidecar are
-  retained and reported in the machine result. A losing job never
-  overwrites, deletes, or publishes a winner's sidecars.
-  Policy-required stale sidecar deletions apply only after the media
-  publication won: an unremovable `chapters.txt`/`cover.txt` fails the run
-  with a diagnosed cleanup error while the published media is retained,
-  instead of publishing success alongside a surviving sidecar.
+- Engine-side no-clobber for `--job` runs: an existing final name is never
+  overwritten, suffixed, or renamed; the engine publishes only via atomic
+  no-replace, and a failed publication retains the recoverable stage in
+  `preserved_artifacts`. See README §No-clobber for the full contract.
 - No-unlink job staging: the engine never removes a media or sidecar
   staging pathname, even when a collision carries this attempt's visible
   token. Successful publication leaves staging hard links for caller-owned
-  staging-tree cleanup (B1); failed runs retain the completed media stage
+  staging-tree cleanup; failed runs retain the completed media stage
   and report recoverable non-empty stages in `preserved_artifacts`.
   Staging entries are not auto-cleaned, and fresh per-attempt tokens let
   retries coexist with retained stages. Required final-sidecar removals
@@ -89,16 +60,18 @@ All notable changes to this project will be documented in this file. See [standa
   "/absolute/path"}` (local file inside the job's `output_root`; paths that
   escape the asset area, including via a symlink, are rejected before any
   read, and the read is bounded to 5 MiB), `{"write_url": "https://…"}`,
-  `preserve` (single input only), or `clear`. Chapters: `write` (default; explicit list
+  `preserve` (a single natively-copyable input file only), or `clear`.
+  Chapters: `write` (default; explicit list
   with integer-millisecond times, or the resolved chapters, plus the
   `chapters.txt` sidecar; an explicit empty list clears, while a list that
   resolved to nothing leaves the source chapters untouched — clearing is a
   deliberate policy, never the result of an empty resolve), `preserve`
-  (single input only; the source sidecar
+  (a single natively-copyable input file only; the source sidecar
   is carried when present, and a stale sidecar at the output path is removed
   when the source has none), or `clear`. Both
-  policies reject `preserve` on a multi-file group, where a strict
-  preservation promise is impossible; a cover `clear` removes the merged
+  policies reject `preserve` on a multi-file group; a strict preservation
+  promise is only possible with a single natively-copyable input file. A
+  cover `clear` removes the merged
   artwork, and a sidecar write failure fails the group before the sources
   move.
 - Per-field metadata write policies on the `--job` input: `preserve`
@@ -106,8 +79,8 @@ All notable changes to this project will be documented in this file. See [standa
   series, description, genres, and year. Title and subtitle are independent
   components of the shared `©nam`/`©alb` pair: writing one preserves the
   other, and clearing one removes only that component — clearing the title
-  leaves the subtitle as the sole surviving component, written alone to both
-  atoms with no fabricated separator. A preserved title or subtitle that
+  leaves the subtitle as the sole surviving component: it is written alone to
+  `©nam`, and `©alb` is removed because no base title survives. A preserved title or subtitle that
   cannot be established from the file's existing atoms fails before any atom
   is mutated. A `write` without a non-blank effective value is rejected.
   `preserve` fields keep the file's existing values even when the effective
@@ -131,10 +104,10 @@ All notable changes to this project will be documented in this file. See [standa
   `m4b-merge-linux-arm64`, `m4b-merge-macos`, `m4b-merge-windows.exe`). New
   uploads no longer attach a `m4b-publish-v1;…` display label, which the
   GitHub web UI rendered as the asset name and made the release page show
-  long, unreadable names. Existing labeled assets (v2.0.0 and v2.0.1) are
-  reconciled by provenance as before; their labels were cleared by a
-  one-time manual API cleanup, and no code path re-uploads or relabels
-  them.
+  long, unreadable names. The v2.0.0 and v2.0.1 assets had their provenance
+  labels cleared by a one-time manual API cleanup, so they are now
+  reconciled by content digest like any unlabeled asset; no code path
+  re-uploads or relabels them.
 - Release titles are the bare version (`vX.Y.Z`) instead of `Release vX.Y.Z`.
 
 ### Changed

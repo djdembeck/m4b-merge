@@ -358,7 +358,8 @@ enum Discard {
     /// Validation failed; the path was left in place.
     Refused,
     /// The platform cannot pin the parent; the caller applies its
-    /// fallback.
+    /// fallback. Only the `#[cfg(not(unix))]` arm reports this.
+    #[cfg_attr(unix, allow(dead_code))]
     Unpinned,
 }
 
@@ -605,21 +606,13 @@ impl Processor {
                 }
                 Err(e) => {
                     warn!("Group '{}' failed: {}", group.name, e);
-                    // Machine diagnostics redact the canonical root captured
-                    // when the job was attached as well as its current and raw
-                    // forms, even if a symlink has since been retargeted.
-                    let diagnosed = self
-                        .job
-                        .as_ref()
-                        .map(|j| {
-                            crate::job::redact_machine_error(
-                                &e.to_string(),
-                                Some(&j.output_root),
-                                self.claim_root.as_deref(),
-                                &j.inputs,
-                            )
-                        })
-                        .unwrap_or_else(|| e.to_string());
+                    // The human-facing outcome keeps the diagnosed (raw)
+                    // error: paths are actionable here, and the README
+                    // scopes redaction to machine results. The machine
+                    // document applies `redact_machine_error` (canonical
+                    // root, claim root, and the raw/current spellings) when
+                    // `JobResult::from_run` is built.
+                    let diagnosed = e.to_string();
                     failed_groups.push((group.name.clone(), diagnosed.clone()));
                     // Job failures retain staging entries; post-publication
                     // failures also report media and sidecars already published.
@@ -1044,22 +1037,28 @@ impl Processor {
         // Output path from the job's root and template.
         let output_path = self.determine_job_output_path(&job.output_root, effective)?;
 
-        // Strict preservation is only honest for a single input: a multi-input
-        // merge/transcode cannot byte-preserve per-file chapters or carry a
-        // single source's cover into the merged output, so those combinations
-        // are an explicit error, never an alleged success.
-        if effective.preserve_chapters_requires_single_input() && !is_single_input {
+        // Strict preservation is only honest when the merge is a native
+        // copy: a multi-input merge, or a single input that transcodes
+        // (mp3/flac/wav), re-encodes the audio, so per-file chapters are not
+        // byte-preserved and no source cover can be carried into the merged
+        // output. Those combinations are an explicit error, never an
+        // alleged success.
+        let native_copy = is_single_input
+            && crate::merge::MergeMode::from_files(&group.files) == crate::merge::MergeMode::Copy;
+        if effective.preserve_chapters_requires_single_input() && !native_copy {
             return Err(ProcessorError::Job(crate::job::JobError::Invalid(format!(
-                "chapters policy 'preserve' requires a single input file; group '{}' has {} — a \
-                 merge cannot byte-preserve per-file chapters",
+                "chapters policy 'preserve' requires a single natively-copyable input file; \
+                 group '{}' has {} file(s) and a non-copy merge — the chapters would not be \
+                 preserved",
                 group.name,
                 group.files.len()
             ))));
         }
-        if effective.preserve_cover_requires_single_input() && !is_single_input {
+        if effective.preserve_cover_requires_single_input() && !native_copy {
             return Err(ProcessorError::Job(crate::job::JobError::Invalid(format!(
-                "cover policy 'preserve' requires a single input file; group '{}' has {} — a \
-                 merge carries no cover, so a strict cover-preservation promise is impossible",
+                "cover policy 'preserve' requires a single natively-copyable input file; \
+                 group '{}' has {} file(s) and a non-copy merge — a merge carries no cover, so \
+                 a strict cover-preservation promise is impossible",
                 group.name,
                 group.files.len()
             ))));
@@ -1222,10 +1221,11 @@ impl Processor {
         let mut remove_after_publish: Vec<PathBuf> = Vec::new();
         match &effective.cover {
             crate::job::CoverPolicy::Preserve => {
-                // Single-input only (enforced above): the merge is a native
-                // copy, so the source cover survives; carry the sidecar if the
-                // source had one. A re-run to the deterministic output path
-                // must not leave an earlier sidecar when the source has none.
+                // Natively-copyable single input only (enforced above): the
+                // merge is a byte-for-byte copy, so the source cover
+                // survives; carry the sidecar if the source had one. A
+                // re-run to the deterministic output path must not leave an
+                // earlier sidecar when the source has none.
                 let source_sidecar = input_paths[0].with_extension("cover.txt");
                 if source_sidecar.is_file() {
                     let staged_sidecar = staged_path.with_extension("cover.txt");
@@ -1352,11 +1352,12 @@ impl Processor {
                 remove_after_publish.push(output_path.with_extension("chapters.txt"));
             }
             crate::job::ChaptersPolicy::Preserve => {
-                // Single-input only (enforced above): the merge is a native
-                // copy, so the source chapters survive; carry the sidecar if
-                // the source had one. When the source has no sidecar, a
-                // re-run to the deterministic output path must not leave an
-                // earlier sidecar describing chapters the source lacks.
+                // Natively-copyable single input only (enforced above): the
+                // merge is a byte-for-byte copy, so the source chapters
+                // survive; carry the sidecar if the source had one. When the
+                // source has no sidecar, a re-run to the deterministic
+                // output path must not leave an earlier sidecar describing
+                // chapters the source lacks.
                 let source_sidecar = input_paths[0].with_extension("chapters.txt");
                 if source_sidecar.is_file() {
                     let staged_sidecar = staged_path.with_extension("chapters.txt");
@@ -1388,16 +1389,21 @@ impl Processor {
         drop(staged_media);
         // Artifacts published so far: the media first, then each sidecar as
         // its final name wins. Any post-publication failure carries this
-        // list, so the machine result reports every file left on disk.
+        // list, so the machine result reports every file left on disk. The
+        // media publication is validated to lie inside the root; an invalid
+        // mapping is a diagnosed failure (the machine contract forbids an
+        // invented fallback path), not a fabricated artifact.
         let mut published = vec![
-            crate::job::Artifact::from_absolute(&publication_root, &output_path).unwrap_or_else(
-                || crate::job::Artifact {
-                    relative_path: "output".to_string(),
-                    kind: "audio",
-                    exists: true,
-                },
-            ),
+            crate::job::Artifact::from_absolute(&publication_root, &output_path).ok_or_else(|| {
+                ProcessorError::OutputDirCreation(format!(
+                    "Published output {} no longer maps inside the job output root; refusing to report it",
+                    output_path.display()
+                ))
+            })?,
         ];
+        // The absolute paths this run actually published; the final
+        // `artifacts` enumerates exactly these, never probed sibling names.
+        let mut published_paths = vec![output_path.clone()];
         for staged_sidecar in &staged_sidecars {
             let sidecar_result = self.publish_staged_sidecar(
                 &staged_sidecar.final_path,
@@ -1415,6 +1421,7 @@ impl Processor {
             {
                 published.push(artifact);
             }
+            published_paths.push(staged_sidecar.final_path.clone());
         }
         for final_sidecar in remove_after_publish {
             if let Err(e) = self.remove_job_sidecar(&final_sidecar) {
@@ -1451,21 +1458,18 @@ impl Processor {
             false
         };
 
-        // Enumerate the merged output and any `chapters.txt`/`cover.txt`
-        // sidecars so the machine result never silently omits a sidecar.
-        let mut artifacts = vec![output_path.clone()];
-        for sidecar in
-            [output_path.with_extension("chapters.txt"), output_path.with_extension("cover.txt")]
-        {
-            if sidecar.is_file() {
-                artifacts.push(sidecar);
-            }
-        }
+        // Enumerate exactly what this run published — the media plus the
+        // sidecars whose final names this run won. Probing sibling names
+        // would report a stale/foreign `chapters.txt`/`cover.txt` left at
+        // the final path as this run's artifact.
+        let artifacts = published_paths;
 
         Ok(ProcessingResult {
             input_files: input_paths,
             output_file: output_path,
-            metadata_applied: true,
+            // A job whose policies are all `preserve` made no tag write;
+            // report that truthfully.
+            metadata_applied: !crate::tagging::Tagger::all_preserve_public(&effective.policies),
             files_moved,
             artifacts,
             publication_root: Some(publication_root),
@@ -1831,8 +1835,37 @@ impl Processor {
                     match copied {
                         Ok(bytes) if bytes == fd_meta.st_size as u64 => {}
                         other => {
+                            // A failed copy must not unlink by name alone: a
+                            // concurrent replace between the O_EXCL create
+                            // and now would make the name name a foreign
+                            // file. fstat the descriptor we created and
+                            // fstatat the final name (no-follow), and
+                            // require both regular files with equal
+                            // (dev, ino) before deleting anything; a
+                            // mismatch is a diagnosed refusal, the foreign
+                            // entry survives.
+                            let mut created_meta = unsafe { std::mem::zeroed() };
+                            let created_is_our_fd =
+                                unsafe { libc::fstat(final_file.as_raw_fd(), &mut created_meta) }
+                                    == 0
+                                    && created_meta.st_mode & libc::S_IFMT == libc::S_IFREG;
+                            let mut current = unsafe { std::mem::zeroed() };
+                            let name_is_ours = created_is_our_fd
+                                && unsafe {
+                                    libc::fstatat(
+                                        dirfd.0,
+                                        final_name.as_ptr(),
+                                        &mut current,
+                                        libc::AT_SYMLINK_NOFOLLOW,
+                                    )
+                                } == 0
+                                && current.st_mode & libc::S_IFMT == libc::S_IFREG
+                                && Self::stat_identity(&current)
+                                    == Self::stat_identity(&created_meta);
                             let _ = final_file; // dropped: closes fd_final
-                            unsafe { libc::unlinkat(dirfd.0, final_name.as_ptr(), 0) };
+                            if name_is_ours {
+                                let _ = unsafe { libc::unlinkat(dirfd.0, final_name.as_ptr(), 0) };
+                            }
                             return Err(ProcessorError::OutputDirCreation(format!(
                                 "Failed to publish merged output {}: {other:?}",
                                 output_path.display()
@@ -1976,6 +2009,22 @@ impl Processor {
         Ok(())
     }
 
+    /// Non-unix twin of the pinned `linkat` publication: job execution is
+    /// refused on non-Linux platforms before any stage is created (see
+    /// `job_execution_supported`), so nothing is ever published on this arm
+    /// and the no-replace + containment contract holds vacuously. The arm
+    /// exists so the job path compiles on every platform.
+    #[cfg(not(unix))]
+    fn publish_staged_sidecar(
+        &self,
+        final_sidecar: &std::path::Path,
+        staged_sidecar: &std::path::Path,
+        staged_file: &std::fs::File,
+    ) -> Result<()> {
+        let _ = (final_sidecar, staged_sidecar, staged_file);
+        Ok(())
+    }
+
     /// Job execution requires descriptor-bound merging through Linux
     /// procfs; every other platform refuses BEFORE the run creates any
     /// directory or staging entry, so the no-unlink staging policy can
@@ -2021,12 +2070,29 @@ impl Processor {
             return Err(ProcessorError::OutputCollision { path: output_path.to_path_buf() });
         }
         if let Some(parent) = output_path.parent() {
+            // Validate the nearest existing ancestor BEFORE creating
+            // anything: an intermediate symlink can only redirect
+            // `create_dir_all` outside the root if the existing portion
+            // already escapes it, and that is refused first, so no
+            // directory is created outside the root. The walk terminates
+            // at the canonical output root, which always exists.
+            let mut ancestor = parent;
+            while std::fs::symlink_metadata(ancestor).is_err() {
+                ancestor = ancestor.parent().ok_or_else(|| self.output_root_escape(output_path))?;
+            }
+            if self.parent_escapes_root(job, ancestor)? {
+                return Err(ProcessorError::OutputDirCreation(format!(
+                    "Output directory {} escapes the job output root; refusing to create it",
+                    ancestor.display()
+                )));
+            }
             std::fs::create_dir_all(parent).map_err(|e| {
                 ProcessorError::OutputDirCreation(format!(
                     "Failed to create output directory {}: {e}",
                     parent.display()
                 ))
             })?;
+            // Defense in depth: re-verify after creation.
             if self.parent_escapes_root(job, parent)? {
                 return Err(ProcessorError::OutputDirCreation(format!(
                     "Output directory {} escapes the job output root after creation; refusing",
@@ -2320,8 +2386,12 @@ impl Processor {
     /// then issue `unlinkat` relative to the pinned descriptor. A swapped
     /// symlink entry is unlinked, never followed. Because
     /// the descriptor pins the exact directory, a later swap of the
-    /// parent's name cannot redirect the removal outside the root. Non-Unix
-    /// platforms report `Unpinned` and the caller keeps the
+    /// parent's name cannot redirect the removal outside the root. Any
+    /// open/stat failure on the pinned parent (including `EMFILE`, `ENFILE`,
+    /// `EACCES`) is `Refused`, never `Unpinned`: downgrading to the
+    /// check-then-remove fallback would reopen the symlink race the pinned
+    /// `unlinkat` closes. Only the `#[cfg(not(unix))]` arm, where no pin
+    /// exists at all, reports `Unpinned` and the caller keeps the
     /// check-then-remove fallback.
     fn discard_pinned(&self, path: &std::path::Path, root: &std::path::Path) -> Discard {
         #[cfg(unix)]
@@ -2337,11 +2407,14 @@ impl Processor {
             ) else {
                 return Discard::Refused;
             };
-            // SAFETY: parent_c is a valid NUL-terminated pathname.
+            // SAFETY: parent_c is a valid NUL-terminated pathname. An open
+            // failure (missing parent, EMFILE/ENFILE, EACCES) is Refused,
+            // not Unpinned: the fallback check-then-remove would reopen the
+            // symlink race the pinned path closes.
             let dirfd =
                 unsafe { libc::open(parent_c.as_ptr(), libc::O_DIRECTORY | libc::O_CLOEXEC) };
             if dirfd < 0 {
-                return Discard::Unpinned;
+                return Discard::Refused;
             }
             let dirfd = DirFd(dirfd);
             let mut dir_stat = unsafe { std::mem::zeroed() };
@@ -2400,8 +2473,10 @@ impl Processor {
     fn group_job_inputs(inputs: &[PathBuf], dry_run: bool) -> Result<Vec<AudioGroup>> {
         let files = crate::discovery::discover_files(inputs)?;
         if files.is_empty() {
+            // The `run` loop owns the "no audio discovered" message for
+            // both modes; a dry run returns an empty list silently here so
+            // the line is printed exactly once.
             if dry_run {
-                println!("Dry run: No audio files discovered in input paths. Inputs: {:?}", inputs);
                 return Ok(Vec::new());
             }
             return Err(ProcessorError::NoInputs);
@@ -3239,21 +3314,25 @@ mod tests {
 
         let job = crate::job::Job::load(&job_path).unwrap();
         let processor = Processor::for_job(job, config).unwrap();
-        let err = processor
+        let run = processor
             .run(vec![input.clone()], &NoOpProgressHandler)
             .await
-            .expect("run reports the outcome, not a panic")
-            .outcomes[0]
-            .error
-            .clone()
-            .expect("group failed");
+            .expect("run reports the outcome, not a panic");
+        let err = run.outcomes[0].error.clone().expect("group failed");
+        // The human-facing outcome keeps the diagnosed (raw) error with the
+        // actionable path.
         assert!(err.contains("refusing to overwrite"), "{err}");
-        // The diagnosed path is redacted to the root token without an
-        // absolute path, and the raw root form (a substring of the
-        // "output_root" token) must not corrupt the replacement.
-        assert!(!err.contains(temp_dir.path().to_string_lossy().as_ref()), "{err}");
-        assert!(err.contains("output_root/"), "{err}");
-        assert!(!err.contains("output_rootput_root"), "{err}");
+        assert!(err.contains(temp_dir.path().to_string_lossy().as_ref()), "{err}");
+        // The machine document applies redaction: the diagnosed path becomes
+        // the root token without an absolute path, and the raw root form (a
+        // substring of the "output_root" token) must not corrupt the
+        // replacement.
+        let result = crate::job::JobResult::from_run(1, &run, &output_root);
+        let machine = result.groups[0].error.as_deref().unwrap();
+        assert!(machine.contains("refusing to overwrite"), "{machine}");
+        assert!(!machine.contains(temp_dir.path().to_string_lossy().as_ref()), "{machine}");
+        assert!(machine.contains("output_root/"), "{machine}");
+        assert!(!machine.contains("output_rootput_root"), "{machine}");
         let content = std::fs::read(&existing).expect("foreign file survived");
         assert_eq!(content, b"foreign content", "existing file untouched");
         // No falsely successful output: the claimed name is the foreign one;
@@ -3302,6 +3381,28 @@ mod tests {
         let err = processor.recheck_output_parent(&output_path).unwrap_err();
         assert!(err.to_string().contains("output root"), "{err}");
         assert_eq!(std::fs::read(&external).expect("external file survived"), b"external");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn precheck_refuses_escaping_ancestor_before_creating_directories() {
+        // The nearest-existing-ancestor walk must refuse the precheck when an
+        // existing component is a symlink out of the root, before
+        // `create_dir_all` runs: the missing `Sub` under the escaping
+        // `Evil` is never created.
+        let temp = TempDir::new().unwrap();
+        let (processor, root, _output, _staged) = pub_setup(&temp);
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("Evil")).unwrap();
+
+        let output_path = root.join("Evil/Sub/Pub.m4b");
+        let err = processor.advisory_precheck_output_path(&output_path).unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to create it"),
+            "an escaping ancestor must be refused, got {err}"
+        );
+        assert!(!outside.join("Sub").exists(), "nothing may be created under the escaped parent");
     }
 
     #[cfg(unix)]
@@ -3574,6 +3675,24 @@ mod tests {
             "restoring the pathname must not change the pinned location"
         );
         assert_eq!(std::fs::read(&external).unwrap(), b"external");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_discard_refuses_unopenable_parent() {
+        // A parent that cannot be opened as a directory (a regular file
+        // occupies it) yields `O_DIRECTORY` open failure, which must be
+        // `Refused` — never the check-then-remove fallback that the pinned
+        // path closes the symlink race for.
+        let temp = TempDir::new().unwrap();
+        let (processor, root, _output, _staged) = pub_setup(&temp);
+        let not_a_dir = root.join("not-a-dir");
+        std::fs::write(&not_a_dir, b"plain file, not a directory").unwrap();
+        assert!(matches!(
+            processor
+                .discard_pinned(&not_a_dir.join("out.m4b"), &std::fs::canonicalize(&root).unwrap()),
+            Discard::Refused
+        ));
     }
 
     #[cfg(unix)]
@@ -4351,15 +4470,17 @@ mod tests {
             job_config(&temp, &temp.path().join("cfg-done")),
         )
         .unwrap();
-        let handler = RetargetRoot { root, replacement };
+        let handler = RetargetRoot { root: root.clone(), replacement };
         let run = processor.run(vec![input], &handler).await.unwrap();
 
         assert!(!run.complete, "the retargeted root must cause a safe failure");
-        let error = run.outcomes[0].error.as_deref().unwrap();
-        // The sidecar root-containment check (P1-2) fires during Tagging,
-        // before Publication. Its message carries no absolute path, so the
-        // redaction property is: no temp-root leak and no double-redaction
-        // artifact.
+        // The human-facing outcome keeps the diagnosed (raw) error.
+        let raw = run.outcomes[0].error.as_deref().unwrap();
+        assert!(raw.contains("sidecar parent escapes output root"), "{raw}");
+        // The machine document applies redaction: no temp-root leak and no
+        // double-redaction artifact.
+        let result = crate::job::JobResult::from_run(1, &run, &root);
+        let error = result.groups[0].error.as_deref().unwrap();
         assert!(error.contains("sidecar parent escapes output root"), "{error}");
         assert!(!error.contains(temp.path().to_string_lossy().as_ref()), "{error}");
         assert!(!error.contains("output_rootput_root"), "{error}");
@@ -4926,6 +5047,60 @@ mod tests {
         assert!(!sidecar.exists(), "stale chapter sidecar must be removed on preserve");
     }
 
+    #[tokio::test]
+    async fn test_artifacts_enumerate_only_this_runs_publications() {
+        // `artifacts` is this run's `published_paths`, not a probe of sibling
+        // names: a stale/foreign `P.cover.txt` already at the final path,
+        // which the default cover policy neither stages (no cover URL in the
+        // supplied metadata) nor removes, is never reported as an artifact —
+        // and it survives the run untouched. `chapters: "clear"` stages no
+        // sidecar of its own, so the media is the only publication.
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let output_root = temp_dir.path().join("output");
+
+        let book_dir = temp_dir.path().join("Pub Book");
+        let input = create_test_m4b(&book_dir, 5);
+
+        // The deterministic output path for {author}/{title} with title "P",
+        // author "A". A foreign cover sidecar from elsewhere sits there.
+        let dest_dir = output_root.join("A");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let dest = dest_dir.join("P.m4b");
+        let foreign_sidecar = dest_dir.join("P.cover.txt");
+        std::fs::write(&foreign_sidecar, "foreign\n").unwrap();
+
+        let job: crate::job::Job = serde_json::from_str(&format!(
+            r#"{{ "schema_version": 1, "inputs": ["{}"],
+                    "input_supplied": {{"title": "P", "authors": ["A"]}},
+                    "output_root": "{}", "path_format": "{{author}}/{{title}}",
+                    "chapters": "clear" }}"#,
+            input.display(),
+            output_root.display()
+        ))
+        .unwrap();
+        let effective = job.resolve(None).await.unwrap();
+        let processor = Processor::for_job(job, config).unwrap();
+        let group = AudioGroup {
+            name: "Pub Book".to_string(),
+            files: vec![AudioFile::new(input).unwrap()],
+            disc_number: None,
+        };
+        let result =
+            processor.process_group(&group, &NoOpProgressHandler, Some(&effective)).await.unwrap();
+
+        assert_eq!(result.output_file, dest, "output path must be deterministic");
+        assert_eq!(
+            result.artifacts,
+            vec![dest.clone()],
+            "only the published media is reported, never a probed foreign sidecar"
+        );
+        assert!(
+            foreign_sidecar.exists(),
+            "the foreign sidecar is untouched (not staged, not removed)"
+        );
+    }
+
     /// A minimal 1x1 JPEG, for a local cover asset.
     fn jpeg_bytes() -> Vec<u8> {
         let mut v = Vec::from([0xFF, 0xD8, 0xFF, 0xE0]);
@@ -5086,6 +5261,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_job_metadata_applied_reflects_policy_writes() {
+        // `metadata_applied` derives from the run's write policies: an
+        // all-preserve (default) job made no tag write and must report
+        // false; a `title: "write"` job embedded a value and must report
+        // true.
+        let temp_dir = TempDir::new().unwrap();
+        let output_root = temp_dir.path().join("output");
+        let config = create_test_config(&temp_dir);
+
+        let cases =
+            [(r#""title": "preserve""#, "AllP", false), (r#""title": "write""#, "OneW", true)];
+        for (field, title, expected) in cases {
+            let book_dir = temp_dir.path().join(format!("{title} Book"));
+            let input = create_test_m4b(&book_dir, 5);
+
+            let job: crate::job::Job = serde_json::from_str(&format!(
+                r#"{{ "schema_version": 1, "inputs": ["{input}"],
+                        "input_supplied": {{"title": "{title}", "authors": ["A"]}},
+                        "output_root": "{root}", "path_format": "{{author}}/{{title}}",
+                        {field} }}"#,
+                input = input.display(),
+                root = output_root.display()
+            ))
+            .unwrap();
+            let effective = job.resolve(None).await.unwrap();
+            let processor = Processor::for_job(job, config.clone()).unwrap();
+            let group = AudioGroup {
+                name: format!("{title} Book"),
+                files: vec![AudioFile::new(input).unwrap()],
+                disc_number: None,
+            };
+            let result = processor
+                .process_group(&group, &NoOpProgressHandler, Some(&effective))
+                .await
+                .unwrap();
+            assert_eq!(
+                result.metadata_applied, expected,
+                "{field} with title {title:?}: metadata_applied must be {expected}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_job_chapters_write_explicit_list_emitted() {
         // An explicit list embeds exactly the supplied chapters (replacing
         // the source's own), in range against the merged audio, and writes the
@@ -5224,6 +5442,47 @@ mod tests {
         assert!(
             err.to_string().contains("chapters policy 'preserve'"),
             "expected the multi-input chapter-preserve rejection, got {err}"
+        );
+        assert!(!output_root.join("A/P.m4b").exists());
+    }
+
+    #[tokio::test]
+    async fn test_job_chapters_preserve_single_transcoded_input_rejected() {
+        // The precondition is a single input AND a native copy: a lone mp3
+        // transcodes, so per-file chapters cannot be byte-preserved and the
+        // `chapters: preserve` job is refused before any output is produced.
+        // The rejection precedes the merge, so a dummy (non-audio) mp3 is
+        // enough.
+        let temp_dir = TempDir::new().unwrap();
+        let output_root = temp_dir.path().join("output");
+        let config = create_test_config(&temp_dir);
+
+        let mp3 = create_test_audio_file(&temp_dir, "audio.mp3", b"not real audio");
+
+        let job: crate::job::Job = serde_json::from_str(&format!(
+            r#"{{ "schema_version": 1, "inputs": ["{input}"],
+                    "input_supplied": {{"title": "P", "authors": ["A"]}},
+                    "output_root": "{root}", "path_format": "{{author}}/{{title}}",
+                    "chapters": "preserve" }}"#,
+            input = mp3.display(),
+            root = output_root.display()
+        ))
+        .unwrap();
+        let effective = job.resolve(None).await.unwrap();
+        let processor = Processor::for_job(job, config).unwrap();
+        let group = AudioGroup {
+            name: "SingleTranscoded".to_string(),
+            files: vec![AudioFile::new(mp3).unwrap()],
+            disc_number: None,
+        };
+
+        let err = processor
+            .process_group(&group, &NoOpProgressHandler, Some(&effective))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("natively-copyable"),
+            "expected the single-transcoded-input chapter-preserve rejection, got {err}"
         );
         assert!(!output_root.join("A/P.m4b").exists());
     }

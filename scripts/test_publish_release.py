@@ -190,8 +190,8 @@ sys.exit(response.get('code', 0))
         self.prepare_assets()
         canonical = b"previous runner's canonical linux binary"
         linux = self.asset_list[0]
-        linux.update({"label": publisher.asset_label(SHA, VERSION,
-                      "sha256:" + hashlib.sha256(canonical).hexdigest()),
+        linux.update({"label": "m4b-publish-v1;sha=" + SHA + ";tag=" + VERSION +
+                      ";sha256=" + hashlib.sha256(canonical).hexdigest(),
                       "digest": "sha256:" + hashlib.sha256(canonical).hexdigest()})
         (Path(self.args.artifacts) / linux["name"] / linux["name"]).write_bytes(b"different rebuild bytes")
         self.asset_list.pop()  # Windows upload was the point of interruption.
@@ -223,9 +223,11 @@ sys.exit(response.get('code', 0))
 
     def test_labeled_asset_wrong_source_or_digest_fails_before_upload(self):
         for label, digest in (
-                (publisher.asset_label("b" * 40, VERSION, "sha256:" + "1" * 64),
+                ("m4b-publish-v1;sha=" + "b" * 40 + ";tag=" + VERSION +
+                 ";sha256=" + "1" * 64,
                  "sha256:" + "1" * 64),
-                (publisher.asset_label(SHA, VERSION, "sha256:" + "1" * 64),
+                ("m4b-publish-v1;sha=" + SHA + ";tag=" + VERSION +
+                 ";sha256=" + "1" * 64,
                  "sha256:" + "2" * 64),
                 ("m4b-publish-v1;sha=invalid", "sha256:" + "1" * 64)):
             with self.subTest(label=label, digest=digest):

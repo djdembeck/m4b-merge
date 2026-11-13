@@ -148,6 +148,42 @@ fn test_cli_no_inputs() {
 }
 
 #[test]
+fn test_machine_setup_failures_emit_parseable_json() {
+    // `--machine` promises a parseable, path-free JSON document on every
+    // failure path, including the setup guards that exit before any group
+    // runs: no inputs, `--machine` without `--job`, and an unloadable job
+    // file. Each must exit nonzero with JSON on stdout and no groups.
+    let temp_dir = TempDir::new().unwrap();
+    let dummy = temp_dir.path().join("dummy.mp3");
+    std::fs::write(&dummy, b"not real audio").unwrap();
+
+    let cases = [
+        (vec!["--machine"], "no input files"),
+        (vec!["--machine", "-i", dummy.to_str().unwrap()], "--machine requires --job"),
+        (vec!["--machine", "--job", "missing-job.json"], "failed to load job file"),
+    ];
+    for (args, expected) in cases {
+        let output =
+            Command::new(bin_path()).args(&args).output().expect("Failed to run m4b-merge");
+        assert!(!output.status.success(), "setup failure must exit nonzero: {args:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.is_empty(), "machine stdout must be non-empty for {args:?}");
+        let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+            panic!("machine stdout must parse as JSON for {args:?}: {e}\n{stdout}")
+        });
+        assert_eq!(doc["status"], "failed", "setup failure status: {doc}");
+        assert!(
+            doc["groups"].as_array().is_some_and(|groups| groups.is_empty()),
+            "no group results on a setup failure: {doc}"
+        );
+        let error = doc["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("top-level error must be a string for {args:?}: {doc}"));
+        assert!(error.contains(expected), "expected {expected:?} in machine error: {error}");
+    }
+}
+
+#[test]
 fn test_single_mp3_merge() {
     if !ffmpeg_available() {
         return;

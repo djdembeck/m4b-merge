@@ -501,8 +501,15 @@ impl Job {
                 // override layer is applied exactly once below, on the base.
                 self.base_from_supplied(supplied)?
             }
-            (Some(_), Some(_)) => unreachable!("validate() rejects both bases"),
-            (None, None) => unreachable!("validate() requires exactly one base"),
+            // `Job::resolve`/`Job::preview` do not call `validate()`; a
+            // library caller that deserializes or mutates a `Job` reaches
+            // these arms with a diagnosed error, never a panic.
+            (Some(_), Some(_)) => Err(JobError::Invalid(
+                "input_provider and input_supplied are mutually exclusive".into(),
+            ))?,
+            (None, None) => Err(JobError::Invalid(
+                "exactly one of input_provider or input_supplied is required".into(),
+            ))?,
         };
 
         let mut effective = base;
@@ -629,6 +636,10 @@ pub struct JobPreview {
 /// Redact root spellings before other paths so relative output diagnostics
 /// survive, without allowing later substitutions to corrupt `output_root`.
 /// Unknown absolute paths are removed too (notably setup/FFmpeg errors).
+/// URLs are protected from the absolute-path pass (a scheme's `://` and the
+/// host path would otherwise be redacted to `scheme:[redacted]`), restored
+/// after, and left fully intact: a URL in a diagnostic is actionable and
+/// carries no filesystem path a caller must not see.
 pub(crate) fn redact_machine_error(
     message: &str,
     output_root: Option<&std::path::Path>,
@@ -636,6 +647,22 @@ pub(crate) fn redact_machine_error(
     inputs: &[PathBuf],
 ) -> String {
     const SENTINEL: &str = "\u{1}\u{2}\u{3}";
+    static URL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        // Only `http(s)://` is protected: a URL in a diagnostic is actionable
+        // and carries no filesystem path a caller must not see. Non-http(s)
+        // schemes (e.g. a `file://` cover URL) fall through to the
+        // absolute-path pass, which redacts the path component as before.
+        regex::Regex::new(r#"https?://[^\s"'`)\],;]*"#)
+            .expect("static URL redaction-protection regex")
+    });
+    // Protect URLs before the path pass: replace each with a sentinel that
+    // the path regex cannot corrupt, then restore the original text after.
+    let mut protected = Vec::new();
+    let masked = URL.replace_all(message, |caps: &regex::Captures| {
+        let marker = format!("\u{1}{:?}\u{2}", protected.len());
+        protected.push(caps.get(0).unwrap().as_str().to_string());
+        marker
+    });
     let canonical = output_root.and_then(|root| std::fs::canonicalize(root).ok());
     let mut roots: Vec<_> = [claim_root, canonical.as_deref(), output_root]
         .into_iter()
@@ -650,7 +677,7 @@ pub(crate) fn redact_machine_error(
     // "output_rootput_root". The token is protected up front so a
     // previously redacted group error stays stable through a second pass
     // when JobResult is built.
-    let mut redacted = message.replace("output_root", SENTINEL);
+    let mut redacted = masked.replace("output_root", SENTINEL);
     for root in roots {
         redacted = replace_whole_component(&redacted, &root.to_string_lossy(), SENTINEL);
     }
@@ -665,7 +692,18 @@ pub(crate) fn redact_machine_error(
         )
         .expect("static absolute-path redaction regex")
     });
-    ABSOLUTE_PATH.replace_all(&redacted, "${prefix}[redacted]").replace(SENTINEL, "output_root")
+    let redacted = ABSOLUTE_PATH.replace_all(&redacted, "${prefix}[redacted]");
+    // Restore the protected URLs verbatim, then the `output_root` token.
+    let redacted = redacted.replace(SENTINEL, "output_root");
+    static URL_MARKER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new("\u{1}([0-9]+)\u{2}").expect("protected-URL marker regex")
+    });
+    URL_MARKER
+        .replace_all(&redacted, |caps: &regex::Captures| {
+            let idx = caps[1].parse::<usize>().expect("protected-URL marker index");
+            protected[idx].clone()
+        })
+        .into_owned()
 }
 
 /// Replace `needle` in `haystack` only where it stands as a whole path
@@ -888,13 +926,17 @@ pub struct EffectiveJob {
 }
 
 impl EffectiveJob {
-    /// A merge cannot byte-preserve per-file chapters across inputs; the
-    /// strict preserve promise is only valid for a single input file.
+    /// A merge cannot byte-preserve per-file chapters across inputs, and a
+    /// transcode rewrites the container either way; the strict preserve
+    /// promise is only valid for a single input that merges as a native
+    /// copy (checked by the processor, which knows the merge mode).
     pub fn preserve_chapters_requires_single_input(&self) -> bool {
         matches!(self.chapters, ChaptersPolicy::Preserve)
     }
 
-    /// A strict cover-preservation promise is only valid for a single input.
+    /// A strict cover-preservation promise is only valid for a single input
+    /// that merges as a native copy (checked by the processor, which knows
+    /// the merge mode).
     pub fn preserve_cover_requires_single_input(&self) -> bool {
         matches!(self.cover, CoverPolicy::Preserve)
     }
@@ -1001,6 +1043,37 @@ mod tests {
             &[],
         );
         assert!(windows.contains("output_root\\Author"), "{windows}");
+    }
+
+    #[test]
+    fn redact_machine_error_keeps_urls_and_paths_apart() {
+        // A URL in a diagnostic stays intact: the scheme, host, and path
+        // survive the absolute-path pass (previously `://` + host became
+        // `:[redacted]`, destroying the actionable host).
+        let url = "cover download failed: https://cdn.example.com/covers/123.jpg (404)";
+        let redacted = redact_machine_error(url, Some(std::path::Path::new("/out")), None, &[]);
+        assert!(redacted.contains("https://cdn.example.com/covers/123.jpg"), "{redacted}");
+        assert!(!redacted.contains("[redacted]"), "{redacted}");
+
+        // A bare absolute path outside the root is still redacted.
+        let pathy = "failed to open /private/data/book.m4b";
+        let redacted = redact_machine_error(pathy, Some(std::path::Path::new("/out")), None, &[]);
+        assert!(!redacted.contains("/private/data/book.m4b"), "{redacted}");
+        assert!(redacted.contains("[redacted]"), "{redacted}");
+
+        // The `output_root` token substitution survives a message that also
+        // carries a URL and an unknown path.
+        let mixed = "published to output_root then failed at https://api.example.org/v1/book: /tmp/scratch.x";
+        let redacted = redact_machine_error(mixed, Some(std::path::Path::new("/out")), None, &[]);
+        assert!(redacted.contains("output_root"), "{redacted}");
+        assert!(redacted.contains("https://api.example.org/v1/book"), "{redacted}");
+        assert!(!redacted.contains("/tmp/scratch.x"), "{redacted}");
+
+        // Multiple URLs each restore to themselves, in order.
+        let multi = "tried https://one.example/a then http://two.example/b, both failed";
+        let redacted = redact_machine_error(multi, None, None, &[]);
+        assert!(redacted.contains("https://one.example/a"), "{redacted}");
+        assert!(redacted.contains("http://two.example/b"), "{redacted}");
     }
 
     #[test]
@@ -1179,6 +1252,25 @@ mod tests {
         let job: Job = serde_json::from_str(raw).unwrap();
         let err = job.validate().unwrap_err().to_string();
         assert!(err.contains("mutually exclusive"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_both_bases_without_validate() {
+        // `resolve` runs without `validate()` (the preview/machine paths), so
+        // a deserialized job with an invalid base selection must fail with a
+        // diagnosed error, never a panic: both bases set, and neither set.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
+            "input_provider": { "book_id": "B012345678" },
+            "input_supplied": { "title": "T" },
+            "output_root": "/o" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        let err = job.resolve(None).await.unwrap_err().to_string();
+        assert!(err.contains("mutually exclusive"), "{err}");
+
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"], "output_root": "/o" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        let err = job.resolve(None).await.unwrap_err().to_string();
+        assert!(err.contains("exactly one"), "{err}");
     }
 
     #[test]
