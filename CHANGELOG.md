@@ -27,7 +27,9 @@ All notable changes to this project will be documented in this file. See [standa
   inside the canonical root. A collision leaves the existing file
   untouched; a failed merge removes its placeholder; rejected outputs are
   discarded root-aware and pinned, so cleanup can never delete a file
-  outside the root.
+  outside the root; a staging entry swapped for a symlink is refused at
+  verification and removed as a link (never followed), so an external
+  target is never published.
 - `ProcessorError` variants consolidated: a group failure now carries its
   diagnosed error and produced artifacts at the `RunOutcome`/group-outcome
   level (the machine contract) instead of the previous lossy group-failure

@@ -270,10 +270,17 @@ through a publication that moves the staged file with `renameat` relative to
 the pinned, root-validated parent after all mutations succeed: a swapped
 final entry is replaced (not followed), so no path-based write of the media
 pipeline can be redirected at an external file. The `chapters.txt`/`cover.txt`
-sidecars are separate, unclaimed names written to their final sibling location
-before publication; a local attacker who swaps one of those names in that
-window can redirect that one write, which is documented as a known
-limitation of the current pipeline. This protects the
+sidecars are separate, unclaimed names written to their final sibling
+location before publication; a local attacker who swaps one of those names in
+that window can redirect that one write, which is documented as a known
+limitation of the current pipeline. A further residual window: a local
+attacker who can write the staging parent between the exclusive staging
+creation and the merge can replace the staging entry with a symlink; the
+post-merge verification then refuses the redirected result (it must be a
+regular, non-symlink file inside the canonical root), removes the swapped
+link as a link (a pinned `unlinkat` never follows it), and fails the group,
+so the external target is never published, but a full descriptor-bound media
+pipeline (out of scope here) would close the window before the write. This protects the
 job's staging area only; publishing into a shared destination still needs
 the caller's race-safe publication.
 

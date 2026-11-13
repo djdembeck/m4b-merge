@@ -1634,8 +1634,9 @@ impl Processor {
     /// Remove a rejected media output or its claimed placeholder. In job
     /// mode media mutations stay staged until publication, and a leftover
     /// placeholder would block retries. Removal is root-aware and pinned:
-    /// the entry is deleted only if it is a regular file inside a directory
-    /// whose pinned descriptor resolves under the output root,
+    /// the entry is deleted only if it is a regular file or symlink inside a directory
+    /// whose pinned descriptor resolves under the output root. A swapped
+    /// symlink entry is removed as the link itself, never followed,
     /// and the removal itself is issued relative to that pinned parent, so a
     /// parent swapped for a symlink after validation cannot redirect cleanup
     /// at an external file. Source files are never touched.
@@ -1661,8 +1662,13 @@ impl Processor {
                         .and_then(|p| std::fs::canonicalize(p).ok())
                         .map(|p| p.starts_with(&root))
                         .unwrap_or(false);
+                    // A symlink entry is removable as a link (remove_file
+                    // unlinks, it never follows), matching the pinned path.
                     let regular = std::fs::symlink_metadata(path)
-                        .map(|m| m.file_type().is_file())
+                        .map(|m| {
+                            let t = m.file_type();
+                            t.is_file() || t.is_symlink()
+                        })
                         .unwrap_or(false);
                     if !inside || !regular {
                         warn!(
@@ -1685,8 +1691,9 @@ impl Processor {
 
     /// Job-mode removal with the parent directory pinned: open the parent
     /// with `O_DIRECTORY|O_CLOEXEC`, validate the descriptor's own location
-    /// under the root, and require a regular entry via `fstatat`, then issue
-    /// `unlinkat` relative to the pinned descriptor. Because
+    /// under the root, and require a regular or symlink entry via `fstatat`,
+    /// then issue `unlinkat` relative to the pinned descriptor. A swapped
+    /// symlink entry is unlinked, never followed. Because
     /// the descriptor pins the exact directory, a later swap of the
     /// parent's name cannot redirect the removal outside the root. Non-Unix
     /// platforms report `Unpinned` and the caller keeps the
@@ -1730,7 +1737,7 @@ impl Processor {
             if unsafe {
                 libc::fstatat(dirfd.0, name_c.as_ptr(), &mut entry, libc::AT_SYMLINK_NOFOLLOW)
             } != 0
-                || entry.st_mode & libc::S_IFMT != libc::S_IFREG
+                || !matches!(entry.st_mode & libc::S_IFMT, libc::S_IFREG | libc::S_IFLNK)
             {
                 return Discard::Refused;
             }
@@ -2840,6 +2847,49 @@ mod tests {
             .collect();
         assert_eq!(staging_entries, vec![staged_path]);
         assert!(inputs.iter().all(|input| input.exists()), "source retained for recovery");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_entry_swapped_to_symlink_after_merge_is_refused_and_external_untouched() {
+        let temp = TempDir::new().unwrap();
+        let (mut processor, _root, output_path, _) = claimed_pub_setup(&temp);
+        processor.staging_name = Some(".m4b-merge-staging-swapped-after-merge".into());
+        let staged_path = output_path.with_file_name(format!(
+            "{}.{}",
+            processor.staging_name.as_deref().unwrap(),
+            output_path.extension().unwrap().to_string_lossy()
+        ));
+        let external = temp.path().join("external.m4b");
+        std::fs::write(&external, b"external").unwrap();
+        // Model the residual window after merge and before verification,
+        // without running the media pipeline or relying on race timing.
+        std::os::unix::fs::symlink(&external, &staged_path).unwrap();
+
+        let err = processor
+            .verify_output_in_root(&staged_path)
+            .inspect_err(|_| processor.discard_output(&output_path))
+            .unwrap_err();
+        assert!(err.to_string().contains("output root"), "{err}");
+        assert_eq!(std::fs::read(&external).unwrap(), b"external");
+        assert_eq!(
+            std::fs::symlink_metadata(&output_path).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound,
+            "claimed placeholder must be discarded"
+        );
+        assert_eq!(
+            std::fs::symlink_metadata(&staged_path).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound,
+            "rejected staging symlink must be discarded"
+        );
+        let staging_entries: Vec<_> = std::fs::read_dir(output_path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name().unwrap().to_string_lossy().starts_with(".m4b-merge-staging-")
+            })
+            .collect();
+        assert!(staging_entries.is_empty(), "no staging entry may remain: {staging_entries:?}");
     }
 
     #[cfg(unix)]
