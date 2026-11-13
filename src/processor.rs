@@ -2225,7 +2225,23 @@ impl Processor {
             // A foreign entry occupies the staging name: it is not ours.
             return;
         }
-        self.discard_output(staged_sidecar);
+        // Delete through the SAME pinned descriptor the entry was just
+        // verified against: the parent is never re-opened by pathname, so
+        // a swapped parent cannot redirect the removal at an external
+        // file. The check and the unlink share the pinned dirfd; the
+        // remaining window is a rename over the name, which the identity
+        // contract makes best-effort (the entry is only removed when it
+        // still names our inode, and a later swap is a documented
+        // collision, never a silent consumption).
+        // SAFETY: dirfd is pinned and validated; name is valid; the entry
+        // is removed as a link, never followed.
+        if unsafe { libc::unlinkat(dirfd.0, name.as_ptr(), 0) } != 0 {
+            warn!(
+                "Failed to remove staged sidecar {}: {}",
+                staged_sidecar.display(),
+                std::io::Error::last_os_error()
+            );
+        }
     }
 
     /// `true` when `parent`'s canonical location is not inside the job's
