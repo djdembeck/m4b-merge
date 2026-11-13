@@ -33,25 +33,29 @@ All notable changes to this project will be documented in this file. See [standa
   final entry, including a late arrival, is diagnosed as a collision
   without being read, renamed, or overwritten. A collision leaves the
   existing file untouched and retains the completed stage as a recoverable
-  artifact; a failed run removes only its own staging entries (stage and
-  unpublished staged sidecars); rejected
-  outputs are discarded root-aware and pinned, so cleanup can never delete
-  a file outside the root; a staging entry swapped for a symlink is
-  refused at verification and removed as a link (never followed), so an
-  external target is never published. Sidecars are staged as hidden
-  siblings and exposed at their final names only after the media
-  publication has won: publication opens the staged sidecar without
-  following a replacement symlink and links that open inode at the final
-  name no-replace, so a stage swapped for a symlink to an external file is
-  refused and a sidecar collision is diagnosed without touching the
-  foreign entry; when publication or a required cleanup fails after the
-  media won, the published media and every already-published sidecar are
+  artifact; a staging entry swapped for a symlink is refused at verification
+  without following or removing it, so an external target is never
+  published. Sidecars are staged as hidden siblings and exposed at their
+  final names only after the media publication has won: publication links
+  the open inode this run created at the final name no-replace, so replacing
+  the staging entry cannot redirect the link and a sidecar collision is
+  diagnosed without touching the foreign entry; when publication or a
+  required cleanup fails after the media won, the published media and every
+  already-published sidecar are
   retained and reported in the machine result. A losing job never
   overwrites, deletes, or publishes a winner's sidecars.
   Policy-required stale sidecar deletions apply only after the media
   publication won: an unremovable `chapters.txt`/`cover.txt` fails the run
   with a diagnosed cleanup error while the published media is retained,
   instead of publishing success alongside a surviving sidecar.
+- No-unlink job staging: the engine never removes a media or sidecar
+  staging pathname, even when a collision carries this attempt's visible
+  token. Successful publication leaves staging hard links for caller-owned
+  staging-tree cleanup (B1); failed runs retain the completed media stage
+  and report recoverable non-empty stages in `preserved_artifacts`.
+  Staging entries are not auto-cleaned, and fresh per-attempt tokens let
+  retries coexist with retained stages. Required final-sidecar removals
+  remain fallible and unchanged.
 - `ProcessorError` variants consolidated: a group failure now carries its
   diagnosed error and produced artifacts at the `RunOutcome`/group-outcome
   level (the machine contract) instead of the previous lossy group-failure

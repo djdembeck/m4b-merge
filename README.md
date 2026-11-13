@@ -244,8 +244,9 @@ Every produced output and sidecar is enumerated; artifact paths are
 absolute-path fallback). `input_files` are relative to that root when they
 lie inside it and `[redacted]` otherwise; they are not artifacts. Errors use
 `output_root` in place of the root and redact other absolute filesystem paths.
-On publication failure, `preserved_artifacts` lists valid completed staging
-files retained for recovery, also relative to the validated root. `status`
+On job failure, `preserved_artifacts` lists recoverable non-empty staging
+files retained on disk, also relative to the validated root. Empty or invalid
+stages remain on disk but are not reported as recoverable artifacts. `status`
 never claims success for a failed group; a partial or
 total failure exits 1 after the document is printed, and setup/run-level
 failures emit a `failed` document with a top-level `error` and empty
@@ -260,15 +261,21 @@ precheck reports an already-taken final name early and validates the created
 parent directories against the canonical output root, and the parent is
 re-validated immediately before the merge. The binding guarantee is the
 atomic no-replace publication below — no silent suffixing, rename, or
-overwrite, at any point. A failed run removes only its own staging entries,
-never the source files, and never an entry a winning job installed at the
-final names. Cleanup pins and validates the parent, then uses `unlinkat`,
-so a swapped symlink is removed as a link rather than followed outside the
-root. Policy-required stale sidecar deletions (chapter/cover `clear`,
-preserve-without-source-sidecar) are fallible and apply only after the media
-publication has won the final name: a sidecar that cannot be removed fails
-the run with a diagnosed cleanup error, while the already-published media is
-retained and reported in the machine result, so a surviving entry never
+overwrite, at any point. The engine never unlinks its staging pathnames;
+an occupied staging name is a collision, even if it carries this attempt's
+visible token. On success, each staging entry remains as a hard link
+alongside the published output or sidecar, owned by the job's staging-tree
+cleanup (the caller, B1). On failure, the completed media stage is retained
+and reported in `preserved_artifacts`. **Staging entries are not auto-cleaned
+by the engine**: callers must clean their job-owned staging tree, accepting
+retained entries to avoid deleting another writer's replacement. Each job
+attempt gets a fresh staging token, so retries do not collide with retained
+entries. Source files and a winning job's final names are never discarded.
+Policy-required stale sidecar deletions (chapter/cover `clear`, explicit-empty
+chapter writes, preserve-without-source-sidecar) are fallible and apply only
+after the media publication has won the final name: a sidecar that cannot be
+removed fails the run with a diagnosed cleanup error, while the already-published
+media is retained and reported in the machine result, so a surviving entry never
 contradicts the requested policy.
 
 The merge writes an exclusively created hidden staging sibling. The
@@ -301,15 +308,13 @@ retarget of a symlinked root.
 
 Chapter and cover sidecars are staged as hidden siblings of the media and
 are exposed at their final sibling names only after the media publication
-has won. Publication opens the staged sidecar without following a
-replacement symlink and links that open inode at the final name no-replace
-through the pinned parent: a stage swapped for a symlink to an external
-file is refused (the external file is never read, replaced, or
-published), and a foreign entry at the final name — installed by a
-concurrent winner, or any other actor — is never read, replaced,
-followed, or deleted. A job that loses the media race never writes,
-overwrites, or deletes a winner's sidecar; unpublished staged sidecars are
-discarded with the staging media, while the media and every sidecar
+has won. Publication links the open inode this run created at the final name
+no-replace through the pinned parent: replacing the staging entry cannot
+redirect the link to a foreign file. A foreign entry at the final name —
+installed by a concurrent winner, or any other actor — is never read,
+replaced, followed, or deleted. A job that loses the media race never writes,
+overwrites, or deletes a winner's sidecar. Unpublished staged sidecars are
+left in place without separate artifact entries; the media and every sidecar
 already published are retained and reported in the machine result.
 Policy-required removal of a stale final sidecar (chapter `clear`, cover
 `clear`, cover `preserve` without a source sidecar) happens only after the
