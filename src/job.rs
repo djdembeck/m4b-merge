@@ -626,6 +626,48 @@ pub struct JobPreview {
     pub metadata: crate::metadata::BookMetadata,
 }
 
+/// Redact root spellings before other paths so relative output diagnostics
+/// survive, without allowing later substitutions to corrupt `output_root`.
+/// Unknown absolute paths are removed too (notably setup/FFmpeg errors).
+pub(crate) fn redact_machine_error(
+    message: &str,
+    output_root: Option<&std::path::Path>,
+    claim_root: Option<&std::path::Path>,
+    inputs: &[PathBuf],
+) -> String {
+    const SENTINEL: &str = "\u{1}\u{2}\u{3}";
+    let canonical = output_root.and_then(|root| std::fs::canonicalize(root).ok());
+    let mut roots: Vec<_> = [claim_root, canonical.as_deref(), output_root]
+        .into_iter()
+        .flatten()
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect();
+    roots.sort_by_key(|p| std::cmp::Reverse(p.as_os_str().len()));
+    roots.dedup();
+    let mut redacted = message.to_string();
+    for root in roots {
+        // Previously redacted group errors can pass through this helper
+        // again when JobResult is built; a raw relative root such as "out"
+        // must not turn their token into "output_rootput_root".
+        if !root.is_absolute() {
+            redacted = redacted.replace("output_root", SENTINEL);
+        }
+        redacted = redacted.replace(root.to_string_lossy().as_ref(), SENTINEL);
+    }
+    for input in inputs {
+        if input.is_absolute() {
+            redacted = redacted.replace(input.to_string_lossy().as_ref(), "[redacted]");
+        }
+    }
+    static ABSOLUTE_PATH: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?P<prefix>^|[\s"'`(\[=:])(?:/[^\s"'`)\],;]*|[A-Za-z]:[\\/][^\s"'`)\],;]*)"#,
+        )
+        .expect("static absolute-path redaction regex")
+    });
+    ABSOLUTE_PATH.replace_all(&redacted, "${prefix}[redacted]").replace(SENTINEL, "output_root")
+}
+
 /// Machine-readable execution result: every produced output and sidecar,
 /// per-group identity and outcome, diagnosed errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -648,7 +690,13 @@ impl JobResult {
     }
 
     /// A diagnosed failure before any group ran.
-    pub fn setup_failed(error: String) -> Self {
+    pub fn setup_failed(error: String, job: Option<&Job>) -> Self {
+        let error = redact_machine_error(
+            &error,
+            job.map(|j| j.output_root.as_path()),
+            None,
+            job.map(|j| j.inputs.as_slice()).unwrap_or(&[]),
+        );
         Self {
             schema_version: SCHEMA_VERSION,
             resolver_version: crate::path_resolver::RESOLVER_VERSION,
@@ -660,17 +708,42 @@ impl JobResult {
 
     /// Build the machine result: every group in run order with its
     /// artifacts and diagnosed error; the status never claims success.
-    pub fn from_run(job_schema_version: u32, run: &crate::processor::RunOutcome) -> Self {
+    pub fn from_run(
+        job_schema_version: u32,
+        run: &crate::processor::RunOutcome,
+        output_root: &std::path::Path,
+    ) -> Self {
+        let root = std::fs::canonicalize(output_root).unwrap_or_else(|_| output_root.to_path_buf());
         let groups = run
             .outcomes
             .iter()
             .map(|o| GroupResult {
                 group: o.group.clone(),
                 outcome: o.outcome,
-                input_files: o.input_files.clone(),
+                input_files: o
+                    .input_files
+                    .iter()
+                    .map(|input| {
+                        let absolute = std::fs::canonicalize(input).unwrap_or_else(|_| {
+                            if input.is_absolute() {
+                                input.clone()
+                            } else {
+                                std::env::current_dir()
+                                    .map(|cwd| cwd.join(input))
+                                    .unwrap_or_default()
+                            }
+                        });
+                        relative_in_root(&root, &absolute)
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| PathBuf::from("[redacted]"))
+                    })
+                    .collect(),
                 artifacts: o.artifacts.clone(),
+                preserved_artifacts: o.preserved_artifacts.clone(),
                 files_moved: o.files_moved,
-                error: o.error.clone(),
+                error: o.error.as_ref().map(|error| {
+                    redact_machine_error(error, Some(output_root), None, &o.input_files)
+                }),
             })
             .collect();
         let status = if run.complete {
@@ -685,7 +758,8 @@ impl JobResult {
             resolver_version: crate::path_resolver::RESOLVER_VERSION,
             status,
             groups,
-            error: None,
+            error: (!run.complete && run.outcomes.is_empty() && !run.detail.is_empty())
+                .then(|| redact_machine_error(&run.detail, Some(output_root), None, &[])),
         }
     }
 }
@@ -695,13 +769,17 @@ impl JobResult {
 pub struct GroupResult {
     pub group: String,
     pub outcome: GroupOutcome,
-    /// The input files that were processed. Not artifacts.
+    /// Processed inputs relative to `output_root`, or `[redacted]` for
+    /// paths outside that root. Inputs are not artifacts.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub input_files: Vec<PathBuf>,
     /// Every produced output and sidecar, relative to the job's
     /// `output_root` and validated to lie inside it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<Artifact>,
+    /// Valid completed staging files retained after publication failed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub preserved_artifacts: Vec<Artifact>,
     /// `true` when the group's sources were moved to the completed directory.
     pub files_moved: bool,
     /// A diagnosed error when the group failed.
@@ -726,13 +804,24 @@ impl Artifact {
     /// that does not contain `root` yields no artifact (the caller must not
     /// emit it), and a relative input is refused.
     pub fn from_absolute(root: &std::path::Path, path: &std::path::Path) -> Option<Self> {
-        if !path.is_absolute() {
-            return None;
-        }
-        let relative = path.strip_prefix(root).ok()?;
-        let relative_path = relative.to_string_lossy().replace('\\', "/");
+        let relative_path = relative_in_root(root, path)?;
         Some(Self { kind: kind_of(&relative_path), exists: path.exists(), relative_path })
     }
+}
+
+fn relative_in_root(root: &std::path::Path, path: &std::path::Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let relative = path.strip_prefix(root).ok()?;
+    if relative.as_os_str().is_empty()
+        || !relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(relative.to_string_lossy().replace('\\', "/"))
 }
 
 fn kind_of(path: &str) -> &'static str {
@@ -1119,6 +1208,7 @@ mod tests {
         let outcome = |group: &str, ok: bool, err: &str| GroupOutcomes {
             group: group.into(),
             artifacts: Vec::new(),
+            preserved_artifacts: Vec::new(),
             input_files: Vec::new(),
             files_moved: false,
             outcome: if ok { GroupOutcome::Succeeded } else { GroupOutcome::Failed },
@@ -1131,6 +1221,7 @@ mod tests {
             metadata_applied: true,
             files_moved: false,
             artifacts: Vec::new(),
+            publication_root: None,
         };
         let run = |complete: bool, n: usize, outcomes: Vec<GroupOutcomes>| RunOutcome {
             results: vec![result(); n],
@@ -1142,6 +1233,7 @@ mod tests {
         let res = JobResult::from_run(
             1,
             &run(true, 2, vec![outcome("g1", true, ""), outcome("g2", true, "")]),
+            std::path::Path::new("/out"),
         );
         assert!(res.all_succeeded(), "all groups succeeded");
         assert_eq!(res.status, "succeeded");
@@ -1150,13 +1242,18 @@ mod tests {
         let res = JobResult::from_run(
             1,
             &run(false, 1, vec![outcome("g1", true, ""), outcome("g2", false, "boom")]),
+            std::path::Path::new("/out"),
         );
         assert!(!res.all_succeeded(), "partial must not claim full success");
         assert_eq!(res.status, "partial_failure");
         assert_eq!(res.groups.len(), 2, "every group is enumerated");
         assert_eq!(res.groups[1].error.as_deref(), Some("boom"));
 
-        let res = JobResult::from_run(1, &run(false, 0, vec![outcome("g1", false, "nope")]));
+        let res = JobResult::from_run(
+            1,
+            &run(false, 0, vec![outcome("g1", false, "nope")]),
+            std::path::Path::new("/out"),
+        );
         assert_eq!(res.status, "failed");
         assert!(!res.all_succeeded());
     }

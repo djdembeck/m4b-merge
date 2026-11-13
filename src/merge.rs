@@ -93,6 +93,8 @@ pub struct MergeJob {
     pub target_bitrate: Option<u32>,
     /// Number of threads to use for encoding
     pub num_threads: Option<usize>,
+    /// Explicit muxer for descriptor-bound job outputs without an extension.
+    pub output_format: Option<&'static str>,
 }
 
 impl MergeJob {
@@ -100,7 +102,14 @@ impl MergeJob {
     pub fn new(input_files: Vec<AudioFile>, output_path: PathBuf) -> Self {
         let mode = MergeMode::from_files(&input_files);
 
-        Self { input_files, output_path, mode, target_bitrate: None, num_threads: None }
+        Self {
+            input_files,
+            output_path,
+            mode,
+            target_bitrate: None,
+            num_threads: None,
+            output_format: None,
+        }
     }
 
     /// Set the merge mode explicitly
@@ -118,6 +127,12 @@ impl MergeJob {
     /// Set number of threads for encoding
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.num_threads = Some(threads);
+        self
+    }
+
+    /// Set the output muxer when the output path has no usable extension.
+    pub fn with_format(mut self, format: &'static str) -> Self {
+        self.output_format = Some(format);
         self
     }
 
@@ -344,6 +359,7 @@ impl Merger {
                 &job.input_files[0],
                 &job.output_path,
                 target_bitrate,
+                job.output_format,
                 progress_handler,
             );
         }
@@ -380,6 +396,10 @@ impl Merger {
             }
         }
 
+        // Descriptor-bound job outputs have no extension for muxer detection.
+        if let Some(format) = job.output_format {
+            cmd.arg("-f").arg(format);
+        }
         // Add output path (overwrite if exists)
         cmd.arg("-y").arg(&job.output_path);
 
@@ -451,12 +471,29 @@ impl Merger {
         Ok(job.output_path.clone())
     }
 
+    /// Copy into the reserved staging inode without reopening its pathname.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn copy_single_file_into(
+        &self,
+        file: &AudioFile,
+        output: &mut std::fs::File,
+    ) -> Result<()> {
+        use std::io::{Seek, SeekFrom};
+
+        let mut source = std::fs::File::open(&file.path)?;
+        output.seek(SeekFrom::Start(0))?;
+        output.set_len(0)?;
+        std::io::copy(&mut source, output)?;
+        Ok(())
+    }
+
     /// Copy a single file directly without using concat demuxer
     fn copy_single_file(
         &self,
         file: &AudioFile,
         output_path: &Path,
         target_bitrate: Option<u32>,
+        output_format: Option<&str>,
         progress_handler: &dyn ProgressHandler,
     ) -> Result<PathBuf> {
         info!("Copying single file: {} -> {}", file.path.display(), output_path.display());
@@ -496,6 +533,9 @@ impl Merger {
                 .arg("-c:v")
                 .arg("copy");
 
+            if let Some(format) = output_format {
+                cmd.arg("-f").arg(format);
+            }
             cmd.arg("-y").arg(output_path);
 
             let output = cmd.output().map_err(|e| {
@@ -626,6 +666,7 @@ impl MergeJobBuilder {
             mode,
             target_bitrate: self.target_bitrate,
             num_threads: self.num_threads,
+            output_format: None,
         })
     }
 }
@@ -724,6 +765,7 @@ mod tests {
             mode: MergeMode::Copy,
             target_bitrate: None,
             num_threads: None,
+            output_format: None,
         };
         assert!(matches!(job.validate(), Err(MergeError::NoInputFiles)));
     }

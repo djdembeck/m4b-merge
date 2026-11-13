@@ -241,8 +241,12 @@ document parses cleanly on success and on failure:
 
 Every produced output and sidecar is enumerated; artifact paths are
 **relative to the job's `output_root`** and validated to lie inside it (no
-absolute-path fallback). `input_files` are the job's input paths, not
-artifacts. `status` never claims success for a failed group; a partial or
+absolute-path fallback). `input_files` are relative to that root when they
+lie inside it and `[redacted]` otherwise; they are not artifacts. Errors use
+`output_root` in place of the root and redact other absolute filesystem paths.
+On publication failure, `preserved_artifacts` lists valid completed staging
+files retained for recovery, also relative to the validated root. `status`
+never claims success for a failed group; a partial or
 total failure exits 1 after the document is printed, and setup/run-level
 failures emit a `failed` document with a top-level `error` and empty
 `groups`. A **job run is one book**: one group named `"job"`, so
@@ -251,38 +255,45 @@ multi-group library consumers of `Processor::run`.
 
 #### No-clobber
 
-Job execution claims the exact resolved output name with
-`O_CREAT|O_EXCL` before any write: no silent suffixing, no
-exists-then-rename race, and no overwrite rename. A pre-existing file or
-directory at the path fails the run with a diagnosed collision, untouched; a
-failed group leaves no falsely successful partial output, removes its claimed
-placeholder on merge failure, and never destroys its source files. Created
-parent directories are re-validated against the output root at claim time and
-again immediately before the merge, and the produced file is re-validated
-after it: it must be a regular, non-empty file inside the canonical output
-root, so a swapped symlinked parent cannot redirect the accepted output
-outside the root. A rejected output is removed through the parent directory
-pinned at cleanup, so a parent swapped for a symlink cannot redirect the
-removal at an external file. The merge writes a hidden staging sibling
-inside the validated parent, and every media mutation (merge, tag, cover,
-chapter embedding) happens on that staging file; the final name appears only
-through a publication that moves the staged file with `renameat` relative to
-the pinned, root-validated parent after all mutations succeed: a swapped
-final entry is replaced (not followed), so no path-based write of the media
-pipeline can be redirected at an external file. The `chapters.txt`/`cover.txt`
-sidecars are separate, unclaimed names written to their final sibling
-location before publication; a local attacker who swaps one of those names in
-that window can redirect that one write, which is documented as a known
-limitation of the current pipeline. A further residual window: a local
-attacker who can write the staging parent between the exclusive staging
-creation and the merge can replace the staging entry with a symlink; the
-post-merge verification then refuses the redirected result (it must be a
-regular, non-symlink file inside the canonical root), removes the swapped
-link as a link (a pinned `unlinkat` never follows it), and fails the group,
-so the external target is never published, but a full descriptor-bound media
-pipeline (out of scope here) would close the window before the write. This protects the
-job's staging area only; publishing into a shared destination still needs
-the caller's race-safe publication.
+Job execution claims the exact resolved output name with `O_CREAT|O_EXCL`
+before any write: no silent suffixing or overwrite. A pre-existing file or
+directory fails with a diagnosed collision, untouched. Parents are validated
+against the canonical output root at claim time and before merging. A failed
+merge removes its owned placeholder and staging entry, never the source files.
+Cleanup pins and validates the parent, then uses `unlinkat`, so a swapped
+symlink is removed as a link rather than followed outside the root.
+
+The merge writes an exclusively created hidden staging sibling. **On Linux**,
+the reserved descriptor stays open through merge verification: native copies
+write directly to it, and FFmpeg inherits it and opens `/proc/self/fd/N` with
+an explicit MP4 muxer. These procfs magic links bind the reserved inode even
+if an attacker replaces its staging name. A substituted staging entry is
+then refused by post-merge verification. **Other Unix platforms retain the
+pathname-based reserve-then-verify backstop**: verification rejects symlinked,
+empty, non-regular, or out-of-root results, but a staging-name swap before
+merging can still redirect the write before that rejection. This is an
+accepted platform limitation; descriptor-bound merging requires Linux procfs.
+Subsequent tag, cover, and chapter mutations operate on the verified stage.
+
+After all mutations succeed, publication pins and validates the destination
+parent and creates the final name with no-replace `linkat`, then unlinks the
+staging entry. Only the still-owned placeholder is released: a foreign file
+or symlink at the final name, including a late arrival, fails with a diagnosed
+collision instead of being overwritten. Linux binds the link source through
+an open, no-follow staging descriptor; other Unix platforms link its
+just-validated name within the pinned parent, retaining a source-entry swap
+window. If publication fails, valid staged media is retained and listed in
+`preserved_artifacts` for recovery. Artifact relatives use the root captured
+at publication, not a later retarget of a symlinked root.
+
+Chapter and cover sidecars retain their final sibling names. On Unix, stale
+entries are unlinked through a validated pinned parent and replacements are
+exclusively created with `openat`, so a pre-existing or newly installed
+symlink cannot redirect a sidecar write outside the root. Sidecars are still
+separate, non-atomic writes before media publication. Non-Unix platforms use
+root-checked pathname fallbacks. This protects the job's staging area only;
+publishing into another shared destination still needs the caller's own
+race-safe publication.
 
 ### Verify Environment
 

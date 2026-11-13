@@ -1282,6 +1282,21 @@ impl Tagger {
 
         debug!("Writing chapters.txt to: {}", path.display());
 
+        let mut file = std::fs::File::create(path)?;
+        self.write_chapters_to(&mut file, album, artist, chapters)?;
+
+        info!("Successfully wrote chapters.txt to: {}", path.display());
+        Ok(())
+    }
+
+    /// Render a chapter sidecar into an already-open, caller-owned file.
+    pub(crate) fn write_chapters_to(
+        &self,
+        output: &mut impl std::io::Write,
+        album: &str,
+        artist: Option<&str>,
+        chapters: &[crate::metadata::Chapter],
+    ) -> Result<()> {
         // Build chapters content
         let mut content = String::new();
 
@@ -1306,10 +1321,7 @@ impl Tagger {
             content.push_str(&format!("{} {}\n", timestamp, chapter.title));
         }
 
-        // Write to file
-        std::fs::write(path, content)?;
-
-        info!("Successfully wrote chapters.txt to: {}", path.display());
+        output.write_all(content.as_bytes())?;
         Ok(())
     }
 

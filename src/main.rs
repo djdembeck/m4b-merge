@@ -201,10 +201,13 @@ async fn main() {
                 // `--machine` promises a parseable, path-free document on
                 // every failure path.
                 if args.machine {
-                    machine_exit(&m4b_merge::job::JobResult::setup_failed(format!(
-                        "failed to load job file: {}",
-                        redact_job_path(job_path, &e.to_string())
-                    )));
+                    machine_exit(&m4b_merge::job::JobResult::setup_failed(
+                        format!(
+                            "failed to load job file: {}",
+                            redact_job_path(job_path, &e.to_string())
+                        ),
+                        None,
+                    ));
                 }
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
@@ -343,17 +346,21 @@ async fn main() {
             Ok(processor) => processor,
             Err(e) => {
                 error!("Failed to create processor: {}", e);
-                machine_exit(&m4b_merge::job::JobResult::setup_failed(e.to_string()));
+                machine_exit(&m4b_merge::job::JobResult::setup_failed(e.to_string(), Some(job)));
             }
         };
         let run = match processor.run(job.inputs.clone(), &StderrProgressHandler).await {
             Ok(run) => run,
             Err(e) => {
                 error!("Processing failed: {}", e);
-                machine_exit(&m4b_merge::job::JobResult::setup_failed(e.to_string()));
+                machine_exit(&m4b_merge::job::JobResult::setup_failed(e.to_string(), Some(job)));
             }
         };
-        machine_exit(&m4b_merge::job::JobResult::from_run(job.schema_version, &run));
+        machine_exit(&m4b_merge::job::JobResult::from_run(
+            job.schema_version,
+            &run,
+            &job.output_root,
+        ));
     }
 
     info!("m4b-merge starting with {} input(s)", run_inputs.len());
