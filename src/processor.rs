@@ -258,6 +258,11 @@ pub struct Processor {
     /// Canonical output root captured when the job is attached, before a
     /// later symlink retarget can change the path used for diagnostics.
     claim_root: Option<PathBuf>,
+    /// Per-run staging basename (pid, nanos, and a process-global run
+    /// counter): concurrent `Processor::run` calls in one process each get
+    /// their own token, so the own-leftover removal can never touch
+    /// another run's active staged entries.
+    staging_base: String,
     /// Test-only staging basename for deterministic pre-install races.
     #[cfg(test)]
     staging_name: Option<String>,
@@ -266,6 +271,11 @@ pub struct Processor {
     /// deterministically, without permission tricks.
     #[cfg(test)]
     sidecar_unlink_name: Option<String>,
+    /// Test-only: swap the media staging entry for a symlink target
+    /// between the no-replace link and the gated cleanup unlink, so the
+    /// identity gate is exercised in the real publication.
+    #[cfg(test)]
+    media_stage_swap: Option<std::path::PathBuf>,
     /// Test-only substitute for [`Tagger::embed_chapters`], so the
     /// chapter-embed failure path can be exercised without a real file.
     #[cfg(test)]
@@ -409,10 +419,13 @@ impl Processor {
             tagger,
             job: None,
             claim_root: None,
+            staging_base: Self::run_staging_base(),
             #[cfg(test)]
             staging_name: None,
             #[cfg(test)]
             sidecar_unlink_name: None,
+            #[cfg(test)]
+            media_stage_swap: None,
             #[cfg(test)]
             embed_hook,
         })
@@ -449,10 +462,13 @@ impl Processor {
                 std::fs::canonicalize(&job.output_root).unwrap_or_else(|_| job.output_root.clone()),
             ),
             job: Some(job),
+            staging_base: Self::run_staging_base(),
             #[cfg(test)]
             staging_name: None,
             #[cfg(test)]
             sidecar_unlink_name: None,
+            #[cfg(test)]
+            media_stage_swap: None,
             #[cfg(test)]
             embed_hook,
         })
@@ -476,10 +492,13 @@ impl Processor {
             api_client,
             job: None,
             claim_root: None,
+            staging_base: Self::run_staging_base(),
             #[cfg(test)]
             staging_name: None,
             #[cfg(test)]
             sidecar_unlink_name: None,
+            #[cfg(test)]
+            media_stage_swap: None,
             merger,
             tagger,
             #[cfg(test)]
@@ -1125,9 +1144,9 @@ impl Processor {
         // reports a diagnosed collision without touching the foreign entry.
         // The extension still selects the muxer on non-Linux platforms.
         #[cfg(test)]
-        let stage_name = self.staging_name.clone().unwrap_or_else(Processor::job_stage_name);
+        let stage_name = self.staging_name.clone().unwrap_or_else(|| self.staging_base.clone());
         #[cfg(not(test))]
-        let stage_name = Processor::job_stage_name();
+        let stage_name = self.staging_base.clone();
         let staged_name = match output_path.extension() {
             Some(ext) if !ext.is_empty() => format!("{stage_name}.{}", ext.to_string_lossy()),
             _ => stage_name,
@@ -1209,14 +1228,14 @@ impl Processor {
         // Cover policy across the whole path. Sidecars are staged siblings,
         // exposed only after the media publication succeeds, so a job that
         // loses publication can never write or remove the winner's sidecars.
-        #[derive(Clone)]
         struct StagedSidecar {
             final_path: PathBuf,
             staged_path: PathBuf,
-            /// The (dev, ino) of the inode this run created and wrote.
-            /// Publication must publish exactly this inode: a regular file
-            /// swapped in at the staging name after the write is refused.
-            identity: (u64, u64),
+            /// The file this run created and wrote. The descriptor keeps
+            /// the inode alive until publication, so a replacement at the
+            /// staging name can never recycle the (dev, ino); publication
+            /// links exactly this inode, never a re-opened pathname.
+            file: std::fs::File,
         }
         let mut staged_sidecars: Vec<StagedSidecar> = Vec::new();
         let tag_fail = |path: &std::path::Path,
@@ -1231,7 +1250,7 @@ impl Processor {
                 self.discard_staged_sidecar_if_ours(
                     &sidecar.final_path,
                     &sidecar.staged_path,
-                    sidecar.identity,
+                    &sidecar.file,
                     root,
                 );
             }
@@ -1252,8 +1271,8 @@ impl Processor {
                 let source_sidecar = input_paths[0].with_extension("cover.txt");
                 if source_sidecar.is_file() {
                     let staged_sidecar = self.staged_sidecar_path(&output_path, "cover.txt");
-                    let identity = match self.copy_job_sidecar(&source_sidecar, &staged_sidecar) {
-                        Ok(identity) => identity,
+                    let file = match self.copy_job_sidecar(&source_sidecar, &staged_sidecar) {
+                        Ok(file) => file,
                         Err(e) => {
                             return Err(tag_fail(
                                 &staged_path,
@@ -1266,7 +1285,7 @@ impl Processor {
                     staged_sidecars.push(StagedSidecar {
                         final_path: output_path.with_extension("cover.txt"),
                         staged_path: staged_sidecar,
-                        identity,
+                        file,
                     });
                 } else {
                     remove_after_publish.push(output_path.with_extension("cover.txt"));
@@ -1342,7 +1361,7 @@ impl Processor {
                     };
                     let staged_sidecar = self.staged_sidecar_path(&output_path, "chapters.txt");
                     let sidecar_write = self.create_job_sidecar(&staged_sidecar).and_then(
-                        |(mut file, identity)| {
+                        |(mut file, _identity)| {
                             self.tagger
                                 .write_chapters_to(
                                     &mut file,
@@ -1350,11 +1369,11 @@ impl Processor {
                                     artist.as_deref(),
                                     &write_chapters,
                                 )
-                                .map(|()| identity)
+                                .map(|()| file)
                         },
                     );
-                    let identity = match sidecar_write {
-                        Ok(identity) => identity,
+                    let file = match sidecar_write {
+                        Ok(file) => file,
                         Err(e) => {
                             // A partially written sidecar would be an
                             // undisclosed extra: the group reports no
@@ -1370,7 +1389,7 @@ impl Processor {
                     staged_sidecars.push(StagedSidecar {
                         final_path: output_path.with_extension("chapters.txt"),
                         staged_path: staged_sidecar,
-                        identity,
+                        file,
                     });
                 }
                 // A resolved empty list leaves the merged copy's chapters and
@@ -1395,8 +1414,8 @@ impl Processor {
                 let source_sidecar = input_paths[0].with_extension("chapters.txt");
                 if source_sidecar.is_file() {
                     let staged_sidecar = self.staged_sidecar_path(&output_path, "chapters.txt");
-                    let identity = match self.copy_job_sidecar(&source_sidecar, &staged_sidecar) {
-                        Ok(identity) => identity,
+                    let file = match self.copy_job_sidecar(&source_sidecar, &staged_sidecar) {
+                        Ok(file) => file,
                         Err(e) => {
                             return Err(tag_fail(
                                 &staged_sidecar,
@@ -1409,7 +1428,7 @@ impl Processor {
                     staged_sidecars.push(StagedSidecar {
                         final_path: output_path.with_extension("chapters.txt"),
                         staged_path: staged_sidecar,
-                        identity,
+                        file,
                     });
                 } else {
                     remove_after_publish.push(output_path.with_extension("chapters.txt"));
@@ -1436,7 +1455,7 @@ impl Processor {
                 self.discard_staged_sidecar_if_ours(
                     &sidecar.final_path,
                     &sidecar.staged_path,
-                    sidecar.identity,
+                    &sidecar.file,
                     &job.output_root,
                 );
             }
@@ -1469,7 +1488,7 @@ impl Processor {
             let sidecar_result = self.publish_staged_sidecar(
                 &staged_sidecar.final_path,
                 &staged_sidecar.staged_path,
-                staged_sidecar.identity,
+                &staged_sidecar.file,
             );
             if let Err(e) = sidecar_result {
                 let artifacts = self.sidecar_failure_artifacts(
@@ -1748,15 +1767,38 @@ impl Processor {
         result
     }
 
-    /// Staging name for the in-progress merge: a hidden sibling of the
-    /// claimed output inside the validated parent. The media pipeline
-    /// writes the reserved stage; the final name appears only via publication.
+    /// Test-only staging basename for deterministic pre-install races.
+    #[cfg(test)]
     fn job_stage_name() -> String {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         format!(".m4b-merge-staging-{}-{nanos}", std::process::id())
+    }
+
+    /// The (dev, ino) identity of a `stat` result, with the device value
+    /// normalized to u64 (it is i32 on Apple) so identities compare
+    /// consistently on every platform.
+    #[allow(clippy::unnecessary_cast)]
+    fn stat_identity(meta: &libc::stat) -> (u64, u64) {
+        (meta.st_dev as u64, meta.st_ino)
+    }
+
+    /// Per-run staging basename: pid, nanos, and a process-global run
+    /// counter. Two `Processor::run` calls in the same process can share
+    /// the pid (and a clock reading), so the counter is what makes the
+    /// token per-run; leftover removal requires the full token, so a
+    /// concurrent run's active staged entries are never "ours".
+    fn run_staging_base() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let run = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!(".m4b-merge-staging-{}-{nanos}-{run}", std::process::id())
     }
 
     /// Publish the staged media with atomic no-replace hard-link creation
@@ -1895,8 +1937,30 @@ impl Processor {
                 }
                 // The final name is bound to the reserved inode; whatever
                 // entry the staging name holds now (ours or a swapped
-                // replacement) is not the published media.
-                if unsafe { libc::unlinkat(dirfd.0, stage_name.as_ptr(), 0) } != 0 {
+                // replacement) is not the published media. Consume the
+                // staging entry only while it still names the reserved
+                // inode: a replacement installed between the link and this
+                // unlink is not ours and is left in place.
+                #[cfg(test)]
+                if let Some(target) = &self.media_stage_swap {
+                    let _ = std::fs::remove_file(staged_path);
+                    std::os::unix::fs::symlink(target, staged_path).unwrap();
+                }
+                let mut staged_meta = unsafe { std::mem::zeroed() };
+                let staged_is_reserved = unsafe {
+                    libc::fstatat(
+                        dirfd.0,
+                        stage_name.as_ptr(),
+                        &mut staged_meta,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                } == 0
+                    && staged_meta.st_mode & libc::S_IFMT == libc::S_IFREG
+                    && staged_meta.st_ino == fd_meta.st_ino
+                    && staged_meta.st_dev == fd_meta.st_dev;
+                if staged_is_reserved
+                    && unsafe { libc::unlinkat(dirfd.0, stage_name.as_ptr(), 0) } != 0
+                {
                     warn!(
                         "Published output but left the staging name in place: {}",
                         std::io::Error::last_os_error()
@@ -1980,9 +2044,9 @@ impl Processor {
     /// never writes at a final sidecar name.
     fn staged_sidecar_path(&self, output_path: &std::path::Path, ext: &str) -> PathBuf {
         #[cfg(test)]
-        let stage_name = self.staging_name.clone().unwrap_or_else(Processor::job_stage_name);
+        let stage_name = self.staging_name.clone().unwrap_or_else(|| self.staging_base.clone());
         #[cfg(not(test))]
-        let stage_name = Processor::job_stage_name();
+        let stage_name = self.staging_base.clone();
         output_path.with_file_name(format!("{stage_name}.{ext}"))
     }
 
@@ -1993,11 +2057,12 @@ impl Processor {
     /// replaced, and the staged sibling is discarded. Cleanup is identity-
     /// safe: the stage is consumed through a pinned `unlinkat`, and a name
     /// replaced after the link is a collision, not a rename target.
+    #[cfg(unix)]
     fn publish_staged_sidecar(
         &self,
         final_sidecar: &std::path::Path,
         staged_sidecar: &std::path::Path,
-        identity: (u64, u64),
+        staged_file: &std::fs::File,
     ) -> Result<()> {
         let job = self.job.as_ref().ok_or_else(|| self.output_root_escape(final_sidecar))?;
         let root =
@@ -2007,6 +2072,7 @@ impl Processor {
                 return Err(self.output_root_escape(staged_sidecar));
             }
             use std::ffi::CString;
+            use std::os::fd::AsRawFd;
             use std::os::unix::ffi::OsStrExt;
 
             let dirfd = pin_parent_in_root(final_sidecar, &root)
@@ -2026,46 +2092,20 @@ impl Processor {
             )
             .map_err(|_| self.output_root_escape(final_sidecar))?;
             // The sidecar to publish is the inode this run created and
-            // wrote, named by the (dev, ino) identity captured at
-            // creation: open the staging name without following a
-            // replacement symlink and non-blocking (a swap-in FIFO would
-            // otherwise block the open forever), then verify the opened
-            // inode IS that identity. A concurrent replacement with any
-            // other regular file is refused, and a swap installed between
-            // the open and the link cannot redirect the publication,
-            // because the link source is the open inode, not the staging
-            // pathname.
-            // SAFETY: dirfd is pinned and validated; staged_name is valid.
-            let fd = unsafe {
-                libc::openat(
-                    dirfd.0,
-                    staged_name.as_ptr(),
-                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-                )
-            };
-            if fd < 0 {
-                return Err(self.output_root_escape(staged_sidecar));
-            }
+            // wrote, still open in `staged_file`: the descriptor keeps the
+            // inode alive, so a concurrent unlink/recreate at the staging
+            // name cannot recycle the (dev, ino) into a replacement, and
+            // the link source is the open inode, never a re-opened pathname.
+            let fd = staged_file.as_raw_fd();
             let mut meta = unsafe { std::mem::zeroed() };
             if unsafe { libc::fstat(fd, &mut meta) } != 0
                 || meta.st_mode & libc::S_IFMT != libc::S_IFREG
             {
-                // SAFETY: fd is owned here.
-                unsafe { libc::close(fd) };
                 return Err(self.output_root_escape(staged_sidecar));
             }
-            if (meta.st_dev, meta.st_ino) != identity {
-                // The staging name no longer names the inode this run
-                // created: the replacement is never published.
-                // SAFETY: fd is owned here.
-                unsafe { libc::close(fd) };
-                return Err(self.output_root_escape(staged_sidecar));
-            }
-            let source = CString::new(format!("/proc/self/fd/{fd}")).map_err(|_| {
-                // SAFETY: fd is owned here.
-                unsafe { libc::close(fd) };
-                self.output_root_escape(staged_sidecar)
-            })?;
+            let identity = Self::stat_identity(&meta);
+            let source = CString::new(format!("/proc/self/fd/{fd}"))
+                .map_err(|_| self.output_root_escape(staged_sidecar))?;
             // SAFETY: dirfd is pinned and validated; source names the open
             // inode; final_name is valid. The link is no-replace.
             let linked = unsafe {
@@ -2077,8 +2117,6 @@ impl Processor {
                     libc::AT_SYMLINK_FOLLOW,
                 )
             };
-            // SAFETY: fd is owned here and closed on every path below.
-            unsafe { libc::close(fd) };
             if linked != 0 {
                 let error = std::io::Error::last_os_error();
                 return Err(if error.kind() == std::io::ErrorKind::AlreadyExists {
@@ -2090,29 +2128,47 @@ impl Processor {
                     ))
                 });
             }
-            // SAFETY: dirfd is pinned and validated; the stage is consumed
-            // as a link, never followed. A cleanup failure after the link
-            // won is a distinct, truthful outcome: the final sidecar
-            // exists and is this run's sidecar.
-            let unlink_target = {
-                #[cfg(test)]
-                {
-                    if let Some(name) = &self.sidecar_unlink_name {
-                        CString::new(name.as_bytes()).unwrap()
-                    } else {
+            // The link won: consume the staging entry only while it still
+            // names this run's inode. A replacement installed between the
+            // link and this unlink is not ours and is left in place.
+            // SAFETY: dirfd is pinned and validated; staged_name is valid;
+            // the entry is stat'ed as a link, never followed.
+            let mut staged_meta = unsafe { std::mem::zeroed() };
+            let staged_is_ours = unsafe {
+                libc::fstatat(
+                    dirfd.0,
+                    staged_name.as_ptr(),
+                    &mut staged_meta,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } == 0
+                && staged_meta.st_mode & libc::S_IFMT == libc::S_IFREG
+                && Self::stat_identity(&staged_meta) == identity;
+            if staged_is_ours {
+                // SAFETY: dirfd is pinned and validated; the stage is
+                // consumed as a link, never followed. A cleanup failure
+                // after the link won is a distinct, truthful outcome: the
+                // final sidecar exists and is this run's sidecar.
+                let unlink_target = {
+                    #[cfg(test)]
+                    {
+                        if let Some(name) = &self.sidecar_unlink_name {
+                            CString::new(name.as_bytes()).unwrap()
+                        } else {
+                            staged_name.clone()
+                        }
+                    }
+                    #[cfg(not(test))]
+                    {
                         staged_name.clone()
                     }
+                };
+                if unsafe { libc::unlinkat(dirfd.0, unlink_target.as_ptr(), 0) } != 0 {
+                    return Err(ProcessorError::SidecarPublishedCleanupFailed {
+                        path: final_sidecar.to_path_buf(),
+                        source: std::io::Error::last_os_error(),
+                    });
                 }
-                #[cfg(not(test))]
-                {
-                    staged_name.clone()
-                }
-            };
-            if unsafe { libc::unlinkat(dirfd.0, unlink_target.as_ptr(), 0) } != 0 {
-                return Err(ProcessorError::SidecarPublishedCleanupFailed {
-                    path: final_sidecar.to_path_buf(),
-                    source: std::io::Error::last_os_error(),
-                });
             }
             Ok(())
         })();
@@ -2122,21 +2178,29 @@ impl Processor {
         // symlink, or anything else) is left untouched: it is not ours to
         // remove, and deleting it would consume another writer's file.
         if result.is_err() {
-            self.discard_staged_sidecar_if_ours(final_sidecar, staged_sidecar, identity, &root);
+            self.discard_staged_sidecar_if_ours(final_sidecar, staged_sidecar, staged_file, &root);
         }
         result
     }
 
     /// Remove the staging sidecar entry when it still names the inode
     /// this run created; leave a foreign entry in place.
+    #[cfg(unix)]
     fn discard_staged_sidecar_if_ours(
         &self,
         final_sidecar: &std::path::Path,
         staged_sidecar: &std::path::Path,
-        identity: (u64, u64),
+        staged_file: &std::fs::File,
         root: &std::path::Path,
     ) {
+        use std::os::fd::AsRawFd;
         use std::os::unix::ffi::OsStrExt;
+        let fd = staged_file.as_raw_fd();
+        let mut fd_meta = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut fd_meta) } != 0 {
+            return;
+        }
+        let identity = Self::stat_identity(&fd_meta);
         let dirfd = match pin_parent_in_root(final_sidecar, root) {
             Some(dirfd) => dirfd,
             None => return,
@@ -2157,7 +2221,7 @@ impl Processor {
             // The entry is gone; nothing to clean up.
             return;
         }
-        if (meta.st_dev, meta.st_ino) != identity {
+        if Self::stat_identity(&meta) != identity {
             // A foreign entry occupies the staging name: it is not ours.
             return;
         }
@@ -2311,7 +2375,7 @@ impl Processor {
                 unsafe { libc::close(fd) };
                 return Err(TaggingError::Io(std::io::Error::last_os_error()));
             }
-            let identity = (meta.st_dev, meta.st_ino);
+            let identity = Self::stat_identity(&meta);
             Ok((unsafe { std::fs::File::from_raw_fd(fd) }, identity))
         }
         #[cfg(not(unix))]
@@ -2355,7 +2419,14 @@ impl Processor {
     /// `unlinkat` link against the pinned parent, never a follow.
     #[cfg(unix)]
     fn remove_own_staged_leftover(&self, dirfd: &DirFd, name: &std::ffi::CString) -> bool {
-        let ours = format!(".m4b-merge-staging-{}-", std::process::id());
+        // Only an entry carrying THIS run's full staging base (pid, nanos,
+        // run counter) is a killed-attempt leftover of this same run; a
+        // concurrent run in this process has a different base and is a
+        // collision, never an "own" entry.
+        #[cfg(test)]
+        let ours = self.staging_name.clone().unwrap_or_else(|| self.staging_base.clone());
+        #[cfg(not(test))]
+        let ours = self.staging_base.clone();
         // SAFETY: `name` is a valid NUL-terminated byte buffer.
         let stem = match unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_str().ok() {
             Some(stem) if stem.starts_with(&ours) => stem,
@@ -2372,11 +2443,15 @@ impl Processor {
         &self,
         source: &std::path::Path,
         destination: &std::path::Path,
-    ) -> crate::tagging::Result<(u64, u64)> {
+    ) -> crate::tagging::Result<std::fs::File> {
+        use std::io::Write;
         let mut source = std::fs::File::open(source)?;
-        let (mut output, identity) = self.create_job_sidecar(destination)?;
+        let (mut output, _identity) = self.create_job_sidecar(destination)?;
         std::io::copy(&mut source, &mut output)?;
-        Ok(identity)
+        // The write is complete through the descriptor; the caller keeps
+        // the file alive until publication.
+        output.flush()?;
+        Ok(output)
     }
 
     /// Remove a policy-required stale sidecar with failure propagation.
@@ -3753,18 +3828,17 @@ mod tests {
         // deleted, and our staged temp is discarded.
         let temp = TempDir::new().unwrap();
         let (processor, _root, output, _) = pub_setup(&temp);
-        use std::os::unix::fs::MetadataExt;
         let final_sidecar = output.with_extension("chapters.txt");
         let staged_sidecar = processor.staged_sidecar_path(&output, "chapters.txt");
-        std::fs::write(&staged_sidecar, b"our staged chapters").unwrap();
+        let (staged_file, _identity) = processor.create_job_sidecar(&staged_sidecar).unwrap();
+        let mut staged_file = staged_file;
+        staged_file.write_all(b"our staged chapters").unwrap();
         let external = temp.path().join("external.txt");
         std::fs::write(&external, b"external untouched").unwrap();
         std::os::unix::fs::symlink(&external, &final_sidecar).unwrap();
 
-        let staged = std::fs::metadata(&staged_sidecar).unwrap();
-        let identity = (staged.dev(), staged.ino());
         let error = processor
-            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, identity)
+            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, &staged_file)
             .unwrap_err();
         assert!(error.to_string().contains("refusing to overwrite"), "{error}");
         // The foreign entry is untouched and is still the symlink.
@@ -3811,38 +3885,40 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn sidecar_publication_never_follows_a_swapped_stage() {
-        // The staged sidecar is published by the inode this run created:
-        // a stage swapped for a symlink to an external file between the
-        // sidecar write and its publication is refused (opened with
-        // O_NOFOLLOW) — the external file is never read, replaced, or
-        // published.
+    fn sidecar_publication_ignores_a_swapped_stage() {
+        // The staged sidecar is published through the descriptor this run
+        // created: a stage swapped for a symlink to an external file
+        // between the sidecar write and its publication cannot redirect
+        // the link — the live inode is linked, and the external file is
+        // never read, replaced, or published.
         let temp = TempDir::new().unwrap();
         let (processor, _root, output, _) = pub_setup(&temp);
         let final_sidecar = output.with_extension("chapters.txt");
         let staged_sidecar = processor.staged_sidecar_path(&output, "chapters.txt");
-        std::fs::write(&staged_sidecar, b"our staged chapters").unwrap();
+        // The descriptor is what publication links: created through the
+        // exclusive create, kept open through the swap.
+        let (staged_file, _identity) = processor.create_job_sidecar(&staged_sidecar).unwrap();
+        let mut staged_file = staged_file;
+        staged_file.write_all(b"our staged chapters").unwrap();
         let external = temp.path().join("external.txt");
         std::fs::write(&external, b"external untouched").unwrap();
         let stashed = staged_sidecar.with_extension("stashed.txt");
-        use std::os::unix::fs::MetadataExt;
-        // The identity is captured when this run created the sidecar,
-        // before the swap.
-        let staged = std::fs::metadata(&staged_sidecar).unwrap();
-        let identity = (staged.dev(), staged.ino());
         std::fs::rename(&staged_sidecar, &stashed).unwrap();
         std::os::unix::fs::symlink(&external, &staged_sidecar).unwrap();
 
-        let error = processor
-            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, identity)
-            .unwrap_err();
-        assert!(error.to_string().contains("output root"), "{error}");
-        assert!(!final_sidecar.exists(), "no sidecar is published at the final name");
-        assert!(
-            std::fs::symlink_metadata(&staged_sidecar).unwrap().file_type().is_symlink(),
-            "a foreign entry at the staging name is never consumed"
+        // The link source is the live inode, not the staging pathname:
+        // the swap cannot redirect the publication.
+        processor.publish_staged_sidecar(&final_sidecar, &staged_sidecar, &staged_file).unwrap();
+        assert_eq!(
+            std::fs::read(&final_sidecar).unwrap(),
+            b"our staged chapters",
+            "the live inode is published, not the swap's target"
         );
         assert_eq!(std::fs::read(&external).unwrap(), b"external untouched");
+        assert!(
+            std::fs::symlink_metadata(&staged_sidecar).unwrap().file_type().is_symlink(),
+            "a foreign entry at the staging name is left in place, not consumed"
+        );
         assert!(stashed.exists(), "our staged content is retained, not consumed");
     }
 
@@ -3857,20 +3933,17 @@ mod tests {
         let (processor, _root, output, _) = pub_setup(&temp);
         let final_sidecar = output.with_extension("chapters.txt");
         let staged_sidecar = processor.staged_sidecar_path(&output, "chapters.txt");
-        std::fs::write(&staged_sidecar, b"our staged chapters").unwrap();
+        let (staged_file, _identity) = processor.create_job_sidecar(&staged_sidecar).unwrap();
+        let mut staged_file = staged_file;
+        staged_file.write_all(b"our staged chapters").unwrap();
         use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::fs::MetadataExt;
-        // The identity is captured when this run created the sidecar,
-        // before the swap.
-        let staged = std::fs::metadata(&staged_sidecar).unwrap();
-        let identity = (staged.dev(), staged.ino());
         // A concurrent writer swaps the sidecar for a named pipe.
         std::fs::remove_file(&staged_sidecar).unwrap();
         let name = std::ffi::CString::new(staged_sidecar.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
 
         let error = processor
-            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, identity)
+            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, &staged_file)
             .unwrap_err();
         assert!(!final_sidecar.exists(), "no sidecar is published at the final name");
         use std::os::unix::fs::FileTypeExt;
@@ -3888,15 +3961,14 @@ mod tests {
         // this run created the sidecar: a concurrent replacement with
         // ANOTHER regular file (a symlink, FIFO, and type change are all
         // refused by the open) must not be linked as final.
-        use std::os::unix::fs::MetadataExt;
 
         let temp = TempDir::new().unwrap();
         let (processor, _root, output, _) = pub_setup(&temp);
         let final_sidecar = output.with_extension("chapters.txt");
         let staged_sidecar = processor.staged_sidecar_path(&output, "chapters.txt");
-        std::fs::write(&staged_sidecar, b"our staged chapters").unwrap();
-        let staged = std::fs::metadata(&staged_sidecar).unwrap();
-        let identity = (staged.dev(), staged.ino());
+        let (staged_file, _identity) = processor.create_job_sidecar(&staged_sidecar).unwrap();
+        let mut staged_file = staged_file;
+        staged_file.write_all(b"our staged chapters").unwrap();
 
         // A concurrent writer swaps the staging entry for a fresh
         // regular file (a rename guarantees a different inode; remove +
@@ -3904,15 +3976,9 @@ mod tests {
         let replacement_file = staged_sidecar.with_extension("replacement");
         std::fs::write(&replacement_file, b"replacement chapters").unwrap();
         std::fs::rename(&replacement_file, &staged_sidecar).unwrap();
-        let replacement = std::fs::metadata(&staged_sidecar).unwrap();
-        assert_ne!(
-            (replacement.dev(), replacement.ino()),
-            identity,
-            "the replacement must be a different inode"
-        );
 
         let error = processor
-            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, identity)
+            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, &staged_file)
             .unwrap_err();
         assert!(!final_sidecar.exists(), "no replacement is published as final");
         assert_eq!(
@@ -3925,12 +3991,86 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn sidecar_publication_cannot_be_defeated_by_unlink_recreate() {
+        // A concurrent writer unlinks the staging entry and creates a
+        // fresh regular file at the same name: on this filesystem the
+        // fresh file can carry the recycled (dev, ino) of the unlinked
+        // inode, defeating any check against a captured identity tuple.
+        // Publication links the live descriptor, so the replacement is
+        // never published and never consumed.
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().unwrap();
+        let (processor, _root, output, _) = pub_setup(&temp);
+        let final_sidecar = output.with_extension("chapters.txt");
+        let staged_sidecar = processor.staged_sidecar_path(&output, "chapters.txt");
+        let (staged_file, _identity) = processor.create_job_sidecar(&staged_sidecar).unwrap();
+        let mut staged_file = staged_file;
+        staged_file.write_all(b"our staged chapters").unwrap();
+
+        // The unlink frees the inode; the recreate may recycle it.
+        std::fs::remove_file(&staged_sidecar).unwrap();
+        std::fs::write(&staged_sidecar, b"replacement chapters").unwrap();
+
+        let error = processor
+            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, &staged_file)
+            .unwrap_err();
+        assert!(!final_sidecar.exists(), "no replacement is published as final");
+        assert_eq!(
+            std::fs::read(&staged_sidecar).unwrap(),
+            b"replacement chapters",
+            "the replacement is left in place, not consumed"
+        );
+        let _ = error;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_process_runs_cannot_remove_each_others_staged_sidecars() {
+        // Two concurrent runs in the SAME process share the pid: the old
+        // pid-prefix ownership rule would let one run's own-leftover
+        // removal delete the other's active staged sidecar. Ownership is
+        // now the full per-run staging base (pid, nanos, run counter), so
+        // the other run's entry is a collision, left untouched.
+        let temp = TempDir::new().unwrap();
+        let (processor, _root, output, _) = pub_setup(&temp);
+        // A different run's base: same pid (same process), a different
+        // nanos/counter pair, so no prefix relationship to this run's
+        // base.
+        let foreign_base = format!(".m4b-merge-staging-{}-1-1", std::process::id());
+        assert_ne!(foreign_base, processor.staging_base);
+        let foreign = output.with_file_name(format!("{foreign_base}.chapters.txt"));
+        std::fs::write(&foreign, b"other run's staged sidecar").unwrap();
+        let foreign_len = std::fs::metadata(&foreign).unwrap().len();
+
+        let error = processor.create_job_sidecar(&foreign).unwrap_err();
+        let _ = error;
+        assert!(foreign.is_file(), "another run's staged sidecar is left in place");
+        assert_eq!(
+            std::fs::metadata(&foreign).unwrap().len(),
+            foreign_len,
+            "the foreign entry is untouched"
+        );
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"other run's staged sidecar");
+
+        // The run's own leftover (full own base) is still removable for
+        // the single retry.
+        let own = output.with_file_name(format!("{}.chapters.txt", processor.staging_base));
+        std::fs::write(&own, b"own leftover").unwrap();
+        let (file, _identity) = processor.create_job_sidecar(&own).unwrap();
+        assert_eq!(std::fs::read(&own).unwrap(), b"");
+        drop(file);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn staged_sidecar_collision_is_not_removed() {
-        // An occupied staging name from another job (a different process's
-        // PID in the name) is a collision: the exclusive create fails, the
-        // foreign entry is never removed, replaced, read, or renamed. This
-        // run's own leftover (same PID marker) is the only name removed,
-        // and only to make the single retry possible.
+        // An occupied staging name from another run (a different per-run
+        // staging base in the name) is a collision: the exclusive create
+        // fails, the foreign entry is never removed, replaced, read, or
+        // renamed. This run's own leftover (full own base) is the only
+        // name removed, and only to make the single retry possible.
         use std::os::unix::fs::MetadataExt;
 
         let temp = TempDir::new().unwrap();
@@ -3979,21 +4119,20 @@ mod tests {
         // published sidecar, and the failure-artifact mapping carries it
         // into the reported artifacts next to the media, instead of
         // omitting a file left on disk.
-        use std::os::unix::fs::MetadataExt;
 
         let temp = TempDir::new().unwrap();
         let (mut processor, _root, output, _) = pub_setup(&temp);
         let final_sidecar = output.with_extension("chapters.txt");
         let staged_sidecar = processor.staged_sidecar_path(&output, "chapters.txt");
-        std::fs::write(&staged_sidecar, b"chapters").unwrap();
-        let staged_meta = std::fs::metadata(&staged_sidecar).unwrap();
-        let identity = (staged_meta.dev(), staged_meta.ino());
+        let (staged_file, _identity) = processor.create_job_sidecar(&staged_sidecar).unwrap();
+        let mut staged_file = staged_file;
+        staged_file.write_all(b"chapters").unwrap();
         // After the no-replace link wins, the staging removal must fail:
         // the test hook names an absent entry for the post-link unlink.
         processor.sidecar_unlink_name = Some(".m4b-merge-staging-absent".into());
 
         let error = processor
-            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, identity)
+            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, &staged_file)
             .unwrap_err();
 
         let ProcessorError::SidecarPublishedCleanupFailed { path, source } = &error else {
@@ -4136,14 +4275,49 @@ mod tests {
         let run = processor.run(inputs, &handler).await.unwrap();
         // The merged inode is published (writes stayed on it), the
         // external file is byte-for-byte untouched, and the swapped
-        // staging name is consumed, not the final name's content.
+        // staging name is left in place: it no longer names the reserved
+        // inode, so cleanup refuses to consume a foreign entry.
         assert!(run.complete, "{}", run.detail);
         assert_eq!(std::fs::read(&external).unwrap(), original, "no redirected write");
-        assert!(!stage.exists(), "the swapped staging name is consumed");
+        assert!(
+            std::fs::symlink_metadata(&stage).unwrap().file_type().is_symlink(),
+            "a foreign entry at the staging name is left in place, not consumed"
+        );
         let tag = mp4ameta::Tag::read_from_path(&output).unwrap();
         assert!(tag.info.duration > std::time::Duration::ZERO);
         let sidecar = output.with_extension("chapters.txt");
         assert!(sidecar.is_file(), "the sidecar was published");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn post_link_staging_swap_is_left_in_place() {
+        // A replacement installed at the staging name AFTER the no-replace
+        // media link won is not the reserved inode: the identity-gated
+        // cleanup leaves it in place (a warning, not a failure — the
+        // publication already won) and never consumes it.
+        let temp = TempDir::new().unwrap();
+        let (mut processor, _root, output, _) = pub_setup(&temp);
+        processor.config.completed_directory = None;
+        let stage_name = Processor::job_stage_name();
+        processor.staging_name = Some(stage_name.clone());
+        let stage = output.with_file_name(format!("{stage_name}.m4b"));
+        // The hook swaps the staging entry for a symlink to an external
+        // file between the no-replace link and the gated cleanup unlink.
+        let external = create_test_m4b(&temp.path().join("External"), 5);
+        let original = std::fs::read(&external).unwrap();
+        processor.media_stage_swap = Some(external.clone());
+        let inputs = processor.job.as_ref().unwrap().inputs.clone();
+
+        let run = processor.run(inputs, &NoOpProgressHandler).await.unwrap();
+        assert!(run.complete, "{}", run.detail);
+        assert_eq!(std::fs::read(&external).unwrap(), original, "no redirected write");
+        assert!(
+            std::fs::symlink_metadata(&stage).unwrap().file_type().is_symlink(),
+            "the foreign entry at the staging name is left in place, not consumed"
+        );
+        let tag = mp4ameta::Tag::read_from_path(&output).unwrap();
+        assert!(tag.info.duration > std::time::Duration::ZERO);
     }
 
     #[cfg(unix)]
