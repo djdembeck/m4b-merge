@@ -644,15 +644,15 @@ pub(crate) fn redact_machine_error(
         .collect();
     roots.sort_by_key(|p| std::cmp::Reverse(p.as_os_str().len()));
     roots.dedup();
-    let mut redacted = message.to_string();
+    // Replace each root only as a whole path component (never as a
+    // substring of a longer word): a root such as "out" must not corrupt
+    // the word "output" or an existing "output_root" token into
+    // "output_rootput_root". The token is protected up front so a
+    // previously redacted group error stays stable through a second pass
+    // when JobResult is built.
+    let mut redacted = message.replace("output_root", SENTINEL);
     for root in roots {
-        // Previously redacted group errors can pass through this helper
-        // again when JobResult is built; a raw relative root such as "out"
-        // must not turn their token into "output_rootput_root".
-        if !root.is_absolute() {
-            redacted = redacted.replace("output_root", SENTINEL);
-        }
-        redacted = redacted.replace(root.to_string_lossy().as_ref(), SENTINEL);
+        redacted = replace_whole_component(&redacted, &root.to_string_lossy(), SENTINEL);
     }
     for input in inputs {
         if input.is_absolute() {
@@ -666,6 +666,35 @@ pub(crate) fn redact_machine_error(
         .expect("static absolute-path redaction regex")
     });
     ABSOLUTE_PATH.replace_all(&redacted, "${prefix}[redacted]").replace(SENTINEL, "output_root")
+}
+
+/// Replace `needle` in `haystack` only where it stands as a whole path
+/// component: a following `/` (or end of string) and a preceding boundary
+/// (start, whitespace, quote, or path/word separator). A needle that is a
+/// substring of a longer word — "out" inside "output" — is left alone, so
+/// redacting a relative root can never corrupt surrounding text.
+fn replace_whole_component(haystack: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() {
+        return haystack.to_string();
+    }
+    let is_boundary_before = |c: char| !c.is_alphanumeric() && c != '_';
+    let mut out = String::with_capacity(haystack.len());
+    let mut rest = haystack;
+    while let Some(idx) = rest.find(needle) {
+        let before_ok = idx == 0 || rest[..idx].chars().next_back().is_some_and(is_boundary_before);
+        let after = &rest[idx + needle.len()..];
+        let after_ok = after.is_empty() || after.starts_with('/');
+        if before_ok && after_ok {
+            out.push_str(&rest[..idx]);
+            out.push_str(replacement);
+            rest = after;
+        } else {
+            out.push_str(&rest[..idx + needle.len()]);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Machine-readable execution result: every produced output and sidecar,
@@ -926,6 +955,31 @@ fn apply_overrides(meta: &mut BookMetadata, overrides: Option<&OverrideFields>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redact_machine_error_protects_the_root_token_from_relative_roots() {
+        // A relative output root ("out") is a substring of the "output_root"
+        // token, so replacing the root first would corrupt an existing token
+        // into "output_rootput_root". The token must survive redaction
+        // intact, on both the first pass and a re-pass of an already
+        // redacted message.
+        let msg = "Published output_root but a sidecar publication failed: \
+                   refusing to overwrite: out/A/T.chapters.txt";
+        let once = redact_machine_error(msg, Some(std::path::Path::new("out")), None, &[]);
+        assert!(once.contains("output_root"), "{once}");
+        assert!(!once.contains("output_rootput_root"), "{once}");
+        assert!(once.contains("refusing to overwrite: output_root/A/T.chapters.txt"), "{once}");
+        let twice = redact_machine_error(&once, Some(std::path::Path::new("out")), None, &[]);
+        assert_eq!(twice, once, "a re-redacted message is stable");
+        // The relative root must not corrupt the word "output" itself.
+        let word = redact_machine_error(
+            "output file written to out/A/T.m4b",
+            Some(std::path::Path::new("out")),
+            None,
+            &[],
+        );
+        assert!(word.starts_with("output file"), "{word}");
+    }
 
     #[test]
     fn parses_valid_supplied_job() {
