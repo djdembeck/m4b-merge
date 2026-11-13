@@ -669,21 +669,26 @@ pub(crate) fn redact_machine_error(
 }
 
 /// Replace `needle` in `haystack` only where it stands as a whole path
-/// component: a following `/` (or end of string) and a preceding boundary
-/// (start, whitespace, quote, or path/word separator). A needle that is a
-/// substring of a longer word — "out" inside "output" — is left alone, so
-/// redacting a relative root can never corrupt surrounding text.
+/// component: the character after the match must not continue a word or
+/// filename (`alphanumeric`, `_`, `.` — so "out" inside "output.m4b" is
+/// left alone), and the character before it must not be part of a word
+/// (`alphanumeric`/`_`). This redacts the root everywhere a diagnostic can
+/// mention it — followed by a separator, a path (Unix `/` or Windows `\`),
+/// punctuation, quotes, or end of message — without corrupting surrounding
+/// text.
 fn replace_whole_component(haystack: &str, needle: &str, replacement: &str) -> String {
     if needle.is_empty() {
         return haystack.to_string();
     }
-    let is_boundary_before = |c: char| !c.is_alphanumeric() && c != '_';
+    let continues_word_after = |c: char| c.is_alphanumeric() || c == '_' || c == '.';
+    let in_word_before = |c: char| c.is_alphanumeric() || c == '_';
     let mut out = String::with_capacity(haystack.len());
     let mut rest = haystack;
     while let Some(idx) = rest.find(needle) {
-        let before_ok = idx == 0 || rest[..idx].chars().next_back().is_some_and(is_boundary_before);
+        let before_ok =
+            idx == 0 || rest[..idx].chars().next_back().is_some_and(|c| !in_word_before(c));
         let after = &rest[idx + needle.len()..];
-        let after_ok = after.is_empty() || after.starts_with('/');
+        let after_ok = after.chars().next().is_none_or(|c| !continues_word_after(c));
         if before_ok && after_ok {
             out.push_str(&rest[..idx]);
             out.push_str(replacement);
@@ -979,6 +984,23 @@ mod tests {
             &[],
         );
         assert!(word.starts_with("output file"), "{word}");
+        assert!(word.contains("to output_root/A/T.m4b"), "{word}");
+        // A root followed by quotes or punctuation must still be redacted,
+        // and a Windows-style relative path must be redacted too.
+        let quoted = redact_machine_error(
+            "cannot open 'private-output'",
+            Some(std::path::Path::new("private-output")),
+            None,
+            &[],
+        );
+        assert!(quoted.contains("'output_root'"), "{quoted}");
+        let windows = redact_machine_error(
+            "failed at private-output\\Author\\Title.m4b",
+            Some(std::path::Path::new("private-output")),
+            None,
+            &[],
+        );
+        assert!(windows.contains("output_root\\Author"), "{windows}");
     }
 
     #[test]

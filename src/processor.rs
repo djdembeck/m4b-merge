@@ -1357,14 +1357,17 @@ impl Processor {
         // name. Staged sidecars are exposed at their final names only after
         // the media publication has won, so a job that loses publication
         // never writes, overwrites, or deletes a winner's sidecar.
-        // On any failure after staging, discard every staged sidecar whose
-        // final name was not claimed, so a failed run leaves no hidden
-        // staging entry behind.
+        // On any failure after staging, discard every staged sidecar in the
+        // supplied slice, so a failed run leaves no hidden staging entry
+        // behind. The presence of a final name does not mean THIS run
+        // published it (a concurrent winner may own it), so no existence
+        // guard: the slice is by construction our unpublished sidecars —
+        // all of them on media loss, the tail from the failure point onward
+        // on a sidecar loss — while already-published final names are never
+        // in the slice.
         let discard_unpublished = |staged: &[StagedSidecar]| {
             for sidecar in staged {
-                if !sidecar.final_path.exists() {
-                    self.discard_output(&sidecar.staged_path);
-                }
+                self.discard_output(&sidecar.staged_path);
             }
         };
         let publication_root = self
@@ -1920,16 +1923,18 @@ impl Processor {
             )
             .map_err(|_| self.output_root_escape(final_sidecar))?;
             // The sidecar to publish is the inode this run created and
-            // wrote: open it without following a replacement symlink, and
-            // name it through the descriptor. A swap installed between the
-            // open and the link cannot redirect the publication, because
-            // the link source is the open inode, not the staging pathname.
+            // wrote: open it without following a replacement symlink and
+            // non-blocking (a swap-in FIFO would otherwise block the open
+            // forever), and name it through the descriptor. A swap
+            // installed between the open and the link cannot redirect the
+            // publication, because the link source is the open inode, not
+            // the staging pathname.
             // SAFETY: dirfd is pinned and validated; staged_name is valid.
             let fd = unsafe {
                 libc::openat(
                     dirfd.0,
                     staged_name.as_ptr(),
-                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
                 )
             };
             if fd < 0 {
@@ -3601,6 +3606,33 @@ mod tests {
         assert_eq!(std::fs::read(&external).unwrap(), b"external untouched");
         assert!(!staged_sidecar.exists(), "the staged name is cleaned up");
         assert!(stashed.exists(), "our staged content is retained, not consumed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_publication_does_not_block_on_a_swapped_fifo() {
+        // O_NOFOLLOW rejects symlinks, but opening a FIFO with a blocking
+        // O_RDONLY would hang the run until a writer appears. A stage
+        // swapped for a named pipe must be refused by the open itself
+        // (non-blocking) or the descriptor type check, never by blocking.
+        let temp = TempDir::new().unwrap();
+        let (processor, _root, output, _) = pub_setup(&temp);
+        let final_sidecar = output.with_extension("chapters.txt");
+        let staged_sidecar = processor.staged_sidecar_path(&output, "chapters.txt");
+        std::fs::write(&staged_sidecar, b"our staged chapters").unwrap();
+        std::fs::remove_file(&staged_sidecar).unwrap();
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(staged_sidecar.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+
+        let error = processor.publish_staged_sidecar(&final_sidecar, &staged_sidecar).unwrap_err();
+        assert!(!final_sidecar.exists(), "no sidecar is published at the final name");
+        use std::os::unix::fs::FileTypeExt;
+        assert!(
+            std::fs::symlink_metadata(&staged_sidecar).unwrap().file_type().is_fifo(),
+            "the foreign FIFO is left in place, not consumed"
+        );
+        let _ = error;
     }
 
     #[cfg(unix)]
