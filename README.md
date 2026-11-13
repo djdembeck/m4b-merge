@@ -271,9 +271,13 @@ the run with a diagnosed cleanup error, while the already-published media is
 retained and reported in the machine result, so a surviving entry never
 contradicts the requested policy.
 
-The merge writes an exclusively created hidden staging sibling. **On
-Linux**, the reserved descriptor stays open through every step: native
-copies write directly to it, FFmpeg inherits it and opens
+The merge writes an exclusively created hidden staging sibling. The
+destination parent is re-pinned after the merge-progress callback, and the
+stage is created with `openat` relative to that pinned descriptor: a parent
+swapped for a symlink to an external directory in that window cannot
+redirect the creation, so the stage always lands inside the output root.
+**On Linux**, the reserved descriptor then stays open through every step:
+native copies write directly to it, FFmpeg inherits it and opens
 `/proc/self/fd/N` with an explicit MP4 muxer, and every post-merge tag,
 cover, and chapter mutation is bound to the same descriptor — a replacement
 installed at the staging pathname after the post-merge verification (even
@@ -297,16 +301,24 @@ retarget of a symlinked root.
 
 Chapter and cover sidecars are staged as hidden siblings of the media and
 are exposed at their final sibling names only after the media publication
-has won, with `O_EXCL`-style no-replace link creation through the pinned
-parent — a job that loses the media race never writes, overwrites, or
-deletes a winner's sidecar, and its staged sidecars are discarded with its
-staging media. If a sidecar publication fails, the run is diagnosed with a
-collision, the foreign entry is left untouched, and the already-published
-media is retained. (Job execution is Linux-only, so these paths are the
-only ones exercised; the library's non-Unix fallbacks remain for direct
-`Processor` consumers outside job mode.) This protects the job's staging
-area and final sibling names only; publishing into another shared
-destination still needs the caller's own race-safe publication.
+has won. Publication opens the staged sidecar without following a
+replacement symlink and links that open inode at the final name no-replace
+through the pinned parent: a stage swapped for a symlink to an external
+file is refused (the external file is never read, replaced, or
+published), and a foreign entry at the final name — installed by a
+concurrent winner, or any other actor — is never read, replaced,
+followed, or deleted. A job that loses the media race never writes,
+overwrites, or deletes a winner's sidecar; unpublished staged sidecars are
+discarded with the staging media, while the media and every sidecar
+already published are retained and reported in the machine result.
+Policy-required removal of a stale final sidecar (chapter `clear`, cover
+`clear`, cover `preserve` without a source sidecar) happens only after the
+media publication has won, so a losing job can never remove a winner's
+sidecar. (Job execution is Linux-only, so these paths are the only ones
+exercised; the library's non-Unix fallbacks remain for direct `Processor`
+consumers outside job mode.) This protects the job's staging area and
+final sibling names only; publishing into another shared destination still
+needs the caller's own race-safe publication.
 
 ### Verify Environment
 

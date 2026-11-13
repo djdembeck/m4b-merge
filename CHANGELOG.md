@@ -18,10 +18,13 @@ All notable changes to this project will be documented in this file. See [standa
 - Engine-side no-clobber for `--job` runs: no name is reserved at the final
   output path. An advisory precheck reports a taken final name early and
   validates the created parents, and the merge writes a hidden staging
-  sibling inside the re-validated parent; on Linux every media mutation
-  (merge, tag, cover, chapter embedding) is bound to the reserved
-  descriptor, so a replacement installed at the staging pathname after the
-  post-merge verification cannot redirect a write at an external file —
+  sibling, created with `openat` relative to the re-validated (pinned)
+  parent descriptor, so a parent swapped for a symlink to an external
+  directory in that window cannot redirect the creation outside the root;
+  on Linux every media mutation (merge, tag, cover, chapter embedding) is
+  bound to the reserved descriptor, so a replacement installed at the
+  staging pathname after the post-merge verification cannot redirect a
+  write at an external file —
   descriptor-bound merging requires Linux procfs, so job execution is
   refused on other platforms. The final name appears only through an
   atomic no-replace publication (procfs-bound `linkat`, or an `O_EXCL`
@@ -30,15 +33,21 @@ All notable changes to this project will be documented in this file. See [standa
   final entry, including a late arrival, is diagnosed as a collision
   without being read, renamed, or overwritten. A collision leaves the
   existing file untouched and retains the completed stage as a recoverable
-  artifact; a failed run removes only its own staging entries; rejected
+  artifact; a failed run removes only its own staging entries (stage and
+  unpublished staged sidecars); rejected
   outputs are discarded root-aware and pinned, so cleanup can never delete
   a file outside the root; a staging entry swapped for a symlink is
   refused at verification and removed as a link (never followed), so an
   external target is never published. Sidecars are staged as hidden
   siblings and exposed at their final names only after the media
-  publication has won: a losing job never overwrites, deletes, or
-  publishes a winner's sidecars, and a sidecar collision is diagnosed
-  without touching the foreign entry, retaining the published media.
+  publication has won: publication opens the staged sidecar without
+  following a replacement symlink and links that open inode at the final
+  name no-replace, so a stage swapped for a symlink to an external file is
+  refused and a sidecar collision is diagnosed without touching the
+  foreign entry; when publication or a required cleanup fails after the
+  media won, the published media and every already-published sidecar are
+  retained and reported in the machine result. A losing job never
+  overwrites, deletes, or publishes a winner's sidecars.
   Policy-required stale sidecar deletions apply only after the media
   publication won: an unremovable `chapters.txt`/`cover.txt` fails the run
   with a diagnosed cleanup error while the published media is retained,
