@@ -255,13 +255,18 @@ multi-group library consumers of `Processor::run`.
 
 #### No-clobber
 
-Job execution claims the exact resolved output name with `O_CREAT|O_EXCL`
-before any write: no silent suffixing or overwrite. A pre-existing file or
-directory fails with a diagnosed collision, untouched. Parents are validated
-against the canonical output root at claim time and before merging. A failed
-merge removes its owned placeholder and staging entry, never the source files.
-Cleanup pins and validates the parent, then uses `unlinkat`, so a swapped
-symlink is removed as a link rather than followed outside the root.
+Job execution reserves no name at the final output path: an advisory
+precheck reports an already-taken final name early and validates the created
+parent directories against the canonical output root, and the parent is
+re-validated immediately before the merge. The binding guarantee is the
+atomic no-replace publication below — no silent suffixing, rename, or
+overwrite, at any point. A failed merge removes its staging entry, never the
+source files. Cleanup pins and validates the parent, then uses `unlinkat`,
+so a swapped symlink is removed as a link rather than followed outside the
+root. Policy-required stale sidecar deletions (chapter/cover `clear`,
+preserve-without-source-sidecar) are fallible: a sidecar that cannot be
+removed aborts the run before publication and source moves, so a surviving
+entry never contradicts the requested policy.
 
 The merge writes an exclusively created hidden staging sibling. **On Linux**,
 the reserved descriptor stays open through merge verification: native copies
@@ -277,9 +282,10 @@ Subsequent tag, cover, and chapter mutations operate on the verified stage.
 
 After all mutations succeed, publication pins and validates the destination
 parent and creates the final name with no-replace `linkat`, then unlinks the
-staging entry. Only the still-owned placeholder is released: a foreign file
-or symlink at the final name, including a late arrival, fails with a diagnosed
-collision instead of being overwritten. Linux binds the link source through
+staging entry. The final name is never inspected, removed, or released before
+that link: a foreign file or symlink at the final name, including a late
+arrival, fails with a diagnosed collision instead of being read, renamed, or
+overwritten. Linux binds the link source through
 an open, no-follow staging descriptor; other Unix platforms link its
 just-validated name within the pinned parent, retaining a source-entry swap
 window. If publication fails, valid staged media is retained and listed in

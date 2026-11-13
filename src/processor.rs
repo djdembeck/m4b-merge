@@ -311,27 +311,6 @@ fn pin_parent_in_root(path: &std::path::Path, root: &std::path::Path) -> Option<
     Some(dirfd)
 }
 
-/// Compare the no-follow entry identity with the still-open claim.
-#[cfg(unix)]
-fn entry_matches_file(
-    dirfd: std::os::fd::RawFd,
-    name: &std::ffi::CStr,
-    file: &std::fs::File,
-) -> bool {
-    use std::os::fd::AsRawFd;
-
-    let mut claimed = unsafe { std::mem::zeroed() };
-    let mut entry = unsafe { std::mem::zeroed() };
-    let claimed_found = unsafe { libc::fstat(file.as_raw_fd(), &mut claimed) };
-    let entry_found =
-        unsafe { libc::fstatat(dirfd, name.as_ptr(), &mut entry, libc::AT_SYMLINK_NOFOLLOW) };
-    claimed_found == 0
-        && entry_found == 0
-        && entry.st_mode & libc::S_IFMT == libc::S_IFREG
-        && entry.st_dev == claimed.st_dev
-        && entry.st_ino == claimed.st_ino
-}
-
 /// Outcome of a pinned removal attempt.
 enum Discard {
     /// The file was removed.
@@ -1055,9 +1034,12 @@ impl Processor {
         // end of the provider's chapter list but before the longer merged
         // audio ends.
 
-        // Engine-side no-clobber: claim with `O_CREAT|O_EXCL` immediately
-        // before the write; a claim failure leaves the existing file intact.
-        let claimed_output = self.claim_output_name(&output_path)?;
+        // Engine-side no-clobber: no name is reserved at the final path.
+        // This advisory precheck creates and validates the parent directories
+        // and reports an already-taken final name early; the binding
+        // guarantee is the atomic no-replace publication below, which never
+        // replaces a foreign entry.
+        self.advisory_precheck_output_path(&output_path)?;
 
         // Stage 3: Merge. Re-validate the parent after the progress callback
         // and before opening the protected staging sibling. Every media
@@ -1072,11 +1054,12 @@ impl Processor {
             completed_files: 0,
             message: "Merging audio files...".to_string(),
         });
-        self.recheck_claimed_placeholder(&output_path, &claimed_output)?;
+        self.recheck_output_parent(&output_path)?;
 
         // The media pipeline never writes the final name: it writes this
         // staging sibling inside the validated parent, and publication
-        // (a pinned no-replace hard link) exposes it at the claimed name.
+        // (an atomic no-replace hard link) exposes it at the final name or
+        // reports a diagnosed collision without touching the foreign entry.
         // The extension still selects the muxer on non-Linux platforms.
         #[cfg(test)]
         let stage_name = self.staging_name.clone().unwrap_or_else(Processor::job_stage_name);
@@ -1094,7 +1077,6 @@ impl Processor {
         let mut staged_file =
             std::fs::OpenOptions::new().create_new(true).write(true).open(&staged_path).map_err(
                 |e| {
-                    self.discard_claimed_output(&output_path, &claimed_output);
                     ProcessorError::OutputDirCreation(format!("Failed to create staging file: {e}"))
                 },
             )?;
@@ -1111,19 +1093,16 @@ impl Processor {
         // Keep the reservation alive until the merge (and its child) finish.
         merged.map_err(|e| {
             self.discard_output(&staged_path);
-            self.discard_claimed_output(&output_path, &claimed_output);
             ProcessorError::Merge(e)
         })?;
         // Refuse a replaced staging entry even when the merge safely wrote
         // the reserved inode rather than the attacker's symlink target.
-        self.verify_output_in_root(&staged_path).inspect_err(|_| {
-            self.discard_claimed_output(&output_path, &claimed_output);
-        })?;
+        self.verify_output_in_root(&staged_path)
+            .inspect_err(|_| self.discard_output(&staged_path))?;
         drop(staged_file);
 
         // Stage 4: Policy-driven writes on the protected staging file. Any
-        // failure discards both it and the claimed final placeholder before
-        // the sources move.
+        // failure discards the staged media before the sources move.
         progress_handler.on_progress(ProcessingProgress {
             stage: ProcessingStage::Tagging,
             current_file: Some(output_path.clone()),
@@ -1140,7 +1119,6 @@ impl Processor {
             .write_metadata_with_policies(&staged_path, &effective.metadata, &effective.policies)
             .map_err(|e| {
                 self.discard_output(&staged_path);
-                self.discard_claimed_output(&output_path, &claimed_output);
                 ProcessorError::Tagging(e)
             })?;
 
@@ -1149,23 +1127,25 @@ impl Processor {
             crate::job::CoverPolicy::Preserve => {
                 // Single-input only (enforced above): the merge is a native
                 // copy, so the source cover survives; carry the sidecar if the
-                // source had one.
+                // source had one. A re-run to the deterministic output path
+                // must not leave an earlier sidecar when the source has none.
                 let source_sidecar = input_paths[0].with_extension("cover.txt");
                 let dest = output_path.with_extension("cover.txt");
                 if source_sidecar.is_file() {
                     if let Err(e) = self.copy_job_sidecar(&source_sidecar, &dest) {
                         self.discard_output(&dest);
-                        warn!("Failed to carry source cover sidecar: {e}");
+                        self.discard_output(&staged_path);
+                        return Err(ProcessorError::Tagging(e));
                     }
-                } else {
-                    self.discard_output(&dest);
+                } else if let Err(e) = self.remove_job_sidecar(&dest) {
+                    self.discard_output(&staged_path);
+                    return Err(e);
                 }
             }
             crate::job::CoverPolicy::Write(file) => {
                 if let Err(e) = self.tagger.embed_cover_local(&staged_path, file, &job.output_root)
                 {
                     self.discard_output(&staged_path);
-                    self.discard_claimed_output(&output_path, &claimed_output);
                     return Err(ProcessorError::Tagging(e));
                 }
             }
@@ -1178,7 +1158,6 @@ impl Processor {
                 if let Some(url) = url {
                     if let Err(e) = self.tagger.embed_cover(&staged_path, &url).await {
                         self.discard_output(&staged_path);
-                        self.discard_claimed_output(&output_path, &claimed_output);
                         return Err(ProcessorError::Tagging(e));
                     }
                 }
@@ -1187,10 +1166,13 @@ impl Processor {
                 // Remove the copied/merged artwork so the clear promise holds.
                 if let Err(e) = self.tagger.clear_cover(&staged_path) {
                     self.discard_output(&staged_path);
-                    self.discard_claimed_output(&output_path, &claimed_output);
                     return Err(ProcessorError::Tagging(e));
                 }
-                self.discard_output(&output_path.with_extension("cover.txt"));
+                let dest = output_path.with_extension("cover.txt");
+                if let Err(e) = self.remove_job_sidecar(&dest) {
+                    self.discard_output(&staged_path);
+                    return Err(e);
+                }
             }
         }
 
@@ -1207,15 +1189,16 @@ impl Processor {
                 if clear {
                     if let Err(e) = self.tagger.clear_chapters(&staged_path) {
                         self.discard_output(&staged_path);
-                        self.discard_claimed_output(&output_path, &claimed_output);
                         return Err(ProcessorError::Tagging(e));
                     }
                     let sidecar = output_path.with_extension("chapters.txt");
-                    self.discard_output(&sidecar);
+                    if let Err(e) = self.remove_job_sidecar(&sidecar) {
+                        self.discard_output(&staged_path);
+                        return Err(e);
+                    }
                 } else if !write_chapters.is_empty() {
                     if let Err(e) = self.tagger.embed_chapters(&staged_path, &write_chapters) {
                         self.discard_output(&staged_path);
-                        self.discard_claimed_output(&output_path, &claimed_output);
                         return Err(ProcessorError::Tagging(e));
                     }
                     let artist = if effective.metadata.authors.is_empty() {
@@ -1237,7 +1220,6 @@ impl Processor {
                         // extra: the group reports no artifacts.
                         self.discard_output(&sidecar);
                         self.discard_output(&staged_path);
-                        self.discard_claimed_output(&output_path, &claimed_output);
                         return Err(ProcessorError::Tagging(e));
                     }
                 }
@@ -1247,13 +1229,15 @@ impl Processor {
             crate::job::ChaptersPolicy::Clear => {
                 if let Err(e) = self.tagger.clear_chapters(&staged_path) {
                     self.discard_output(&staged_path);
-                    self.discard_claimed_output(&output_path, &claimed_output);
                     return Err(ProcessorError::Tagging(e));
                 }
                 // A re-run with `clear` must not leave a sidecar that still
                 // advertises chapters at the deterministic output path.
                 let sidecar = output_path.with_extension("chapters.txt");
-                self.discard_output(&sidecar);
+                if let Err(e) = self.remove_job_sidecar(&sidecar) {
+                    self.discard_output(&staged_path);
+                    return Err(e);
+                }
             }
             crate::job::ChaptersPolicy::Preserve => {
                 // Single-input only (enforced above): the merge is a native
@@ -1267,18 +1251,17 @@ impl Processor {
                     self.copy_job_sidecar(&source_sidecar, &dest).map_err(|e| {
                         self.discard_output(&dest);
                         self.discard_output(&staged_path);
-                        self.discard_claimed_output(&output_path, &claimed_output);
                         ProcessorError::Tagging(e)
                     })?;
-                } else {
-                    self.discard_output(&dest);
+                } else if let Err(e) = self.remove_job_sidecar(&dest) {
+                    self.discard_output(&staged_path);
+                    return Err(e);
                 }
             }
         }
 
         // Publish only after all tag, cover, and chapter mutations succeed.
-        let publication_root =
-            self.publish_job_output(&output_path, &staged_path, &claimed_output)?;
+        let publication_root = self.publish_job_output(&output_path, &staged_path)?;
         info!("Successfully merged to: {}", output_path.display());
 
         // Stage 5: Move source files only after every write succeeded.
@@ -1409,32 +1392,18 @@ impl Processor {
         Ok(candidate)
     }
 
-    /// Re-validate a claimed placeholder before the merge: the parent must
-    /// still lie inside the canonical output root (a swapped symlink is
-    /// refused); every failure path removes the placeholder, so a retried
-    /// run never hits a false collision.
-    fn recheck_claimed_placeholder(
-        &self,
-        output_path: &std::path::Path,
-        claimed: &std::fs::File,
-    ) -> Result<()> {
+    /// Re-validate the output parent after the merge-progress callback and
+    /// before the protected staging sibling is opened: a parent swapped for a
+    /// symlink in that window is refused before any media is written. Nothing
+    /// is reserved at the final name, so there is no placeholder to release.
+    fn recheck_output_parent(&self, output_path: &std::path::Path) -> Result<()> {
         let Some(job) = self.job.as_ref() else {
             return Ok(());
         };
         let Some(parent) = output_path.parent() else {
             return Ok(());
         };
-        let escapes = match self.parent_escapes_root(job, parent) {
-            Ok(e) => e,
-            Err(e) => {
-                // E.g. a dangling-symlinked parent: the placeholder is
-                // still ours (the claim created it), so remove it.
-                self.discard_claimed_output(output_path, claimed);
-                return Err(e);
-            }
-        };
-        if escapes {
-            self.discard_claimed_output(output_path, claimed);
+        if self.parent_escapes_root(job, parent)? {
             return Err(self.output_root_escape(output_path));
         }
         Ok(())
@@ -1485,16 +1454,16 @@ impl Processor {
     }
 
     /// Publish with atomic no-replace hard-link creation inside a pinned,
-    /// root-validated parent. Only our original placeholder is released;
-    /// a foreign final entry, including a late arrival, causes a diagnosed
-    /// collision and is never overwritten. Valid staged media is retained
+    /// root-validated parent. Nothing is reserved at the final name before
+    /// this call: the link itself creates it, and a foreign final entry,
+    /// including a late arrival, fails with a diagnosed collision without
+    /// being read, renamed, or overwritten. Valid staged media is retained
     /// and reported as recoverable when publication fails. Sidecars remain
     /// separate, non-atomic sibling writes.
     fn publish_job_output(
         &self,
         output_path: &std::path::Path,
         staged_path: &std::path::Path,
-        claimed: &std::fs::File,
     ) -> Result<PathBuf> {
         let job = self.job.as_ref().ok_or_else(|| self.output_root_escape(output_path))?;
         let root =
@@ -1539,35 +1508,9 @@ impl Processor {
                 if !metadata.is_file() || metadata.len() == 0 {
                     return Err(self.output_root_escape(staged_path));
                 }
-                let mut final_stat = unsafe { std::mem::zeroed() };
-                if unsafe {
-                    libc::fstatat(
-                        dirfd.0,
-                        final_name.as_ptr(),
-                        &mut final_stat,
-                        libc::AT_SYMLINK_NOFOLLOW,
-                    )
-                } == 0
-                {
-                    if !entry_matches_file(dirfd.0, &final_name, claimed) {
-                        return Err(ProcessorError::OutputCollision {
-                            path: output_path.to_path_buf(),
-                        });
-                    }
-                    if unsafe { libc::unlinkat(dirfd.0, final_name.as_ptr(), 0) } != 0 {
-                        return Err(ProcessorError::OutputDirCreation(format!(
-                            "Failed to release claimed output {}: {}",
-                            output_path.display(),
-                            std::io::Error::last_os_error()
-                        )));
-                    }
-                } else if std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound {
-                    return Err(ProcessorError::OutputDirCreation(format!(
-                        "Failed to inspect claimed output {}: {}",
-                        output_path.display(),
-                        std::io::Error::last_os_error()
-                    )));
-                }
+                // The final name is created by the no-replace link below;
+                // any existing entry is a diagnosed collision, never
+                // inspected, renamed, or removed.
                 #[cfg(target_os = "linux")]
                 let linked = {
                     // Unlike empty-oldpath linkat(flags=0), procfs plus
@@ -1620,7 +1563,6 @@ impl Processor {
                     return Err(self.output_root_escape(output_path));
                 }
                 self.verify_output_in_root(staged_path)?;
-                self.discard_claimed_output(output_path, claimed);
                 std::fs::hard_link(staged_path, output_path).map_err(|e| {
                     if e.kind() == std::io::ErrorKind::AlreadyExists {
                         ProcessorError::OutputCollision { path: output_path.to_path_buf() }
@@ -1639,7 +1581,9 @@ impl Processor {
             }
         })();
         publish.map_err(|source| {
-            self.discard_claimed_output(output_path, claimed);
+            // The final name is never reserved, so there is nothing to
+            // release on failure; the completed stage is preserved for
+            // recovery when it is intact.
             let preserved = std::fs::symlink_metadata(staged_path)
                 .ok()
                 .filter(|m| m.is_file() && m.len() > 0)
@@ -1669,16 +1613,18 @@ impl Processor {
         Ok(!canonical_parent.starts_with(&root))
     }
 
-    /// Claim the output file name before any write: `O_CREAT|O_EXCL`
-    /// atomically reserves the exact path, so a pre-existing file or
-    /// directory (or a concurrent claim) fails with a diagnosed collision —
-    /// nothing is written, renamed, or suffixed. Created parent directories
-    /// are re-validated against the output root.
-    fn claim_output_name(&self, output_path: &std::path::Path) -> Result<std::fs::File> {
-        // Job-mode only: the claim runs inside a job run.
+    /// Advisory precheck before the merge: create and validate the output
+    /// parent directories and report a final name that is already taken, so
+    /// a collision is diagnosed early. This reserves no name — the exclusive
+    /// reservation is the private staging sibling, and the binding
+    /// no-clobber guarantee is the atomic no-replace publication. A foreign
+    /// entry that appears after this check is handled by publication, which
+    /// reports the collision and never overwrites.
+    fn advisory_precheck_output_path(&self, output_path: &std::path::Path) -> Result<()> {
+        // Job-mode only: the precheck runs inside a job run.
         let job = self.job.as_ref().ok_or_else(|| {
             ProcessorError::Job(crate::job::JobError::Invalid(
-                "output name claim requires a job".into(),
+                "output path precheck requires a job".into(),
             ))
         })?;
         if output_path.exists() {
@@ -1698,18 +1644,7 @@ impl Processor {
                 )));
             }
         }
-        // `create_new` maps to `O_CREAT|O_EXCL`: the create fails if the
-        // path exists, closing the exists-then-write race without a rename.
-        match std::fs::OpenOptions::new().create_new(true).write(true).open(output_path) {
-            Ok(file) => Ok(file),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                Err(ProcessorError::OutputCollision { path: output_path.to_path_buf() })
-            }
-            Err(e) => Err(ProcessorError::OutputDirCreation(format!(
-                "Failed to claim output path {}: {e}",
-                output_path.display()
-            ))),
-        }
+        Ok(())
     }
 
     /// Bind the produced output to the validated root after the merge:
@@ -1753,7 +1688,7 @@ impl Processor {
     /// Diagnoses an output that escaped the job output root.
     fn output_root_escape(&self, output_path: &std::path::Path) -> ProcessorError {
         ProcessorError::OutputDirCreation(format!(
-            "Produced output {} is not the claimed file inside the job output root; refusing",
+            "Produced output {} is not a valid file inside the job output root; refusing",
             output_path.display()
         ))
     }
@@ -1825,6 +1760,66 @@ impl Processor {
         Ok(())
     }
 
+    /// Remove a policy-required stale sidecar with failure propagation.
+    /// The parent is pinned and validated against the output root, so an
+    /// escaped parent is refused, and the entry is removed as a link, never
+    /// followed. An absent entry is success (the deterministic output path
+    /// has no stale sidecar to clear); any refusal or removal failure
+    /// returns an error the caller must abort the run on, because a
+    /// surviving stale sidecar would contradict the chapter/cover policy
+    /// that required its removal.
+    fn remove_job_sidecar(&self, path: &std::path::Path) -> Result<()> {
+        let job = self.job.as_ref().ok_or_else(|| {
+            ProcessorError::Job(crate::job::JobError::Invalid(
+                "sidecar removal requires a job".into(),
+            ))
+        })?;
+        let root =
+            std::fs::canonicalize(&job.output_root).unwrap_or_else(|_| job.output_root.clone());
+        match self.discard_pinned(path, &root) {
+            Discard::Removed => Ok(()),
+            Discard::Unpinned => {
+                // The platform cannot pin the parent; use the check-then-
+                // remove fallback restricted to an in-root regular/symlink
+                // entry, mirroring `discard_output`.
+                let inside = path
+                    .parent()
+                    .and_then(|p| std::fs::canonicalize(p).ok())
+                    .map(|p| p.starts_with(&root))
+                    .unwrap_or(false);
+                if !inside {
+                    return Err(ProcessorError::OutputDirCreation(format!(
+                        "Refusing to remove sidecar {} outside the job output root",
+                        path.display()
+                    )));
+                }
+                match std::fs::symlink_metadata(path) {
+                    Ok(meta) if meta.file_type().is_file() || meta.file_type().is_symlink() => {
+                        std::fs::remove_file(path).map_err(|e| {
+                            ProcessorError::OutputDirCreation(format!(
+                                "Failed to remove stale sidecar {}: {e}",
+                                path.display()
+                            ))
+                        })
+                    }
+                    Ok(_) => Err(ProcessorError::OutputDirCreation(format!(
+                        "Refusing to remove sidecar {}: not a file",
+                        path.display()
+                    ))),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(e) => Err(ProcessorError::OutputDirCreation(format!(
+                        "Failed to inspect sidecar {}: {e}",
+                        path.display()
+                    ))),
+                }
+            }
+            Discard::Refused => Err(ProcessorError::OutputDirCreation(format!(
+                "Refusing to remove sidecar {} outside the job output root or of an unsupported type",
+                path.display()
+            ))),
+        }
+    }
+
     /// The produced artifacts of a result, relative to the job's
     /// `output_root`; a produced path outside the root is not emitted.
     fn artifacts_for_result(&self, result: &ProcessingResult) -> Vec<crate::job::Artifact> {
@@ -1856,56 +1851,9 @@ impl Processor {
             .collect()
     }
 
-    /// Cleanup must never unlink a foreign file that replaced our claim.
-    fn discard_claimed_output(&self, path: &std::path::Path, claimed: &std::fs::File) {
-        let Some(job) = &self.job else {
-            return;
-        };
-        let root =
-            std::fs::canonicalize(&job.output_root).unwrap_or_else(|_| job.output_root.clone());
-        #[cfg(unix)]
-        {
-            use std::ffi::CString;
-            use std::os::unix::ffi::OsStrExt;
-
-            let Some(dirfd) = pin_parent_in_root(path, &root) else {
-                return;
-            };
-            let Some(name) = path.file_name().and_then(|n| CString::new(n.as_bytes()).ok()) else {
-                return;
-            };
-            if entry_matches_file(dirfd.0, &name, claimed)
-                && unsafe { libc::unlinkat(dirfd.0, name.as_ptr(), 0) } != 0
-            {
-                warn!(
-                    "Failed to remove claimed placeholder {}: {}",
-                    path.display(),
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            // No portable inode identity API here; retain the existing
-            // root-aware fallback, restricted to an unchanged empty file.
-            let same =
-                claimed.metadata().ok().zip(std::fs::symlink_metadata(path).ok()).is_some_and(
-                    |(a, b)| {
-                        b.is_file()
-                            && b.len() == 0
-                            && a.created().ok().zip(b.created().ok()).is_some_and(|(a, b)| a == b)
-                    },
-                );
-            if same {
-                self.discard_output(path);
-            }
-            let _ = root;
-        }
-    }
-
-    /// Remove a rejected media output or its claimed placeholder. In job
+    /// Remove a rejected media output or a policy-required sidecar. In job
     /// mode media mutations stay staged until publication, and a leftover
-    /// placeholder would block retries. Removal is root-aware and pinned:
+    /// staging sibling would block retries. Removal is root-aware and pinned:
     /// the entry is deleted only if it is a regular file or symlink inside a directory
     /// whose pinned descriptor resolves under the output root. A swapped
     /// symlink entry is removed as the link itself, never followed,
@@ -2877,9 +2825,10 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn recheck_escaped_parent_leaves_external_file_untouched() {
-        // A parent swapped for a symlink after the claim must not let
-        // recheck/discard delete a same-named file outside the root.
+    async fn recheck_escaped_parent_refuses_before_merge() {
+        // A parent swapped for a symlink between the advisory precheck and
+        // the merge must be refused before any media is written, and the
+        // refusal must not touch the same-named file outside the root.
         let temp_dir = TempDir::new().unwrap();
         let input = create_test_m4b(&temp_dir.path().join("Book"), 5);
         let output_root = temp_dir.path().join("out");
@@ -2898,7 +2847,7 @@ mod tests {
         .unwrap();
 
         let output_path = processor.job_output_path_for(&output_root, "A/Esc.m4b").unwrap();
-        let claimed = processor.claim_output_name(&output_path).unwrap();
+        processor.advisory_precheck_output_path(&output_path).unwrap();
         let external = outside.join("Esc.m4b");
         std::fs::write(&external, b"external").unwrap();
         let parent = output_path.parent().unwrap();
@@ -2906,7 +2855,7 @@ mod tests {
         std::fs::rename(parent, &stashed).unwrap();
         std::os::unix::fs::symlink(&outside, parent).unwrap();
 
-        let err = processor.recheck_claimed_placeholder(&output_path, &claimed).unwrap_err();
+        let err = processor.recheck_output_parent(&output_path).unwrap_err();
         assert!(err.to_string().contains("output root"), "{err}");
         assert_eq!(std::fs::read(&external).expect("external file survived"), b"external");
     }
@@ -2955,10 +2904,11 @@ mod tests {
     }
 
     /// Build a single-input job + processor whose resolved output is
-    /// `{output_root}/A/Pub.m4b`, and claim the output name, so the
-    /// publication helpers can be exercised on a claimed placeholder.
+    /// `{output_root}/A/Pub.m4b`, so the publication helpers can be
+    /// exercised directly. Nothing is reserved at the final name; the
+    /// publication call itself creates it through the no-replace link.
     #[cfg(unix)]
-    fn claimed_pub_setup(temp: &TempDir) -> (Processor, PathBuf, PathBuf, PathBuf, std::fs::File) {
+    fn pub_setup(temp: &TempDir) -> (Processor, PathBuf, PathBuf, PathBuf) {
         let input = create_test_m4b(&temp.path().join("Book"), 5);
         let output_root = temp.path().join("out");
         let job_path = temp.path().join("job.json");
@@ -2973,16 +2923,16 @@ mod tests {
         )
         .unwrap();
         let output_path = output_root.join("A/Pub.m4b");
-        let claimed = processor.claim_output_name(&output_path).unwrap();
+        std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
         let staged = output_path.with_file_name("staged.m4b");
-        (processor, output_root, output_path, staged, claimed)
+        (processor, output_root, output_path, staged)
     }
 
     #[cfg(unix)]
     #[test]
     fn publish_refuses_swapped_final_entry_and_publishes_in_root() {
         let temp = TempDir::new().unwrap();
-        let (processor, _root, output_path, staged, claimed) = claimed_pub_setup(&temp);
+        let (processor, _root, output_path, staged) = pub_setup(&temp);
         std::fs::write(&staged, b"staged audio").unwrap();
 
         // A foreign final symlink is neither followed nor replaced: the
@@ -2991,19 +2941,17 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         let external = outside.join("Pub.m4b");
         std::fs::write(&external, b"external").unwrap();
-        std::fs::remove_file(&output_path).unwrap();
         std::os::unix::fs::symlink(&external, &output_path).unwrap();
-        let error = processor.publish_job_output(&output_path, &staged, &claimed).unwrap_err();
+        let error = processor.publish_job_output(&output_path, &staged).unwrap_err();
         assert!(error.to_string().contains("refusing to overwrite"), "{error}");
         assert_eq!(std::fs::read(&external).unwrap(), b"external");
         assert!(std::fs::symlink_metadata(&output_path).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read(&staged).unwrap(), b"staged audio");
 
-        // Normal publication releases only the original placeholder and
-        // consumes the stage through a no-replace link plus pinned unlink.
+        // Normal publication: the final name is created by the no-replace
+        // link itself, and the stage is consumed through a pinned unlink.
         std::fs::remove_file(&output_path).unwrap();
-        let claimed = processor.claim_output_name(&output_path).unwrap();
-        processor.publish_job_output(&output_path, &staged, &claimed).unwrap();
+        processor.publish_job_output(&output_path, &staged).unwrap();
         assert_eq!(std::fs::read(&output_path).unwrap(), b"staged audio");
         assert!(!staged.exists(), "no staging name left behind");
     }
@@ -3012,7 +2960,7 @@ mod tests {
     #[test]
     fn publish_refuses_swapped_parent_and_keeps_external_untouched() {
         let temp = TempDir::new().unwrap();
-        let (processor, _output_root, output_path, staged, claimed) = claimed_pub_setup(&temp);
+        let (processor, _output_root, output_path, staged) = pub_setup(&temp);
         std::fs::write(&staged, b"staged audio").unwrap();
 
         // The parent is renamed and replaced by a symlink whose target
@@ -3027,18 +2975,17 @@ mod tests {
         std::fs::rename(parent, &stashed).unwrap();
         std::os::unix::fs::symlink(&outside, parent).unwrap();
 
-        let err = processor.publish_job_output(&output_path, &staged, &claimed).unwrap_err();
+        let err = processor.publish_job_output(&output_path, &staged).unwrap_err();
         assert!(err.to_string().contains("output root"), "{err}");
         assert_eq!(
             std::fs::read(&external).expect("external file survived"),
             b"external",
             "a swapped parent must not let publication delete an external file"
         );
-        // The real parent (stashed) keeps its claimed placeholder; nothing
-        // was published under the (external) parent. The staging file is
-        // under the escaped parent, so the root-aware discard must leave
-        // it in place rather than delete an external file.
-        assert!(stashed.join("Pub.m4b").exists(), "placeholder retained under the real parent");
+        // Nothing was published: no final name exists under the real
+        // (stashed) parent, and the staging file — under the escaped
+        // parent — is preserved, not deleted.
+        assert!(!stashed.join("Pub.m4b").exists(), "no final name under the real parent");
         assert!(
             stashed.join("staged.m4b").exists(),
             "staged file under the escaped parent is preserved, not deleted"
@@ -3085,8 +3032,7 @@ mod tests {
     #[tokio::test]
     async fn job_refuses_preinstalled_staging_symlink() {
         let temp = TempDir::new().unwrap();
-        let (mut processor, _root, output_path, _, _claimed) = claimed_pub_setup(&temp);
-        std::fs::remove_file(&output_path).unwrap();
+        let (mut processor, _root, output_path, _) = pub_setup(&temp);
         let inputs = processor.job.as_ref().unwrap().inputs.clone();
         let external = temp.path().join("external.m4b");
         std::fs::write(&external, b"external").unwrap();
@@ -3100,7 +3046,7 @@ mod tests {
         let error = run.outcomes[0].error.as_deref().unwrap();
         assert!(error.contains("Failed to create staging file"), "{error}");
         assert_eq!(std::fs::read(&external).unwrap(), b"external");
-        assert!(!output_path.exists(), "claimed placeholder must be discarded");
+        assert!(!output_path.exists(), "no final name may be created");
         assert!(std::fs::symlink_metadata(&staged_path).unwrap().file_type().is_symlink());
         // The foreign entry was never ours to delete. It must be the only
         // staging name left; no file was created or written through it.
@@ -3121,7 +3067,7 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
 
         let temp = TempDir::new().unwrap();
-        let (processor, _root, output_path, _, _claimed) = claimed_pub_setup(&temp);
+        let (processor, _root, output_path, _) = pub_setup(&temp);
         let input = processor.job.as_ref().unwrap().inputs[0].clone();
         let mp3 = temp.path().join("source.mp3");
         let encoded = std::process::Command::new(processor.ffmpeg.ffmpeg_path())
@@ -3175,8 +3121,7 @@ mod tests {
             crate::job::ChaptersPolicy::Clear,
         ] {
             let temp = TempDir::new().unwrap();
-            let (mut processor, _root, output, _, _claimed) = claimed_pub_setup(&temp);
-            std::fs::remove_file(&output).unwrap();
+            let (mut processor, _root, output, _) = pub_setup(&temp);
             processor.config.completed_directory = None;
             let clear = matches!(&chapters, crate::job::ChaptersPolicy::Clear);
             let job = processor.job.as_mut().unwrap();
@@ -3221,16 +3166,19 @@ mod tests {
     #[test]
     fn publish_late_collision_keeps_foreign_file_and_completed_stage() {
         let temp = TempDir::new().unwrap();
-        let (processor, root, output, staged, claimed) = claimed_pub_setup(&temp);
+        let (processor, root, output, staged) = pub_setup(&temp);
         std::fs::write(&staged, b"completed staged audio").unwrap();
         processor.verify_output_in_root(&staged).unwrap();
-        std::fs::remove_file(&output).unwrap();
         std::fs::write(&output, b"foreign bytes must survive").unwrap();
 
-        let error = processor.publish_job_output(&output, &staged, &claimed).unwrap_err();
+        let error = processor.publish_job_output(&output, &staged).unwrap_err();
         assert!(error.to_string().contains("refusing to overwrite"), "{error}");
         assert_eq!(std::fs::read(&output).unwrap(), b"foreign bytes must survive");
         assert_eq!(std::fs::read(&staged).unwrap(), b"completed staged audio");
+        assert!(matches!(
+            std::fs::symlink_metadata(&staged).unwrap().file_type(),
+            f if f.is_file()
+        ));
         let ProcessorError::PublicationFailed { preserved: Some(artifact), .. } = error else {
             panic!("valid staged audio must be reported as recoverable");
         };
@@ -3241,10 +3189,36 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn unremovable_stale_sidecar_fails_before_publication() {
+        // A policy-required sidecar deletion that cannot be made (a
+        // directory occupies the sidecar name) must abort the run before
+        // publication: no final name appears and no artifacts are claimed,
+        // so the clear promise never contradicts a surviving entry.
+        let temp = TempDir::new().unwrap();
+        let (mut processor, root, output, _) = pub_setup(&temp);
+        processor.config.completed_directory = None;
+        processor.job.as_mut().unwrap().chapters = crate::job::ChaptersPolicy::Clear;
+        std::fs::create_dir_all(output.with_extension("chapters.txt")).unwrap();
+        let inputs = processor.job.as_ref().unwrap().inputs.clone();
+        let run = processor.run(inputs, &NoOpProgressHandler).await.unwrap();
+
+        assert!(!run.complete, "an unremovable stale sidecar must fail the group");
+        let error = run.outcomes[0].error.as_deref().unwrap();
+        assert!(error.contains("Refusing to remove sidecar"), "{error}");
+        assert!(!output.exists(), "no final name may appear");
+        assert!(run.outcomes[0].artifacts.is_empty());
+        assert!(
+            std::fs::symlink_metadata(output.with_extension("chapters.txt")).unwrap().is_dir(),
+            "the blocking directory is left in place"
+        );
+        let _ = root;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn machine_results_redact_inputs_and_setup_and_run_errors() {
         let temp = TempDir::new().unwrap();
-        let (mut processor, root, output, _, _claimed) = claimed_pub_setup(&temp);
-        std::fs::remove_file(&output).unwrap();
+        let (mut processor, root, output, _) = pub_setup(&temp);
         processor.config.completed_directory = None;
         let outside = processor.job.as_ref().unwrap().inputs[0].clone();
         let inside = root.join("inputs/audio.m4b");
@@ -3285,14 +3259,14 @@ mod tests {
     #[test]
     fn artifact_reporting_keeps_the_publication_time_root() {
         let temp = TempDir::new().unwrap();
-        let (mut processor, root, output, staged, claimed) = claimed_pub_setup(&temp);
+        let (mut processor, root, output, staged) = pub_setup(&temp);
         let alias = temp.path().join("alias");
         let replacement = temp.path().join("replacement");
         std::fs::create_dir(&replacement).unwrap();
         std::os::unix::fs::symlink(&root, &alias).unwrap();
         processor.job.as_mut().unwrap().output_root = alias.clone();
         std::fs::write(&staged, b"staged audio").unwrap();
-        let publication_root = processor.publish_job_output(&output, &staged, &claimed).unwrap();
+        let publication_root = processor.publish_job_output(&output, &staged).unwrap();
         assert_eq!(publication_root, std::fs::canonicalize(&root).unwrap());
         std::fs::remove_file(&alias).unwrap();
         std::os::unix::fs::symlink(&replacement, &alias).unwrap();
@@ -3314,7 +3288,7 @@ mod tests {
     #[test]
     fn staging_entry_swapped_to_symlink_after_merge_is_refused_and_external_untouched() {
         let temp = TempDir::new().unwrap();
-        let (mut processor, _root, output_path, _, _claimed) = claimed_pub_setup(&temp);
+        let (mut processor, _root, output_path, _) = pub_setup(&temp);
         processor.staging_name = Some(".m4b-merge-staging-swapped-after-merge".into());
         let staged_path = output_path.with_file_name(format!(
             "{}.{}",
@@ -3363,18 +3337,17 @@ mod tests {
         impl ProgressHandler for SwapFinal {
             fn on_progress(&self, progress: ProcessingProgress) {
                 if progress.stage == ProcessingStage::Tagging {
-                    // Media content has not yet been published: the final
-                    // entry is still the empty claimed placeholder.
-                    assert_eq!(std::fs::metadata(&self.output).unwrap().len(), 0);
-                    std::fs::remove_file(&self.output).unwrap();
+                    // Media content has not yet been published and no name
+                    // is reserved at the final path: install a foreign
+                    // symlink there before publication.
+                    assert!(!self.output.exists());
                     std::os::unix::fs::symlink(&self.external, &self.output).unwrap();
                 }
             }
         }
 
         let temp = TempDir::new().unwrap();
-        let (processor, _root, output_path, _, _claimed) = claimed_pub_setup(&temp);
-        std::fs::remove_file(&output_path).unwrap();
+        let (processor, _root, output_path, _) = pub_setup(&temp);
         let inputs = processor.job.as_ref().unwrap().inputs.clone();
         let external = temp.path().join("external.m4b");
         std::fs::write(&external, b"external").unwrap();
@@ -3450,7 +3423,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_verification_removes_stage_and_claimed_placeholder_before_retry() {
+    async fn failed_verification_removes_stage_before_retry() {
         let temp = TempDir::new().unwrap();
         // A single M4B takes the native-copy path, so an empty input reaches
         // post-merge verification rather than failing inside FFmpeg.
@@ -3474,9 +3447,9 @@ mod tests {
             let run = processor.run(vec![input.clone()], &NoOpProgressHandler).await.unwrap();
             assert!(!run.complete, "an empty merged file must fail verification");
             let error = run.outcomes[0].error.as_deref().unwrap();
-            assert!(error.contains("not the claimed file"), "attempt {attempt}: {error}");
+            assert!(error.contains("not a valid file"), "attempt {attempt}: {error}");
             assert!(!error.contains("refusing to overwrite"), "attempt {attempt}: {error}");
-            assert!(!output.exists(), "attempt {attempt}: placeholder must be discarded");
+            assert!(!output.exists(), "attempt {attempt}: no final name may appear");
             assert!(std::fs::read_dir(output.parent().unwrap()).unwrap().all(|entry| {
                 !entry.unwrap().file_name().to_string_lossy().starts_with(".m4b-merge-staging-")
             }));
@@ -3485,9 +3458,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_merge_removes_claimed_placeholder() {
-        // A failed merge must not leave the claimed placeholder behind: it
-        // would block a retry with a false collision.
+    async fn failed_merge_leaves_no_final_name() {
+        // A failed merge must not leave a final name behind: no name is
+        // reserved at the final path, and the staging sibling is removed.
         let temp_dir = TempDir::new().unwrap();
         let book_dir = temp_dir.path().join("Book");
         // An MP3 forces transcode mode (the single-file copy fast path
