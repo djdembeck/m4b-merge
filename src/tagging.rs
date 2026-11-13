@@ -1102,6 +1102,19 @@ impl Tagger {
         // with `openat(O_NOFOLLOW)`: no component, including the last,
         // may be a symlink.
         use std::os::unix::ffi::OsStrExt;
+        // Directory-open flags for the per-component walk. Linux/Android
+        // have `O_PATH`: execute-only (`0711`) ancestors stay walkable.
+        // The other Unix targets (macOS in the release pipeline) do not
+        // export `O_PATH` in libc 0.2.186, so open `O_RDONLY` there: read
+        // permission is needed on each walked component, and the fd is
+        // used solely as an `openat`/`openat2` dirfd in both cases,
+        // never read.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        const DIR_OPEN_FLAGS: libc::c_int =
+            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        const DIR_OPEN_FLAGS: libc::c_int =
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY;
         let mut root_fd = std::fs::File::open("/").map_err(|e| {
             TaggingError::CoverDownload(format!(
                 "Asset root {} is not usable: {}",
@@ -1128,19 +1141,17 @@ impl Tagger {
             // SAFETY: `root_fd` is a valid directory descriptor for every
             // iteration (`/` first, then each directory opened below) and
             // `name_bytes` is NUL-terminated. `O_NOFOLLOW` refuses a
-            // symlink at this component; `O_PATH|O_DIRECTORY` refuses a
-            // non-directory. `O_PATH` (not `O_RDONLY`) needs only execute
-            // permission on each component — the fd is used solely as an
-            // `openat`/`openat2` dirfd, never read — so an execute-only
-            // (`0711`) ancestor stays walkable. The old directory fd is
-            // closed before the replacement is opened, so no fd leaks on
-            // any path.
+            // symlink at this component; `O_DIRECTORY` refuses a
+            // non-directory, on every Unix target. On Linux/Android the
+            // walk uses `O_PATH`, which needs only execute permission on
+            // each component (an execute-only `0711` ancestor stays
+            // walkable); on the other Unix targets it uses `O_RDONLY`,
+            // which needs read permission on each component. In both
+            // cases the fd is used solely as an `openat`/`openat2`
+            // dirfd, never read. The old directory fd is closed before
+            // the replacement is opened, so no fd leaks on any path.
             let next = unsafe {
-                libc::openat(
-                    root_fd.as_raw_fd(),
-                    name_bytes.as_ptr().cast(),
-                    libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY,
-                )
+                libc::openat(root_fd.as_raw_fd(), name_bytes.as_ptr().cast(), DIR_OPEN_FLAGS)
             };
             if next < 0 {
                 let error = std::io::Error::last_os_error();
