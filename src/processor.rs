@@ -1023,6 +1023,18 @@ impl Processor {
             });
         }
 
+        // Descriptor-bound merging requires Linux procfs. Refuse BEFORE
+        // any directory is created and before any staging entry is
+        // opened, so on unsupported platforms the no-unlink staging
+        // policy is vacuously intact: nothing is created, and therefore
+        // nothing is ever cleaned up by pathname.
+        if !Self::job_execution_supported() {
+            return Err(ProcessorError::OutputDirCreation(
+                "descriptor-bound job merging requires Linux procfs; job execution is refused on this platform"
+                    .to_string(),
+            ));
+        }
+
         // The job was resolved exactly once in `process_with_progress`, before
         // discovery and output creation; that EffectiveJob is authoritative
         // here. No catalog touch happens in this function. Dry-run returned
@@ -1143,33 +1155,11 @@ impl Processor {
         // symlink after the re-validation cannot redirect the creation
         // outside the root.
         let mut staged_file = self.open_stage_in_root(&staged_path, pinned_parent)?;
-        #[cfg(target_os = "linux")]
-        {
-            // Keep the reservation alive until the merge (and its child)
-            // finish: the descriptor stays open across the FFmpeg call.
-            self.merge_job_into_stage(&group.files, &mut staged_file).map_err(|e| {
-                ProcessorError::RetainedStaged {
-                    path: staged_path.clone(),
-                    source: Box::new(ProcessorError::Merge(e)),
-                }
-            })?;
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            // The portable fallback would reopen the staging name by path;
-            // a writer with directory access can replace the name with a
-            // symlink after the exclusive create and redirect the merge
-            // before any post-merge verification runs. Descriptor-bound
-            // merging requires Linux procfs, so job execution is refused
-            // on every other platform (documented in the README) rather
-            // than accepted with a known-redirectable write.
-            let _ = (staged_file, group);
-            self.discard_output(&staged_path);
-            return Err(ProcessorError::OutputDirCreation(
-                "descriptor-bound job merging requires Linux procfs; job execution is refused on this platform"
-                    .to_string(),
-            ));
-        }
+        // Non-Linux job execution was refused above, before any stage was
+        // created. On Linux the descriptor stays open across the merge
+        // (and its FFmpeg child), so native copies and FFmpeg write the
+        // reserved inode, never a replacement at the staging pathname.
+        self.merge_into_stage_retaining(&group.files, &mut staged_file, &staged_path)?;
         // Refuse a replaced staging entry even when the merge safely wrote
         // the reserved inode rather than the attacker's symlink target.
         self.verify_output_in_root(&staged_path).map_err(|source| {
@@ -1682,6 +1672,34 @@ impl Processor {
         result
     }
 
+    /// Descriptor-bound merge with the no-unlink failure policy: a merge
+    /// failure retains the completed stage and reports it, never cleans it
+    /// up by pathname.
+    #[cfg(target_os = "linux")]
+    fn merge_into_stage_retaining(
+        &self,
+        files: &[AudioFile],
+        staged_file: &mut std::fs::File,
+        staged_path: &std::path::Path,
+    ) -> Result<()> {
+        self.merge_job_into_stage(files, staged_file).map_err(|e| ProcessorError::RetainedStaged {
+            path: staged_path.to_path_buf(),
+            source: Box::new(ProcessorError::Merge(e)),
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    fn merge_into_stage_retaining(
+        &self,
+        files: &[AudioFile],
+        staged_file: &mut std::fs::File,
+        staged_path: &std::path::Path,
+    ) -> Result<()> {
+        // Unreachable: job execution is refused on non-Linux platforms
+        // before any stage is created (see `job_execution_supported`).
+        let _ = (files, staged_file, staged_path);
+        Ok(())
+    }
+
     /// Test-only staging basename for deterministic pre-install races.
     #[cfg(test)]
     fn job_stage_name() -> String {
@@ -1956,6 +1974,19 @@ impl Processor {
             });
         }
         Ok(())
+    }
+
+    /// Job execution requires descriptor-bound merging through Linux
+    /// procfs; every other platform refuses BEFORE the run creates any
+    /// directory or staging entry, so the no-unlink staging policy can
+    /// never be contradicted by a create-then-clean-up-by-pathname path.
+    #[cfg(target_os = "linux")]
+    fn job_execution_supported() -> bool {
+        true
+    }
+    #[cfg(not(target_os = "linux"))]
+    fn job_execution_supported() -> bool {
+        false
     }
 
     /// `true` when `parent`'s canonical location is not inside the job's
@@ -2608,6 +2639,45 @@ impl Processor {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn job_execution_is_supported_here() {
+        // The descriptor-bound path is available on this platform: the
+        // pre-staging refusal in `process_group_job` never fires.
+        assert!(Processor::job_execution_supported());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn job_execution_is_refused_before_any_staging_entry_is_created() {
+        // Non-Linux job execution must be refused BEFORE the advisory
+        // precheck creates the output directory and before any staging
+        // entry is opened: the no-unlink staging policy must never be
+        // contradicted by a create-then-clean-up-by-pathname fallback.
+        assert!(!Processor::job_execution_supported());
+        let temp = TempDir::new().unwrap();
+        let input = create_test_m4b(&temp.path().join("Book"), 3);
+        let root = temp.path().join("out");
+        let job_path = temp.path().join("job.json");
+        let job_json = format!(
+            r#"{{ "schema_version": 1, "inputs": [{:?}], "input_supplied": {{ "title": "Refused", "authors": ["A"] }}, "output_root": {:?} }}"#,
+            input, root
+        );
+        std::fs::write(&job_path, &job_json).unwrap();
+        let processor = Processor::for_job(
+            crate::job::Job::load(&job_path).unwrap(),
+            job_config(&temp, &temp.path().join("cfg-done")),
+        )
+        .unwrap();
+        let run = processor.run(vec![input.clone()], &NoOpProgressHandler).await.unwrap();
+        assert!(!run.complete);
+        let error = run.outcomes[0].error.as_deref().unwrap();
+        assert!(error.contains("refused on this platform"), "refusal must be diagnosed: {error}");
+        // Nothing was created: no output root, no directory, no staging
+        // entry of any kind.
+        assert!(!root.exists(), "the output root must not be created");
+        assert!(input.exists(), "source retained");
+    }
     use super::*;
     use crate::api::{MetadataRegion, MetadataSourceKind};
     use std::io::{BufRead, BufReader, Write};
