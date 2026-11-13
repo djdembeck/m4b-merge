@@ -148,7 +148,7 @@ Automatic release is the default. For a deliberate release, open **Actions → R
 
 The highest valid SemVer reservation reachable from the frozen source supplies the automatic baseline; unfinished numbers remain reserved. An existing exact-source reservation wins on retry, even after newer releases. Different-source collisions, ambiguous reservations, and conflicting artifacts fail; tags never move. A new unreserved automatic candidate older than a newer reserved source coalesces without publication; explicit manual requests are not silently dropped.
 
-The selected version is compiled into the CLI and AudiobookDB user-agent through `M4B_MERGE_VERSION`. Native package metadata in Cargo.toml/Cargo.lock is independent. Untagged source builds say `dev-<source SHA>`; archives without git say `dev`, not a stale package release. Docker consumes VERSION and GIT_COMMIT for both the real binary and OCI metadata.
+The selected version is compiled into the CLI and AudiobookDB user-agent through `M4B_MERGE_VERSION`. Native package metadata in Cargo.toml/Cargo.lock is independent. Untagged source builds say `dev-<first 12 characters of the source SHA>`; archives without git say `dev`, not a stale package release. Docker consumes VERSION and GIT_COMMIT for both the real binary and OCI metadata.
 
 Publication preserves Linux/macOS/Windows assets and native amd64/arm64 images. It tests the version-stamped source, validates existing image source/version/architecture and immutable digests, and uploads only missing assets after checking their content/provenance. Registry/authentication failures are not absence. A draft release holds partial assets; it becomes published only after binaries, image manifest, and asset upload finish. Annalist's existing GitHub App fills notes at publication; deploy the shared previous-published-ancestor notes fix before cutover so failed reservations do not hide changes.
 
@@ -219,8 +219,13 @@ publishes that exact SHA:
   (same-SHA reuse, for retry after an interrupted run).
 - A tag that exists at a **different** SHA fails `reserve`/`select`
   hard — you cannot "republish" an older version or move a tag.
-- Publish runs are resumable: re-running the `Release` workflow on the
-  same commit reuses the existing tag/release and only adds missing outputs.
+- Publish runs are resumable in the missing-outputs sense: re-running the
+  `Release` workflow on the same commit reuses the existing tag/release and
+  only adds missing outputs. That holds when every already-uploaded asset
+  rebuilds to identical bytes. The macOS/Windows relinks are not
+  byte-reproducible, so a re-run that rebuilds an already-uploaded plain
+  named asset to different bytes fails before uploading. This is not only a
+  partial-upload retry case, so resolve the stale asset out of band first.
 - Runs are serialized across commits with GitHub Actions `queue: max`:
   up to 100 runs may queue, and extra runs are cancelled once the queue
   is full. Manual dispatch is main-only. The concurrency group is
@@ -242,9 +247,11 @@ publishes that exact SHA:
   have a provenance label bound to this publication (same SHA and tag)
   whose digest also matches, and an unlabeled asset (every plain-named new
   upload, plus unlabeled legacy assets) is reused only when its content
-  digest matches the freshly built artifact. Labeled assets are historical
-  (the v2.0.0 and v2.0.1 assets predate the plain naming); new uploads
-  never create labels. Malformed labels and conflicting bindings/digests
+  digest matches the freshly built artifact. The legacy v2.0.0 and v2.0.1
+  assets predate the plain naming; their provenance labels were cleared out
+  of band, so they reconcile by digest like any unlabeled asset, and new
+  uploads never create labels. Malformed labels and conflicting
+  bindings/digests
   fail before any upload (see `scripts/publish_release.py`). Because
   macOS and Windows release relinks are not byte-reproducible, a
   partial-upload retry that rebuilds an already-uploaded plain-named asset

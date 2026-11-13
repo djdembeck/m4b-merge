@@ -189,6 +189,17 @@ async fn main() {
     let job = if let Some(job_path) = &args.job {
         let conflicts = job_flag_conflicts(&args, &matches);
         if !conflicts.is_empty() {
+            // `--machine` promises a parseable, path-free document on every
+            // failure path; the message carries only flag names.
+            if args.machine {
+                machine_exit(&m4b_merge::job::JobResult::setup_failed(
+                    format!(
+                        "--job is mutually exclusive with {} (the job file provides them)",
+                        conflicts.join(", ")
+                    ),
+                    None,
+                ));
+            }
             eprintln!(
                 "Error: --job is mutually exclusive with {} (the job file provides them)",
                 conflicts.join(", ")
@@ -215,6 +226,14 @@ async fn main() {
         }
     } else {
         if args.inputs.is_empty() {
+            // `--machine` promises a parseable, path-free document on every
+            // failure path; the no-inputs exit is one of them.
+            if args.machine {
+                machine_exit(&m4b_merge::job::JobResult::setup_failed(
+                    "no input files or directories provided: use --job for a job file".into(),
+                    None,
+                ));
+            }
             eprintln!("Error: No input files or directories provided.");
             eprintln!("Use -i or --inputs to specify input paths, or --job for a job file.");
             std::process::exit(1);
@@ -321,12 +340,24 @@ async fn main() {
     // --job-preview and --machine are job-mode-only and mutually exclusive.
     if args.job_preview || args.machine {
         let Some(job) = job.as_ref() else {
+            // `--machine` promises a parseable, path-free document on every
+            // failure path; the message carries no paths.
+            if args.machine {
+                machine_exit(&m4b_merge::job::JobResult::setup_failed(
+                    "--machine requires --job".into(),
+                    None,
+                ));
+            }
             eprintln!("Error: --job-preview/--machine require --job.");
             std::process::exit(1);
         };
         if args.job_preview && args.machine {
-            eprintln!("Error: --job-preview and --machine are mutually exclusive.");
-            std::process::exit(1);
+            // This branch only exists when `--machine` is set, so the
+            // machine document is the only output.
+            machine_exit(&m4b_merge::job::JobResult::setup_failed(
+                "--job-preview and --machine are mutually exclusive".into(),
+                None,
+            ));
         }
         if args.job_preview {
             // Non-mutating: same resolver and effective metadata as execution.

@@ -81,12 +81,15 @@ impl Capabilities {
                 ],
             },
             cover_policies: CoverPolicies {
-                variants: vec!["write_url", "write", "preserve", "clear"],
-                constraint: "preserve requires a single input file",
+                // Advertise only the bare spellings `CoverPolicy` parses;
+                // its `{"write": "/absolute/path"}` object form is named in
+                // the constraint text, not in the machine variant list.
+                variants: vec!["write_url", "preserve", "clear"],
+                constraint: "write also accepts the object form {\"write\": \"/absolute/path\"} for a local cover file; preserve requires a single natively-copyable input file",
             },
             chapter_policies: ChapterPolicies {
                 variants: vec!["write", "preserve", "clear"],
-                constraint: "preserve requires a single input file",
+                constraint: "preserve requires a single natively-copyable input file",
             },
         }
     }
@@ -164,6 +167,17 @@ mod tests {
                 .iter()
                 .map(|k| k.spelling().to_string())
                 .collect::<Vec<_>>()
+        );
+        // Advertised variants are the parser's vocabulary exactly: a
+        // spelling the job parser rejects here (like the cover `write`
+        // object form) must not be advertised.
+        assert_eq!(
+            parsed["cover_policies"]["variants"],
+            serde_json::json!(["write_url", "preserve", "clear"])
+        );
+        assert_eq!(
+            parsed["chapter_policies"]["variants"],
+            serde_json::json!(["write", "preserve", "clear"])
         );
     }
 }

@@ -146,10 +146,6 @@ def manifest(args):
             *(f"{args.image}@{value}" for value in expected.values()))
 
 
-def asset_label(sha, tag, asset_digest):
-    return f"m4b-publish-v1;sha={sha};tag={tag};sha256={asset_digest.removeprefix('sha256:')}"
-
-
 def parse_asset_label(label):
     match = ASSET_LABEL.fullmatch(label)
     if match is None:

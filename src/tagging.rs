@@ -604,8 +604,10 @@ impl Tagger {
                 policies.effective_subtitle(metadata),
             )?;
 
-            // A subtitle without a title is represented as the subtitle alone
-            // in both atoms (no fabricated title separator); the unselected
+            // A subtitle without a title is the subtitle-only state: `©nam`
+            // carries the subtitle alone and `©alb` is removed, because a
+            // base title no longer exists (never write the subtitle into
+            // `©alb` — it is documented as base-title-only). The unselected
             // component is never erased by the other's clear. The value is
             // used verbatim (no trim) so a preserved subtitle round-trips
             // exactly.
@@ -621,7 +623,7 @@ impl Tagger {
                 }
                 (None, Some(subtitle)) => {
                     tag.set_title(subtitle);
-                    tag.set_album(subtitle);
+                    tag.remove_album();
                 }
                 (None, None) => {
                     tag.remove_title();
@@ -700,6 +702,12 @@ impl Tagger {
 
     /// True when no policy mutates an atom: an all-preserve set can skip the
     /// file write entirely, keeping the output byte-identical to the input.
+    /// The job pipeline uses this to report `metadata_applied` truthfully
+    /// (an all-preserve job made no tag write).
+    pub(crate) fn all_preserve_public(policies: &crate::job::WritePolicies) -> bool {
+        Self::all_preserve(policies)
+    }
+
     fn all_preserve(policies: &crate::job::WritePolicies) -> bool {
         policies.title == crate::job::TitlePolicy::Preserve
             && policies.subtitle == crate::job::SubtitlePolicy::Preserve
@@ -764,7 +772,10 @@ impl Tagger {
     /// `None` means the component is cleared. A preserved component reads
     /// back from the existing atoms; when the file has no album atom the
     /// base title cannot be established and the write fails before mutation
-    /// rather than erasing data.
+    /// rather than erasing data — except in the subtitle-only state (a
+    /// `©nam` with no `©alb`), which this tool writes when the title is
+    /// cleared while the subtitle survives: there the title is known to be
+    /// absent and the subtitle is `©nam` verbatim.
     fn resolve_title_subtitle(
         path: &Path,
         tag: &mp4ameta::Tag,
@@ -784,8 +795,13 @@ impl Tagger {
             crate::job::TitlePolicy::Preserve => {
                 // `©alb` is documented as the base title only, so it is the
                 // defined representation of the title component. A file with
-                // a title but no album (foreign tool, manual edit) cannot
-                // establish the base without guessing — refuse before mutation.
+                // a title but no album is the subtitle-only state (what this
+                // tool writes when the title is cleared while the subtitle
+                // survives): the title is known to be absent, so nothing is
+                // established here and the subtitle arm reads `©nam` back as
+                // the subtitle verbatim. (The all-preserve pair never
+                // reaches this function — `both_preserve` leaves the atoms
+                // untouched.)
                 match &existing_album {
                     Some(album) => Some(album.clone()),
                     None if existing_title.is_some() => Err(TaggingError::PreserveUnresolvable {
@@ -807,8 +823,8 @@ impl Tagger {
                 // The documented `©nam` form is `title - subtitle`: recover
                 // the subtitle only when the existing title starts with the
                 // album plus the documented separator. Never split on
-                // arbitrary punctuation. A file with a title but no album
-                // has no base to subtract — refuse before mutation.
+                // arbitrary punctuation. A `©nam` with no `©alb` is the
+                // subtitle-only state, so `©nam` is the subtitle verbatim.
                 match (&existing_album, &existing_title) {
                     (Some(album), Some(t)) => {
                         // A title equal to the album is the established
@@ -837,9 +853,15 @@ impl Tagger {
                         let sub = stripped.to_string();
                         (!sub.trim().is_empty()).then_some(sub)
                     }
-                    // No title to subtract from, or an album without a title:
-                    // the subtitle cannot be established — refuse.
-                    (None, Some(_)) | (Some(_), None) => Err(TaggingError::PreserveUnresolvable {
+                    // The subtitle-only state (a `©nam` with no `©alb`): the
+                    // title is known to be absent, so `©nam` is the subtitle
+                    // verbatim. An externally-tagged file that carries only
+                    // `©nam` is indistinguishable from this state and is
+                    // treated as subtitle-only.
+                    (None, Some(t)) => Some(t.clone()),
+                    // An album without a title: the subtitle cannot be
+                    // established — refuse.
+                    (Some(_), None) => Err(TaggingError::PreserveUnresolvable {
                         field: "subtitle",
                         path: path.to_path_buf(),
                     })?,
@@ -884,11 +906,7 @@ impl Tagger {
         }
         let mut segments = Self::preserved_grouping_segments(tag.grouping().map(|s| s as &str));
         segments.push(Self::series_info(metadata).expect("validated: series write"));
-        if segments.is_empty() {
-            tag.remove_groupings();
-        } else {
-            tag.set_grouping(segments.join(" | "));
-        }
+        tag.set_grouping(segments.join(" | "));
     }
 
     /// The `Series:` segment text for the metadata.
@@ -945,19 +963,18 @@ impl Tagger {
     /// limit between the size check and the read is refused (no unbounded
     /// `fs::read` after a size-only check).
     ///
-    /// Residual risk and trust boundary: the canonicalize-then-open sequence
-    /// has a TOCTOU window. A concurrent writer that can modify files in the
-    /// asset area (or replace the target itself) can swap it between
-    /// [`Path::canonicalize`] and [`std::fs::File::open`] — replacing the
-    /// file, or making it a symlink that points outside the asset root. Since
-    /// `File::open` follows symlinks, the bytes read in that race are
-    /// attacker-chosen and may come from outside the root; the size-bounded
-    /// read limits the amount read, not the file's location. The implemented
-    /// guarantee is static containment (the canonicalized path stays under the
-    /// asset root) plus the size-bounded read, valid when no concurrent writer
-    /// races the open. An atomic root-relative open (open the parent directory
-    /// and resolve relative to it, then verify the opened inode) is a
-    /// documented follow-up.
+    /// The open is atomic and root-relative: the asset root is opened as a
+    /// directory descriptor, the cover is resolved against it without
+    /// following symlinks (Linux: `openat2` with `RESOLVE_BENEATH |
+    /// RESOLVE_NO_SYMLINKS`; other Unix: one `openat` with `O_NOFOLLOW` on
+    /// the final component, whose residual exposure to symlinked
+    /// intermediate components is closed by verifying the opened
+    /// descriptor's canonical location stays under the root, see
+    /// `fd_canonical`), and the opened descriptor must name a regular file
+    /// before any byte is read. A path swap, symlink install, FIFO, device
+    /// node, or non-regular file between validation and the read is a
+    /// diagnosed refusal, never attacker-chosen bytes and never a blocking
+    /// open.
     pub fn embed_cover_local<P: AsRef<Path>, A: AsRef<Path>>(
         &self,
         file_path: P,
@@ -984,38 +1001,36 @@ impl Tagger {
                 cover_path.display()
             )));
         }
-        // The asset root must itself be canonicalizable so the containment
-        // comparison is well-defined; a missing root is a job configuration
-        // error, not a cover content error.
-        let asset_root = asset_root.as_ref().canonicalize().map_err(|e| {
+        // The asset root must itself be canonicalizable so the
+        // root-relative open is well-defined; a missing root is a job
+        // configuration error, not a cover content error.
+        let configured_root = asset_root.as_ref();
+        let canonical_root = configured_root.canonicalize().map_err(|e| {
             TaggingError::CoverDownload(format!(
                 "Asset root {} is not usable: {}",
-                asset_root.as_ref().display(),
+                configured_root.display(),
                 e
             ))
         })?;
-        // Canonicalize the cover path: this resolves symlinks, so a path
-        // spelled inside the asset area that links out of it is rejected.
-        let canonical = cover_path.canonicalize().map_err(|e| {
-            TaggingError::CoverDownload(format!(
-                "Local cover file {} is not readable: {}",
-                cover_path.display(),
-                e
-            ))
-        })?;
-        if !canonical.starts_with(&asset_root) {
-            return Err(TaggingError::CoverPathOutsideAssetRoot(cover_path.display().to_string()));
-        }
+        // The cover must stay under the asset root statically as well, so a
+        // misspelled absolute path outside the area is refused before the
+        // root-relative open runs. The user's spelling is tried against the
+        // configured root first, then the canonical root: when
+        // `output_root` is reached through a symlink, the raw spelling
+        // matches the configured root, not its canonical form.
+        let relative = match cover_path.strip_prefix(configured_root) {
+            Ok(relative) => relative.to_path_buf(),
+            Err(_) => cover_path
+                .strip_prefix(&canonical_root)
+                .map(|relative| relative.to_path_buf())
+                .map_err(|_| {
+                    TaggingError::CoverPathOutsideAssetRoot(cover_path.display().to_string())
+                })?,
+        };
+        let cover_file = Self::open_cover_in_root(cover_path, &relative, &canonical_root)?;
         // Bound the read to limit+1 bytes (a single open-then-bounded-read,
         // not a size-then-read TOCTOU window). If the buffer fills to the
         // limit+1 mark, the file is too large: refuse it.
-        let cover_file = std::fs::File::open(&canonical).map_err(|e| {
-            TaggingError::CoverDownload(format!(
-                "Failed to open local cover {}: {}",
-                cover_path.display(),
-                e
-            ))
-        })?;
         let mut data = Vec::with_capacity(Self::LOCAL_COVER_MAX_BYTES as usize + 1);
         let n = cover_file.take(Self::LOCAL_COVER_MAX_BYTES + 1).read_to_end(&mut data).map_err(
             |e| {
@@ -1034,6 +1049,316 @@ impl Tagger {
             )));
         }
         self.embed_cover_data_file(file, path, &data)
+    }
+
+    /// Open a cover path relative to the canonical asset root without
+    /// following symlinks, returning the open file. `relative` is the
+    /// caller-validated remainder of `cover_path` under the root. The
+    /// opened descriptor must name a regular file: a FIFO, socket, device,
+    /// symlink escape, or non-existent entry is a diagnosed refusal, and no
+    /// read (let alone a blocking one) can happen on a non-regular file.
+    #[cfg(not(unix))]
+    fn open_cover_in_root(
+        cover_path: &Path,
+        relative: &Path,
+        asset_root: &Path,
+    ) -> Result<std::fs::File> {
+        // No `openat2`/`O_NOFOLLOW` on this platform: fall back to a
+        // canonicalized open plus the containment check the caller already
+        // applied. Job execution is Linux-only, so this arm is a
+        // compile-time surface, not a security boundary.
+        let canonical = asset_root.join(relative).canonicalize().map_err(|e| {
+            TaggingError::CoverDownload(format!(
+                "Local cover file {} is not readable: {}",
+                cover_path.display(),
+                e
+            ))
+        })?;
+        if !canonical.starts_with(asset_root) {
+            return Err(TaggingError::CoverPathOutsideAssetRoot(cover_path.display().to_string()));
+        }
+        std::fs::File::open(&canonical).map_err(|e| {
+            TaggingError::CoverDownload(format!(
+                "Failed to open local cover {}: {e}",
+                cover_path.display()
+            ))
+        })
+    }
+
+    /// Unix implementation of the root-relative cover open (see the
+    /// non-unix twin for the platform fallback).
+    #[cfg(unix)]
+    fn open_cover_in_root(
+        cover_path: &Path,
+        relative: &Path,
+        asset_root: &Path,
+    ) -> Result<std::fs::File> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // The root fd must NOT be obtained by opening `asset_root`
+        // directly: that follows a final-component symlink, so a root that
+        // is swapped for a symlink after `canonicalize` above would pin an
+        // outside directory, and the `openat2` lookup below would then
+        // resolve relative to it. Instead walk every component from `/`
+        // with `openat(O_NOFOLLOW)`: no component, including the last,
+        // may be a symlink.
+        use std::os::unix::ffi::OsStrExt;
+        // Directory-open flags for the per-component walk. Linux/Android
+        // have `O_PATH`: execute-only (`0711`) ancestors stay walkable.
+        // The other Unix targets (macOS in the release pipeline) do not
+        // export `O_PATH` in libc 0.2.186, so open `O_RDONLY` there: read
+        // permission is needed on each walked component, and the fd is
+        // used solely as an `openat`/`openat2` dirfd in both cases,
+        // never read.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        const DIR_OPEN_FLAGS: libc::c_int =
+            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        const DIR_OPEN_FLAGS: libc::c_int =
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY;
+        let mut root_fd = std::fs::File::open("/").map_err(|e| {
+            TaggingError::CoverDownload(format!(
+                "Asset root {} is not usable: {}",
+                asset_root.display(),
+                e
+            ))
+        })?;
+        for comp in asset_root.components() {
+            let name = match comp {
+                // `asset_root` is the `canonicalize`d root: the leading
+                // `RootDir` names `/`, already held by the fd; only plain
+                // name components remain, so no `.`/`..` can appear.
+                std::path::Component::RootDir => continue,
+                std::path::Component::Normal(name) => name,
+                // Anything else is a diagnosed refusal, not guessed at.
+                _ => {
+                    return Err(TaggingError::CoverPathOutsideAssetRoot(
+                        cover_path.display().to_string(),
+                    ));
+                }
+            };
+            let mut name_bytes = name.as_bytes().to_vec();
+            name_bytes.push(0);
+            // SAFETY: `root_fd` is a valid directory descriptor for every
+            // iteration (`/` first, then each directory opened below) and
+            // `name_bytes` is NUL-terminated. `O_NOFOLLOW` refuses a
+            // symlink at this component; `O_DIRECTORY` refuses a
+            // non-directory, on every Unix target. On Linux/Android the
+            // walk uses `O_PATH`, which needs only execute permission on
+            // each component (an execute-only `0711` ancestor stays
+            // walkable); on the other Unix targets it uses `O_RDONLY`,
+            // which needs read permission on each component. In both
+            // cases the fd is used solely as an `openat`/`openat2`
+            // dirfd, never read. The old directory fd is closed before
+            // the replacement is opened, so no fd leaks on any path.
+            let next = unsafe {
+                libc::openat(root_fd.as_raw_fd(), name_bytes.as_ptr().cast(), DIR_OPEN_FLAGS)
+            };
+            if next < 0 {
+                let error = std::io::Error::last_os_error();
+                return Err(match error.raw_os_error() {
+                    // A symlink component (ELOOP) or a non-directory
+                    // component (ENOTDIR) is a path-escape refusal, same
+                    // as the root-relative open below; EACCES and other
+                    // I/O failures are diagnosed refusals, not escapes.
+                    Some(code) if code == libc::ELOOP || code == libc::ENOTDIR => {
+                        TaggingError::CoverPathOutsideAssetRoot(cover_path.display().to_string())
+                    }
+                    _ => TaggingError::CoverDownload(format!(
+                        "Asset root component is not accessible: {error}"
+                    )),
+                });
+            }
+            let next_dir = unsafe { std::fs::File::from_raw_fd(next) };
+            // Closes the previous directory fd before it is shadowed.
+            drop(std::mem::replace(&mut root_fd, next_dir));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // `openat2` resolves the whole relative path against the root
+            // descriptor: `RESOLVE_BENEATH` refuses every escape (including
+            // a symlinked component that points out of the root, and
+            // `..`), and `RESOLVE_NO_SYMLINKS` refuses any symlink at all.
+            // The syscall is atomic — there is no window between validation
+            // and the open.
+            use std::os::unix::ffi::OsStrExt;
+            // A NUL-terminated copy: the syscall reads the name up to the
+            // NUL, and `as_bytes()` alone would expose heap garbage after
+            // the name.
+            let mut name = relative.as_os_str().as_bytes().to_vec();
+            name.push(0);
+            // `openat2` (Linux syscall 437) is not exported by glibc and is
+            // not in libc 0.2.186, so issue it through `libc::syscall`.
+            // SAFETY: open_how is a plain-struct syscall argument; zeroed
+            // initialization is the kernel-documented form.
+            let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+            // `O_NONBLOCK` keeps a FIFO (or any other non-regular entry)
+            // from blocking the open; it is inert on a regular file, which
+            // is the only entry accepted below.
+            how.flags = libc::O_RDONLY as u64 | libc::O_CLOEXEC as u64 | libc::O_NONBLOCK as u64;
+            how.mode = 0;
+            how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS;
+            // SAFETY: SYS_openat2 takes (dirfd, path, how, size); root_fd is
+            // a valid directory fd, name a NUL-terminated relative path, and
+            // how fully initialized with a size covering the whole struct.
+            // The result is an fd (non-negative, fits in c_int) or a
+            // negative errno.
+            let fd = unsafe {
+                libc::syscall(
+                    libc::SYS_openat2,
+                    root_fd.as_raw_fd(),
+                    name.as_ptr() as *const std::ffi::c_char,
+                    &how as *const libc::open_how as libc::c_long,
+                    std::mem::size_of::<libc::open_how>() as u32,
+                ) as libc::c_int
+            };
+            if fd < 0 {
+                let error = std::io::Error::last_os_error();
+                return match error.raw_os_error() {
+                    // Missing file, missing directory component, or no read
+                    // permission: a content problem, not an escape.
+                    Some(code)
+                        if code == libc::ENOENT
+                            || code == libc::ENOTDIR
+                            || code == libc::EACCES =>
+                    {
+                        Err(TaggingError::CoverDownload(format!(
+                            "Local cover file {} is not readable: {error}",
+                            cover_path.display()
+                        )))
+                    }
+                    // `openat2` unavailable (pre-5.6 kernel) or rejected
+                    // (e.g. by a seccomp filter): an environment limit, not
+                    // a path escape — say so, with a way out.
+                    Some(code) if code == libc::ENOSYS || code == libc::EINVAL => {
+                        Err(TaggingError::CoverDownload(format!(
+                            "Local cover validation needs the openat2 syscall, which this \
+                             environment does not support ({error}); run on a Linux kernel 5.6 \
+                             or newer, or drop the local cover from the job"
+                        )))
+                    }
+                    // A symlink component (any level, including the final
+                    // entry) or a `BENEATH`-violation: a path that does not
+                    // stay inside the root as plain entries.
+                    _ => Err(TaggingError::CoverPathOutsideAssetRoot(
+                        cover_path.display().to_string(),
+                    )),
+                };
+            }
+            drop(root_fd);
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
+            let meta = file.metadata().map_err(|e| {
+                TaggingError::CoverDownload(format!(
+                    "Failed to stat local cover {}: {e}",
+                    cover_path.display()
+                ))
+            })?;
+            if !meta.is_file() {
+                return Err(TaggingError::CoverDownload(format!(
+                    "Local cover {} is not a regular file",
+                    cover_path.display()
+                )));
+            }
+            Ok(file)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Portable fallback: no `openat2`. A single `openat` with
+            // `O_NOFOLLOW` refuses a symlink at the final component only;
+            // the residual exposure to symlinked intermediate components
+            // is closed by the `fd_canonical` post-open check below, which
+            // verifies the opened descriptor's canonical location stays
+            // under the root.
+            use std::os::unix::ffi::OsStrExt;
+            // NUL-terminated copy (see the Linux arm).
+            let mut name = relative.as_os_str().as_bytes().to_vec();
+            name.push(0);
+            // `O_NONBLOCK` keeps a FIFO (or any other non-regular entry)
+            // from blocking the open; it is inert on a regular file.
+            let fd = unsafe {
+                libc::openat(
+                    root_fd.as_raw_fd(),
+                    name.as_ptr().cast(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                )
+            };
+            if fd < 0 {
+                let error = std::io::Error::last_os_error();
+                return match error.kind() {
+                    std::io::ErrorKind::NotFound => Err(TaggingError::CoverDownload(format!(
+                        "Local cover file {} is not readable: {error}",
+                        cover_path.display()
+                    ))),
+                    _ => Err(TaggingError::CoverPathOutsideAssetRoot(
+                        cover_path.display().to_string(),
+                    )),
+                };
+            }
+            drop(root_fd);
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
+            let meta = file.metadata().map_err(|e| {
+                TaggingError::CoverDownload(format!(
+                    "Failed to stat local cover {}: {e}",
+                    cover_path.display()
+                ))
+            })?;
+            if !meta.is_file() {
+                return Err(TaggingError::CoverDownload(format!(
+                    "Local cover {} is not a regular file",
+                    cover_path.display()
+                )));
+            }
+            // `O_NOFOLLOW` only refuses a symlink at the final component; a
+            // symlinked intermediate component would have been followed
+            // during resolution. Close the gap by verifying the opened
+            // descriptor's own canonical location stays under the root
+            // (Linux resolves it through procfs; other Unix targets through
+            // `F_GETPATH`).
+            let resolved = Self::fd_canonical(fd);
+            if !resolved.is_some_and(|p| p.starts_with(asset_root)) {
+                return Err(TaggingError::CoverPathOutsideAssetRoot(
+                    cover_path.display().to_string(),
+                ));
+            }
+            Ok(file)
+        }
+    }
+
+    /// Resolve the canonical location of an open file descriptor without
+    /// going back through its pathname: Linux exposes it through procfs,
+    /// Apple, DragonFly, and NetBSD provide `F_GETPATH`. Used only by the
+    /// non-Linux unix fallback (the Linux arm uses `openat2` directly).
+    #[cfg(unix)]
+    #[cfg_attr(any(target_os = "linux", target_os = "android"), allow(dead_code))]
+    fn fd_canonical(fd: std::os::fd::RawFd) -> Option<std::path::PathBuf> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            std::fs::canonicalize(format!("/proc/self/fd/{fd}")).ok()
+        }
+        #[cfg(any(target_vendor = "apple", target_os = "dragonfly", target_os = "netbsd"))]
+        {
+            use std::os::unix::ffi::OsStrExt;
+
+            let mut buf = [0u8; 4096];
+            // SAFETY: F_GETPATH writes a NUL-terminated path into this
+            // buffer, which is at least PATH_MAX bytes on these targets.
+            let result = unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) };
+            if result < 0 {
+                return None;
+            }
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            std::fs::canonicalize(std::ffi::OsStr::from_bytes(&buf[..end])).ok()
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple",
+            target_os = "dragonfly",
+            target_os = "netbsd"
+        )))]
+        {
+            let _ = fd;
+            None
+        }
     }
 
     /// Remove all embedded cover art. A deliberate `clear` cover policy;
@@ -2933,7 +3258,9 @@ mod tests {
     #[test]
     fn policy_clear_title_preserves_subtitle_component() {
         // A clear-title must not erase the subtitle; the subtitle is the
-        // only surviving component, represented alone (no fabricated title).
+        // only surviving component, represented alone in `©nam` with `©alb`
+        // removed (a base title no longer exists, and `©alb` is
+        // base-title-only).
         let temp_dir = TempDir::new().unwrap();
         let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
         let tagger = Tagger::new();
@@ -2951,7 +3278,7 @@ mod tests {
 
         let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
         assert_eq!(tag.title().unwrap(), "Old Sub");
-        assert_eq!(tag.album().unwrap(), "Old Sub");
+        assert!(tag.album().is_none(), "subtitle-only state carries no album atom");
     }
 
     #[test]
@@ -2975,7 +3302,78 @@ mod tests {
 
         let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
         assert_eq!(tag.title().unwrap(), "New Sub");
-        assert_eq!(tag.album().unwrap(), "New Sub");
+        assert!(tag.album().is_none(), "subtitle-only state carries no album atom");
+    }
+
+    #[test]
+    fn policy_subtitle_only_round_trips_through_preserve() {
+        // The subtitle-only state (title cleared, subtitle surviving) must
+        // survive a later job without silent erasure: a subsequent
+        // title-preserve + subtitle-preserve run reads the state back as
+        // "no title, this subtitle" and leaves the atoms untouched
+        // byte-for-byte (the all-preserve early return still applies).
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Clear,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..crate::job::WritePolicies {
+                title: crate::job::TitlePolicy::Preserve,
+                subtitle: crate::job::SubtitlePolicy::Preserve,
+                authors: crate::job::FieldPolicy::Preserve,
+                narrators: crate::job::FieldPolicy::Preserve,
+                series: crate::job::FieldPolicy::Preserve,
+                description: crate::job::FieldPolicy::Preserve,
+                genres: crate::job::FieldPolicy::Preserve,
+                year: crate::job::FieldPolicy::Preserve,
+            }
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let all_preserve = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        // A later all-preserve job: the file must not be rewritten...
+        let before = std::fs::read(&path).unwrap();
+        tagger.write_metadata_with_policies(&path, &meta(), &all_preserve).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        // ...and the subtitle must be intact (not silently erased).
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Old Sub");
+        assert!(tag.album().is_none());
+
+        // In the subtitle-only state, preserving the title while clearing
+        // the subtitle refuses: the titleless `©nam` cannot be read back as
+        // a title to preserve.
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Clear,
+            ..all_preserve
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::PreserveUnresolvable { .. }));
+        // The refusal must not have mutated the file.
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        // A later title-write + subtitle-preserve run recovers the subtitle
+        // verbatim and restores the album atom.
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_preserve
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "New Title - Old Sub");
+        assert_eq!(tag.album().unwrap(), "New Title");
     }
 
     #[test]
@@ -3296,6 +3694,120 @@ mod tests {
         assert!(
             matches!(err, TaggingError::CoverPathOutsideAssetRoot(_)),
             "expected symlink-escape rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cover_root_open_refuses_a_symlinked_root_swap() {
+        // The race shape: `canonicalize` has already resolved the root,
+        // and the root path is then swapped for a symlink to an outside
+        // directory. Opening the root with symlink-following would pin
+        // the outside directory and read from it; the root-fd walk must
+        // refuse the symlink component as an escape instead.
+        let temp_dir = TempDir::new().unwrap();
+        let real = temp_dir.path().join("real-assets");
+        std::fs::create_dir_all(&real).unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("cover.png"), [0x89u8]).unwrap();
+        let root = temp_dir.path().join("assets");
+        std::fs::create_dir_all(&root).unwrap();
+        // The swap after the caller's `canonicalize`: the name now
+        // resolves outside the intended directory.
+        std::fs::rename(&root, temp_dir.path().join("assets.bak")).unwrap();
+        std::os::unix::fs::symlink(&outside, &root).unwrap();
+
+        let err =
+            Tagger::open_cover_in_root(&root.join("cover.png"), Path::new("cover.png"), &root)
+                .unwrap_err();
+        assert!(
+            matches!(err, TaggingError::CoverPathOutsideAssetRoot(_)),
+            "a symlink-swapped root must be refused as an escape, got {err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cover_root_open_refuses_a_non_directory_root() {
+        // The asset root name is a regular file: `canonicalize` succeeds,
+        // so the root-relative walk runs, and the final component's
+        // `openat(O_DIRECTORY)` fails ENOTDIR. Like the ELOOP arm for a
+        // symlinked component, the refusal is an escape diagnosis, not a
+        // cover-content error.
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("assets");
+        std::fs::write(&root, b"not a directory").unwrap();
+
+        let err =
+            Tagger::open_cover_in_root(&root.join("cover.png"), Path::new("cover.png"), &root)
+                .unwrap_err();
+        assert!(
+            matches!(err, TaggingError::CoverPathOutsideAssetRoot(_)),
+            "a non-directory root must be refused as an escape, got {err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn local_cover_accepts_configured_and_canonical_root_spellings() {
+        // Containment strips the cover path against the configured root
+        // first, then the canonical root: an asset area reached through a
+        // symlink must be accepted in BOTH spellings (the raw symlink path
+        // matches the configured root, the canonical path matches only the
+        // fallback arm).
+        let temp_dir = TempDir::new().unwrap();
+        let real_assets = temp_dir.path().join("real-assets");
+        std::fs::create_dir_all(&real_assets).unwrap();
+        let linked_assets = temp_dir.path().join("linked-assets");
+        std::os::unix::fs::symlink(&real_assets, &linked_assets).unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        // Same minimal 1x1 PNG as `local_cover_embeds_and_rejects_bad_paths`.
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let cover = real_assets.join("cover.png");
+        std::fs::write(&cover, PNG).unwrap();
+
+        let tagger = Tagger::new();
+        // Configured-root arm: the raw spelling matches the symlinked root.
+        tagger.embed_cover_local(&path, &linked_assets.join("cover.png"), &linked_assets).unwrap();
+        // Canonical-root fallback arm: the raw spelling matches only the
+        // canonical form of the symlinked root.
+        tagger.embed_cover_local(&path, &real_assets.join("cover.png"), &linked_assets).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert!(tag.artwork().is_some(), "both spellings must embed the cover");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn local_cover_rejects_non_regular_files_without_blocking() {
+        // A FIFO inside the asset root passes containment, but the opened
+        // descriptor must be refused as non-regular before any read: the
+        // old `File::open` on a FIFO blocks indefinitely waiting for a
+        // writer.
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let asset_root = temp_dir.path().join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let fifo = asset_root.join("cover.fifo");
+        // A NUL-terminated copy: the syscall reads the name up to the NUL.
+        let mut fifo_bytes = fifo.as_os_str().as_bytes().to_vec();
+        fifo_bytes.push(0);
+        // SAFETY: fifo_bytes is a valid NUL-terminated pathname.
+        assert_eq!(unsafe { libc::mkfifo(fifo_bytes.as_ptr().cast(), 0o600) }, 0);
+        assert!(!std::fs::metadata(&fifo).unwrap().is_file());
+        let tagger = Tagger::new();
+        let err = tagger.embed_cover_local(&path, &fifo, &asset_root).unwrap_err();
+        assert!(
+            matches!(err, TaggingError::CoverDownload(_)),
+            "expected non-regular-file refusal, got {err:?}"
         );
     }
 
