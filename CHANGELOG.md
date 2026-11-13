@@ -6,6 +6,61 @@ All notable changes to this project will be documented in this file. See [standa
 
 
 ### Added
+- `--job-preview`: a non-mutating preview for `--job` runs that prints the
+  exact sanitized relative output path (plus the effective metadata)
+  resolved by the same parsed template and resolver execution uses; it
+  creates no directories, writes no media, and promises no success.
+- `--machine` (job mode): stable execution results as JSON on stdout only
+  (logs and progress go to stderr), enumerating every produced output and
+  sidecar with per-group identity/outcome and diagnosed errors; artifact
+  paths are relative to the job's `output_root` and validated inside it,
+  never absolute; failure exits 1; stdout always parses.
+- Engine-side no-clobber for `--job` runs: no name is reserved at the final
+  output path. An advisory precheck reports a taken final name early and
+  validates the created parents, and the merge writes a hidden staging
+  sibling, created with `openat` relative to the re-validated (pinned)
+  parent descriptor, so a parent swapped for a symlink to an external
+  directory in that window cannot redirect the creation outside the root;
+  on Linux every media mutation (merge, tag, cover, chapter embedding) is
+  bound to the reserved descriptor, so a replacement installed at the
+  staging pathname after the post-merge verification cannot redirect a
+  write at an external file —
+  descriptor-bound merging requires Linux procfs, so job execution is
+  refused on other platforms. The final name appears only through an
+  atomic no-replace publication (procfs-bound `linkat`, or an `O_EXCL`
+  full-size copy when the staging entry was deleted out from under the
+  descriptor) relative to the pinned, root-validated parent — so a foreign
+  final entry, including a late arrival, is diagnosed as a collision
+  without being read, renamed, or overwritten. A collision leaves the
+  existing file untouched and retains the completed stage as a recoverable
+  artifact; a staging entry swapped for a symlink is refused at verification
+  without following or removing it, so an external target is never
+  published. Sidecars are staged as hidden siblings and exposed at their
+  final names only after the media publication has won: publication links
+  the open inode this run created at the final name no-replace, so replacing
+  the staging entry cannot redirect the link and a sidecar collision is
+  diagnosed without touching the foreign entry; when publication or a
+  required cleanup fails after the media won, the published media and every
+  already-published sidecar are
+  retained and reported in the machine result. A losing job never
+  overwrites, deletes, or publishes a winner's sidecars.
+  Policy-required stale sidecar deletions apply only after the media
+  publication won: an unremovable `chapters.txt`/`cover.txt` fails the run
+  with a diagnosed cleanup error while the published media is retained,
+  instead of publishing success alongside a surviving sidecar.
+- No-unlink job staging: the engine never removes a media or sidecar
+  staging pathname, even when a collision carries this attempt's visible
+  token. Successful publication leaves staging hard links for caller-owned
+  staging-tree cleanup (B1); failed runs retain the completed media stage
+  and report recoverable non-empty stages in `preserved_artifacts`.
+  Staging entries are not auto-cleaned, and fresh per-attempt tokens let
+  retries coexist with retained stages. Required final-sidecar removals
+  remain fallible and unchanged.
+- `ProcessorError` variants consolidated: a group failure now carries its
+  diagnosed error and produced artifacts at the `RunOutcome`/group-outcome
+  level (the machine contract) instead of the previous lossy group-failure
+  variant; a pre-1.0 library API change (the documented contracts are the
+  CLI and README).
 - One parsed-template output-path resolver for `--job` runs (`resolver_version`
   from `--capabilities`): only template separators create directories; a
   token's value is sanitized as component data so it cannot introduce

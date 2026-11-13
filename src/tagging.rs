@@ -547,8 +547,21 @@ impl Tagger {
         policies: &crate::job::WritePolicies,
     ) -> Result<()> {
         let path = file_path.as_ref();
-        Self::ensure_file_exists(path)?;
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.write_metadata_with_policies_file(&mut file, path, metadata, policies)
+    }
 
+    /// The policy-driven metadata write bound to an open file descriptor.
+    /// Job execution uses this so a post-merge replacement of the staging
+    /// name cannot redirect the write at an external file; the path is used
+    /// only for diagnostics.
+    pub fn write_metadata_with_policies_file(
+        &self,
+        file: &mut std::fs::File,
+        path: &Path,
+        metadata: &BookMetadata,
+        policies: &crate::job::WritePolicies,
+    ) -> Result<()> {
         // Validate every explicit `write` before mutating anything: a write
         // without a valid available value is an error, not a silent preserve.
         Self::validate_policies(metadata, policies)?;
@@ -561,7 +574,7 @@ impl Tagger {
             return Ok(());
         }
 
-        let mut tag = mp4ameta::Tag::read_from_path(path).unwrap_or_default();
+        let mut tag = mp4ameta::Tag::read_from(file).unwrap_or_default();
 
         // When both components are preserved, the shared `©nam`/`©alb` pair
         // is left byte-for-byte untouched: rebuilding it would re-derive the
@@ -678,7 +691,7 @@ impl Tagger {
             crate::job::FieldPolicy::Preserve => {}
         }
 
-        tag.write_to_path(path)
+        tag.write_to(file)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write tags: {}", e)))?;
 
         info!("Successfully wrote policy-driven metadata to: {}", path.display());
@@ -892,7 +905,18 @@ impl Tagger {
         let path = file_path.as_ref();
 
         Self::ensure_file_exists(path)?;
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.embed_cover_file(&mut file, path, cover_url).await
+    }
 
+    /// `embed_cover` bound to an open file descriptor (see
+    /// `write_metadata_with_policies_file` for why job execution uses it).
+    pub async fn embed_cover_file(
+        &self,
+        file: &mut std::fs::File,
+        path: &Path,
+        cover_url: &str,
+    ) -> Result<()> {
         debug!("Downloading cover from: {}", cover_url);
 
         // Download cover image
@@ -901,7 +925,7 @@ impl Tagger {
         debug!("Downloaded cover image ({} bytes)", image_data.len());
 
         // Embed in file
-        self.embed_cover_data(path, &image_data)
+        self.embed_cover_data_file(file, path, &image_data)
     }
 
     /// Maximum size of a local cover image in bytes (matches the URL limit).
@@ -940,6 +964,20 @@ impl Tagger {
         cover_path: &Path,
         asset_root: A,
     ) -> Result<()> {
+        let path = file_path.as_ref();
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.embed_cover_local_file(&mut file, path, cover_path, asset_root)
+    }
+
+    /// `embed_cover_local` bound to an open file descriptor (see
+    /// `write_metadata_with_policies_file` for why job execution uses it).
+    pub fn embed_cover_local_file<A: AsRef<Path>>(
+        &self,
+        file: &mut std::fs::File,
+        path: &Path,
+        cover_path: &Path,
+        asset_root: A,
+    ) -> Result<()> {
         if !cover_path.is_absolute() {
             return Err(TaggingError::CoverDownload(format!(
                 "Local cover path must be absolute, got {}",
@@ -971,7 +1009,7 @@ impl Tagger {
         // Bound the read to limit+1 bytes (a single open-then-bounded-read,
         // not a size-then-read TOCTOU window). If the buffer fills to the
         // limit+1 mark, the file is too large: refuse it.
-        let file = std::fs::File::open(&canonical).map_err(|e| {
+        let cover_file = std::fs::File::open(&canonical).map_err(|e| {
             TaggingError::CoverDownload(format!(
                 "Failed to open local cover {}: {}",
                 cover_path.display(),
@@ -979,13 +1017,15 @@ impl Tagger {
             ))
         })?;
         let mut data = Vec::with_capacity(Self::LOCAL_COVER_MAX_BYTES as usize + 1);
-        let n = file.take(Self::LOCAL_COVER_MAX_BYTES + 1).read_to_end(&mut data).map_err(|e| {
-            TaggingError::CoverDownload(format!(
-                "Failed to read local cover {}: {}",
-                cover_path.display(),
-                e
-            ))
-        })?;
+        let n = cover_file.take(Self::LOCAL_COVER_MAX_BYTES + 1).read_to_end(&mut data).map_err(
+            |e| {
+                TaggingError::CoverDownload(format!(
+                    "Failed to read local cover {}: {}",
+                    cover_path.display(),
+                    e
+                ))
+            },
+        )?;
         if (n as u64) > Self::LOCAL_COVER_MAX_BYTES {
             return Err(TaggingError::CoverDownload(format!(
                 "Local cover file {} exceeds the {} byte limit",
@@ -993,7 +1033,7 @@ impl Tagger {
                 Self::LOCAL_COVER_MAX_BYTES
             )));
         }
-        self.embed_cover_data(file_path, &data)
+        self.embed_cover_data_file(file, path, &data)
     }
 
     /// Remove all embedded cover art. A deliberate `clear` cover policy;
@@ -1001,13 +1041,19 @@ impl Tagger {
     pub fn clear_cover<P: AsRef<Path>>(&self, file_path: P) -> Result<()> {
         let path = file_path.as_ref();
         Self::ensure_file_exists(path)?;
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.clear_cover_file(&mut file, path)
+    }
 
-        let mut tag = mp4ameta::Tag::read_from_path(path)
+    /// `clear_cover` bound to an open file descriptor (see
+    /// `write_metadata_with_policies_file` for why job execution uses it).
+    pub fn clear_cover_file(&self, file: &mut std::fs::File, path: &Path) -> Result<()> {
+        let mut tag = mp4ameta::Tag::read_from(file)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to read tag: {}", e)))?;
 
         tag.remove_artworks();
 
-        tag.write_to_path(path)
+        tag.write_to(file)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write tags: {}", e)))?;
 
         info!("Cleared existing cover from: {}", path.display());
@@ -1020,14 +1066,20 @@ impl Tagger {
     pub fn clear_chapters<P: AsRef<Path>>(&self, file_path: P) -> Result<()> {
         let path = file_path.as_ref();
         Self::ensure_file_exists(path)?;
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.clear_chapters_file(&mut file, path)
+    }
 
-        let mut tag = mp4ameta::Tag::read_from_path(path)
+    /// `clear_chapters` bound to an open file descriptor (see
+    /// `write_metadata_with_policies_file` for why job execution uses it).
+    pub fn clear_chapters_file(&self, file: &mut std::fs::File, path: &Path) -> Result<()> {
+        let mut tag = mp4ameta::Tag::read_from(file)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to read tag: {}", e)))?;
 
         tag.chapter_list_mut().clear();
         tag.chapter_track_mut().clear();
 
-        tag.write_to_path(path)
+        tag.write_to(file)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write chapters: {}", e)))?;
 
         info!("Cleared existing chapters from: {}", path.display());
@@ -1038,7 +1090,18 @@ impl Tagger {
         let path = file_path.as_ref();
 
         Self::ensure_file_exists(path)?;
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.embed_cover_data_file(&mut file, path, image_data)
+    }
 
+    /// `embed_cover_data` bound to an open file descriptor (see
+    /// `write_metadata_with_policies_file` for why job execution uses it).
+    pub fn embed_cover_data_file(
+        &self,
+        file: &mut std::fs::File,
+        path: &Path,
+        image_data: &[u8],
+    ) -> Result<()> {
         debug!("Embedding cover art into: {}", path.display());
 
         // Detect image format
@@ -1056,13 +1119,13 @@ impl Tagger {
         };
 
         // Read existing tag or create new one
-        let mut tag = mp4ameta::Tag::read_from_path(path).unwrap_or_default();
+        let mut tag = mp4ameta::Tag::read_from(file).unwrap_or_default();
 
         let artwork = mp4ameta::Img::new(img_fmt, data);
         tag.set_artwork(artwork);
 
         // Write the tag back to file
-        tag.write_to_path(path)
+        tag.write_to(file)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to embed cover: {}", e)))?;
 
         info!("Successfully embedded cover art in: {}", path.display());
@@ -1099,7 +1162,18 @@ impl Tagger {
 
         // Validate file exists
         Self::ensure_file_exists(path)?;
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.embed_chapters_file(&mut file, path, chapters)
+    }
 
+    /// `embed_chapters` bound to an open file descriptor (see
+    /// `write_metadata_with_policies_file` for why job execution uses it).
+    pub fn embed_chapters_file(
+        &self,
+        file: &mut std::fs::File,
+        path: &Path,
+        chapters: &[crate::metadata::Chapter],
+    ) -> Result<()> {
         // Skip if empty (with debug log)
         if chapters.is_empty() {
             debug!("No chapters to embed, skipping");
@@ -1122,7 +1196,7 @@ impl Tagger {
         info!("Embedding {} chapters into: {}", chapters_vec.len(), path.display());
 
         // Read existing tag
-        let mut tag = mp4ameta::Tag::read_from_path(path)
+        let mut tag = mp4ameta::Tag::read_from(file)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to read tag: {}", e)))?;
 
         // Reject chapters at or beyond the file duration before writing. mp4ameta
@@ -1152,7 +1226,7 @@ impl Tagger {
         tag.chapter_track_mut().extend(mp4_chapters);
 
         // Write back to file
-        tag.write_to_path(path)
+        tag.write_to(file)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write chapters: {}", e)))?;
 
         info!("Successfully embedded {} chapters", chapters_vec.len());
@@ -1282,6 +1356,21 @@ impl Tagger {
 
         debug!("Writing chapters.txt to: {}", path.display());
 
+        let mut file = std::fs::File::create(path)?;
+        self.write_chapters_to(&mut file, album, artist, chapters)?;
+
+        info!("Successfully wrote chapters.txt to: {}", path.display());
+        Ok(())
+    }
+
+    /// Render a chapter sidecar into an already-open, caller-owned file.
+    pub(crate) fn write_chapters_to(
+        &self,
+        output: &mut impl std::io::Write,
+        album: &str,
+        artist: Option<&str>,
+        chapters: &[crate::metadata::Chapter],
+    ) -> Result<()> {
         // Build chapters content
         let mut content = String::new();
 
@@ -1306,10 +1395,7 @@ impl Tagger {
             content.push_str(&format!("{} {}\n", timestamp, chapter.title));
         }
 
-        // Write to file
-        std::fs::write(path, content)?;
-
-        info!("Successfully wrote chapters.txt to: {}", path.display());
+        output.write_all(content.as_bytes())?;
         Ok(())
     }
 
@@ -1528,25 +1614,52 @@ fn convert_cover_to_jpeg(image_data: &[u8]) -> Result<Vec<u8>> {
         ))
     })?;
 
-    let temp_dir = tempfile::TempDir::new().map_err(|e| {
-        TaggingError::CoverConversion(format!("Failed to create temp dir for cover: {e}"))
-    })?;
-    let input_path = temp_dir.path().join("cover_input");
-    let output_path = temp_dir.path().join("cover_output.jpg");
-
-    std::fs::write(&input_path, image_data).map_err(|e| {
-        TaggingError::CoverConversion(format!("Failed to write temp cover file: {e}"))
-    })?;
+    use std::io::Write;
 
     // `-frames:v 1` keeps animated inputs to a single still frame. No scaling
-    // filter is applied, so the source dimensions are preserved.
-    let output = std::process::Command::new(ffmpeg.ffmpeg_path())
-        .args(["-hide_banner", "-loglevel", "error", "-i"])
-        .arg(&input_path)
-        .args(["-frames:v", "1", "-c:v", "mjpeg", "-q:v", "2", "-f", "image2", "-y"])
-        .arg(&output_path)
-        .output()
+    // filter is applied, so the source dimensions are preserved. Both image
+    // streams use pipes so FFmpeg diagnostics cannot expose temporary paths.
+    let mut child = std::process::Command::new(ffmpeg.ffmpeg_path())
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-f",
+            "image2",
+            "pipe:1",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| TaggingError::CoverConversion(format!("Failed to run FFmpeg: {e}")))?;
+
+    // Feed stdin concurrently with draining stdout/stderr: an animated image
+    // can produce its first JPEG before FFmpeg consumes all remaining input.
+    // Dropping stdin signals EOF; always reap even if the input write fails.
+    let stdin = child.stdin.take();
+    let (input_result, output) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            stdin
+                .ok_or_else(|| std::io::Error::other("FFmpeg stdin is not available"))
+                .and_then(|mut stdin| stdin.write_all(image_data))
+        });
+        let output = child.wait_with_output();
+        let input_result = writer
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("FFmpeg cover input writer panicked")));
+        (input_result, output)
+    });
+    let output =
+        output.map_err(|e| TaggingError::CoverConversion(format!("Failed to run FFmpeg: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1555,10 +1668,18 @@ fn convert_cover_to_jpeg(image_data: &[u8]) -> Result<Vec<u8>> {
             stderr.trim()
         )));
     }
+    if let Err(e) = input_result {
+        // With `-frames:v 1`, FFmpeg may close its input after decoding the
+        // first frame of a larger animation. A successful decoder exit is
+        // authoritative for that expected broken pipe.
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(TaggingError::CoverConversion(format!(
+                "Failed to pipe cover image to FFmpeg: {e}"
+            )));
+        }
+    }
 
-    let jpeg = std::fs::read(&output_path).map_err(|e| {
-        TaggingError::CoverConversion(format!("Failed to read converted cover: {e}"))
-    })?;
+    let jpeg = output.stdout;
 
     if jpeg.is_empty() {
         return Err(TaggingError::CoverConversion(
@@ -1834,8 +1955,14 @@ mod tests {
 
     #[test]
     fn test_convert_cover_to_jpeg_rejects_non_image() {
-        let result = convert_cover_to_jpeg(b"this is not an image");
-        assert!(matches!(result, Err(TaggingError::CoverConversion(_))));
+        let error = convert_cover_to_jpeg(b"this is not an image")
+            .expect_err("invalid image data must fail conversion");
+        assert!(matches!(&error, TaggingError::CoverConversion(_)));
+        let message = error.to_string();
+        assert!(message.contains("FFmpeg failed to convert cover image"), "{message}");
+        assert!(!message.contains("cover_input"), "{message}");
+        assert!(!message.contains("cover_output"), "{message}");
+        assert!(!message.contains(std::env::temp_dir().to_string_lossy().as_ref()), "{message}");
     }
 
     #[test]

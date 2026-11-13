@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use serde::Serialize;
 use serde::de::Error as _;
 
 use crate::api::MetadataSource;
@@ -536,6 +537,55 @@ impl Job {
         }
     }
 
+    /// The metadata source provider mode builds (`None` in supplied mode).
+    pub fn metadata_source(
+        &self,
+        config: &crate::config::Config,
+    ) -> Result<Option<MetadataSource>> {
+        let source = match (&self.input_provider, self.source.as_ref()) {
+            (Some(_), Some(src)) => Some(
+                MetadataSource::new_with_region(
+                    src.source,
+                    src.api_url.as_deref(),
+                    src.region.unwrap_or(crate::api::MetadataRegion::Us),
+                )
+                .map_err(JobError::Metadata)?,
+            ),
+            (Some(_), None) => Some(
+                MetadataSource::new_with_region(
+                    config.metadata_source,
+                    config.api_url.as_deref(),
+                    config.region,
+                )
+                .map_err(JobError::Metadata)?,
+            ),
+            // Supplied input never needs a client, regardless of `source`.
+            (None, _) => None,
+        };
+        Ok(source)
+    }
+
+    /// Non-mutating preview: resolve the effective metadata exactly as
+    /// execution does and the same parsed template, returning the exact
+    /// sanitized relative path plus the effective values. No directories,
+    /// media, or reservations; no success promised.
+    pub async fn preview(&self, config: &crate::config::Config) -> Result<JobPreview> {
+        let source = self.metadata_source(config)?;
+        let effective = self.resolve(source.as_ref()).await?;
+        let relative_path = crate::path_resolver::PathResolver::resolve_output(
+            effective.template(),
+            &effective.metadata,
+        )
+        .map_err(|e| JobError::Invalid(e.to_string()))?;
+        Ok(JobPreview {
+            schema_version: self.schema_version,
+            resolver_version: crate::path_resolver::RESOLVER_VERSION,
+            path_format: effective.template().to_string(),
+            relative_path,
+            metadata: effective.metadata.clone(),
+        })
+    }
+
     /// Build the supplied (authoritative) base metadata. No catalog lookup and
     /// no provider dependency: a supplied job resolves fully offline. The
     /// override layer is applied by [`Self::resolve`], exactly once, so a
@@ -560,6 +610,268 @@ impl Job {
             chapters: Vec::new(),
         })
     }
+}
+
+/// A non-mutating preview of a job's resolved output path and effective
+/// metadata; `relative_path` is the exact sanitized relative path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JobPreview {
+    pub schema_version: u32,
+    pub resolver_version: &'static str,
+    /// The effective template that was resolved.
+    pub path_format: String,
+    /// The exact sanitized relative output path inside the job's `output_root`.
+    pub relative_path: String,
+    /// The effective (base + overrides) metadata the path resolved from.
+    pub metadata: crate::metadata::BookMetadata,
+}
+
+/// Redact root spellings before other paths so relative output diagnostics
+/// survive, without allowing later substitutions to corrupt `output_root`.
+/// Unknown absolute paths are removed too (notably setup/FFmpeg errors).
+pub(crate) fn redact_machine_error(
+    message: &str,
+    output_root: Option<&std::path::Path>,
+    claim_root: Option<&std::path::Path>,
+    inputs: &[PathBuf],
+) -> String {
+    const SENTINEL: &str = "\u{1}\u{2}\u{3}";
+    let canonical = output_root.and_then(|root| std::fs::canonicalize(root).ok());
+    let mut roots: Vec<_> = [claim_root, canonical.as_deref(), output_root]
+        .into_iter()
+        .flatten()
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect();
+    roots.sort_by_key(|p| std::cmp::Reverse(p.as_os_str().len()));
+    roots.dedup();
+    // Replace each root only as a whole path component (never as a
+    // substring of a longer word): a root such as "out" must not corrupt
+    // the word "output" or an existing "output_root" token into
+    // "output_rootput_root". The token is protected up front so a
+    // previously redacted group error stays stable through a second pass
+    // when JobResult is built.
+    let mut redacted = message.replace("output_root", SENTINEL);
+    for root in roots {
+        redacted = replace_whole_component(&redacted, &root.to_string_lossy(), SENTINEL);
+    }
+    for input in inputs {
+        if input.is_absolute() {
+            redacted = redacted.replace(input.to_string_lossy().as_ref(), "[redacted]");
+        }
+    }
+    static ABSOLUTE_PATH: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?P<prefix>^|[\s"'`(\[=:])(?:/[^\s"'`)\],;]*|[A-Za-z]:[\\/][^\s"'`)\],;]*)"#,
+        )
+        .expect("static absolute-path redaction regex")
+    });
+    ABSOLUTE_PATH.replace_all(&redacted, "${prefix}[redacted]").replace(SENTINEL, "output_root")
+}
+
+/// Replace `needle` in `haystack` only where it stands as a whole path
+/// component: the character after the match must not continue a word or
+/// filename (`alphanumeric`, `_`, `.` — so "out" inside "output.m4b" is
+/// left alone), and the character before it must not be part of a word
+/// (`alphanumeric`/`_`). This redacts the root everywhere a diagnostic can
+/// mention it — followed by a separator, a path (Unix `/` or Windows `\`),
+/// punctuation, quotes, or end of message — without corrupting surrounding
+/// text.
+fn replace_whole_component(haystack: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() {
+        return haystack.to_string();
+    }
+    let continues_word_after = |c: char| c.is_alphanumeric() || c == '_' || c == '.';
+    let in_word_before = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(haystack.len());
+    let mut rest = haystack;
+    while let Some(idx) = rest.find(needle) {
+        let before_ok =
+            idx == 0 || rest[..idx].chars().next_back().is_some_and(|c| !in_word_before(c));
+        let after = &rest[idx + needle.len()..];
+        let after_ok = after.chars().next().is_none_or(|c| !continues_word_after(c));
+        if before_ok && after_ok {
+            out.push_str(&rest[..idx]);
+            out.push_str(replacement);
+            rest = after;
+        } else {
+            out.push_str(&rest[..idx + needle.len()]);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Machine-readable execution result: every produced output and sidecar,
+/// per-group identity and outcome, diagnosed errors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct JobResult {
+    pub schema_version: u32,
+    /// The resolver version that produced the output paths; matches `--capabilities`.
+    pub resolver_version: &'static str,
+    /// `succeeded` when every group succeeded, `partial_failure` when some did not, `failed` when none did.
+    pub status: &'static str,
+    /// The diagnosed error when the run failed before producing any group outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub groups: Vec<GroupResult>,
+}
+
+impl JobResult {
+    /// `true` when every group succeeded.
+    pub fn all_succeeded(&self) -> bool {
+        self.status == "succeeded"
+    }
+
+    /// A diagnosed failure before any group ran.
+    pub fn setup_failed(error: String, job: Option<&Job>) -> Self {
+        let error = redact_machine_error(
+            &error,
+            job.map(|j| j.output_root.as_path()),
+            None,
+            job.map(|j| j.inputs.as_slice()).unwrap_or(&[]),
+        );
+        Self {
+            schema_version: SCHEMA_VERSION,
+            resolver_version: crate::path_resolver::RESOLVER_VERSION,
+            status: "failed",
+            groups: Vec::new(),
+            error: Some(error),
+        }
+    }
+
+    /// Build the machine result: every group in run order with its
+    /// artifacts and diagnosed error; the status never claims success.
+    pub fn from_run(
+        job_schema_version: u32,
+        run: &crate::processor::RunOutcome,
+        output_root: &std::path::Path,
+    ) -> Self {
+        let root = std::fs::canonicalize(output_root).unwrap_or_else(|_| output_root.to_path_buf());
+        let groups = run
+            .outcomes
+            .iter()
+            .map(|o| GroupResult {
+                group: o.group.clone(),
+                outcome: o.outcome,
+                input_files: o
+                    .input_files
+                    .iter()
+                    .map(|input| {
+                        let absolute = std::fs::canonicalize(input).unwrap_or_else(|_| {
+                            if input.is_absolute() {
+                                input.clone()
+                            } else {
+                                std::env::current_dir()
+                                    .map(|cwd| cwd.join(input))
+                                    .unwrap_or_default()
+                            }
+                        });
+                        relative_in_root(&root, &absolute)
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| PathBuf::from("[redacted]"))
+                    })
+                    .collect(),
+                artifacts: o.artifacts.clone(),
+                preserved_artifacts: o.preserved_artifacts.clone(),
+                files_moved: o.files_moved,
+                error: o.error.as_ref().map(|error| {
+                    redact_machine_error(error, Some(output_root), None, &o.input_files)
+                }),
+            })
+            .collect();
+        let status = if run.complete {
+            "succeeded"
+        } else if run.results.is_empty() {
+            "failed"
+        } else {
+            "partial_failure"
+        };
+        Self {
+            schema_version: job_schema_version,
+            resolver_version: crate::path_resolver::RESOLVER_VERSION,
+            status,
+            groups,
+            error: (!run.complete && run.outcomes.is_empty() && !run.detail.is_empty())
+                .then(|| redact_machine_error(&run.detail, Some(output_root), None, &[])),
+        }
+    }
+}
+
+/// The outcome of one processed group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GroupResult {
+    pub group: String,
+    pub outcome: GroupOutcome,
+    /// Processed inputs relative to `output_root`, or `[redacted]` for
+    /// paths outside that root. Inputs are not artifacts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub input_files: Vec<PathBuf>,
+    /// Every produced output and sidecar, relative to the job's
+    /// `output_root` and validated to lie inside it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
+    /// Valid completed staging files retained after publication failed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub preserved_artifacts: Vec<Artifact>,
+    /// `true` when the group's sources were moved to the completed directory.
+    pub files_moved: bool,
+    /// A diagnosed error when the group failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A single produced file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Artifact {
+    /// The artifact's relative path inside the job's `output_root`.
+    pub relative_path: String,
+    /// `audio` for the merged output, `sidecar` for the chapter list.
+    pub kind: &'static str,
+    /// True when the file exists on disk at result time.
+    pub exists: bool,
+}
+
+impl Artifact {
+    /// An artifact from an absolute produced path, validated to lie inside
+    /// the job's `output_root`. There is no absolute-path fallback: a path
+    /// that does not contain `root` yields no artifact (the caller must not
+    /// emit it), and a relative input is refused.
+    pub fn from_absolute(root: &std::path::Path, path: &std::path::Path) -> Option<Self> {
+        let relative_path = relative_in_root(root, path)?;
+        Some(Self { kind: kind_of(&relative_path), exists: path.exists(), relative_path })
+    }
+}
+
+fn relative_in_root(root: &std::path::Path, path: &std::path::Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let relative = path.strip_prefix(root).ok()?;
+    if relative.as_os_str().is_empty()
+        || !relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(relative.to_string_lossy().replace('\\', "/"))
+}
+
+fn kind_of(path: &str) -> &'static str {
+    match std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+        Some("m4b") => "audio",
+        Some(_) => "sidecar",
+        None => "audio",
+    }
+}
+
+/// A group's outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupOutcome {
+    Succeeded,
+    Failed,
 }
 
 /// A job resolved into effective metadata plus policies.
@@ -648,6 +960,48 @@ fn apply_overrides(meta: &mut BookMetadata, overrides: Option<&OverrideFields>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redact_machine_error_protects_the_root_token_from_relative_roots() {
+        // A relative output root ("out") is a substring of the "output_root"
+        // token, so replacing the root first would corrupt an existing token
+        // into "output_rootput_root". The token must survive redaction
+        // intact, on both the first pass and a re-pass of an already
+        // redacted message.
+        let msg = "Published output_root but a sidecar publication failed: \
+                   refusing to overwrite: out/A/T.chapters.txt";
+        let once = redact_machine_error(msg, Some(std::path::Path::new("out")), None, &[]);
+        assert!(once.contains("output_root"), "{once}");
+        assert!(!once.contains("output_rootput_root"), "{once}");
+        assert!(once.contains("refusing to overwrite: output_root/A/T.chapters.txt"), "{once}");
+        let twice = redact_machine_error(&once, Some(std::path::Path::new("out")), None, &[]);
+        assert_eq!(twice, once, "a re-redacted message is stable");
+        // The relative root must not corrupt the word "output" itself.
+        let word = redact_machine_error(
+            "output file written to out/A/T.m4b",
+            Some(std::path::Path::new("out")),
+            None,
+            &[],
+        );
+        assert!(word.starts_with("output file"), "{word}");
+        assert!(word.contains("to output_root/A/T.m4b"), "{word}");
+        // A root followed by quotes or punctuation must still be redacted,
+        // and a Windows-style relative path must be redacted too.
+        let quoted = redact_machine_error(
+            "cannot open 'private-output'",
+            Some(std::path::Path::new("private-output")),
+            None,
+            &[],
+        );
+        assert!(quoted.contains("'output_root'"), "{quoted}");
+        let windows = redact_machine_error(
+            "failed at private-output\\Author\\Title.m4b",
+            Some(std::path::Path::new("private-output")),
+            None,
+            &[],
+        );
+        assert!(windows.contains("output_root\\Author"), "{windows}");
+    }
 
     #[test]
     fn parses_valid_supplied_job() {
@@ -899,5 +1253,84 @@ mod tests {
         job.validate().unwrap();
         let err = job.resolve(None).await.unwrap_err().to_string();
         assert!(err.contains("metadata source"), "{err}");
+    }
+
+    #[test]
+    fn artifact_validates_containment() {
+        // Platform-native absolute root: `/...` is not absolute on Windows.
+        let root = std::env::temp_dir().join("m4b-test-root");
+        // Inside the root: the relative path is kept.
+        let inside = root.join("Author/Book.m4b");
+        let art = Artifact::from_absolute(&root, &inside).unwrap();
+        assert_eq!(art.relative_path, "Author/Book.m4b");
+        assert_eq!(art.kind, "audio");
+        // A sidecar is classified as a sidecar.
+        let sidecar = root.join("Author/Book.chapters.txt");
+        assert_eq!(Artifact::from_absolute(&root, &sidecar).unwrap().kind, "sidecar");
+        // Outside the root: refused, no absolute-path fallback.
+        let outside = std::env::temp_dir().join("m4b-elsewhere/Book.m4b");
+        assert!(Artifact::from_absolute(&root, &outside).is_none());
+        // A sibling prefix that merely shares text must not count:
+        // <tmp>/m4b-test-root-2 is not inside <tmp>/m4b-test-root.
+        let sibling = std::env::temp_dir().join("m4b-test-root-2/Book.m4b");
+        assert!(Artifact::from_absolute(&root, &sibling).is_none());
+        // Relative input is refused.
+        assert!(Artifact::from_absolute(&root, std::path::Path::new("Book.m4b")).is_none());
+    }
+
+    #[test]
+    fn job_result_statuses_are_truthful() {
+        use crate::processor::{GroupOutcomes, RunOutcome};
+        let outcome = |group: &str, ok: bool, err: &str| GroupOutcomes {
+            group: group.into(),
+            artifacts: Vec::new(),
+            preserved_artifacts: Vec::new(),
+            input_files: Vec::new(),
+            files_moved: false,
+            outcome: if ok { GroupOutcome::Succeeded } else { GroupOutcome::Failed },
+            error: (!ok).then(|| err.to_string()),
+        };
+        // Status is driven by the group outcomes, not the results count.
+        let result = || crate::processor::ProcessingResult {
+            input_files: Vec::new(),
+            output_file: "g.m4b".into(),
+            metadata_applied: true,
+            files_moved: false,
+            artifacts: Vec::new(),
+            publication_root: None,
+        };
+        let run = |complete: bool, n: usize, outcomes: Vec<GroupOutcomes>| RunOutcome {
+            results: vec![result(); n],
+            outcomes,
+            complete,
+            detail: String::new(),
+        };
+
+        let res = JobResult::from_run(
+            1,
+            &run(true, 2, vec![outcome("g1", true, ""), outcome("g2", true, "")]),
+            std::path::Path::new("/out"),
+        );
+        assert!(res.all_succeeded(), "all groups succeeded");
+        assert_eq!(res.status, "succeeded");
+        assert_eq!(res.groups.len(), 2);
+
+        let res = JobResult::from_run(
+            1,
+            &run(false, 1, vec![outcome("g1", true, ""), outcome("g2", false, "boom")]),
+            std::path::Path::new("/out"),
+        );
+        assert!(!res.all_succeeded(), "partial must not claim full success");
+        assert_eq!(res.status, "partial_failure");
+        assert_eq!(res.groups.len(), 2, "every group is enumerated");
+        assert_eq!(res.groups[1].error.as_deref(), Some("boom"));
+
+        let res = JobResult::from_run(
+            1,
+            &run(false, 0, vec![outcome("g1", false, "nope")]),
+            std::path::Path::new("/out"),
+        );
+        assert_eq!(res.status, "failed");
+        assert!(!res.all_succeeded());
     }
 }

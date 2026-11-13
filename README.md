@@ -202,6 +202,129 @@ The output path is `output_root` + the (sanitized) template, so the same job
 against the same book always lands on the same path — no worker-time catalog
 rematching is needed by callers.
 
+#### Preview (`--job-preview`)
+
+A non-mutating preview of a job:
+
+```bash
+m4b-merge --job job.json --job-preview
+```
+
+It resolves the effective metadata exactly as execution does (base +
+overrides; a supplied job performs **no catalog request**) and the same
+parsed template with the same resolver, printing the exact sanitized
+relative output path (plus the effective metadata) as JSON. It creates no
+directories, writes no media, reserves no names, and makes no success
+promise: collisions and media errors are execution-time. The previewed path
+is the path execution produces, provided the metadata is the same — a
+**provider** preview that refetches at execution is **advisory** unless the
+caller captures the supplied resolved metadata (supplied mode has no fetch,
+so its preview is exact).
+
+#### Machine results (`--machine`)
+
+Machine-readable execution results for a job:
+
+```bash
+m4b-merge --job job.json --machine
+```
+
+Stable JSON on **stdout only** — all logs and progress go to stderr, so the
+document parses cleanly on success and on failure:
+
+```json
+{ "status": "succeeded | partial_failure | failed",
+  "groups": [{ "group": "job", "outcome": "succeeded", "input_files": ["track1.m4b"],
+    "artifacts": [ { "relative_path": "Author/Title.m4b", "kind": "audio", "exists": true },
+                    { "relative_path": "Author/Title.chapters.txt", "kind": "sidecar", "exists": true } ] } ] }
+```
+
+Every produced output and sidecar is enumerated; artifact paths are
+**relative to the job's `output_root`** and validated to lie inside it (no
+absolute-path fallback). `input_files` are relative to that root when they
+lie inside it and `[redacted]` otherwise; they are not artifacts. Errors use
+`output_root` in place of the root and redact other absolute filesystem paths.
+On job failure, `preserved_artifacts` lists recoverable non-empty staging
+files retained on disk, also relative to the validated root. Empty or invalid
+stages remain on disk but are not reported as recoverable artifacts. `status`
+never claims success for a failed group; a partial or
+total failure exits 1 after the document is printed, and setup/run-level
+failures emit a `failed` document with a top-level `error` and empty
+`groups`. A **job run is one book**: one group named `"job"`, so
+`partial_failure` cannot occur from `--machine --job`; it is reserved for
+multi-group library consumers of `Processor::run`.
+
+#### No-clobber
+
+Job execution reserves no name at the final output path: an advisory
+precheck reports an already-taken final name early and validates the created
+parent directories against the canonical output root, and the parent is
+re-validated immediately before the merge. The binding guarantee is the
+atomic no-replace publication below — no silent suffixing, rename, or
+overwrite, at any point. The engine never unlinks its staging pathnames;
+an occupied staging name is a collision, even if it carries this attempt's
+visible token. On success, each staging entry remains as a hard link
+alongside the published output or sidecar, owned by the job's staging-tree
+cleanup (the caller, B1). On failure, the completed media stage is retained
+and reported in `preserved_artifacts`. **Staging entries are not auto-cleaned
+by the engine**: callers must clean their job-owned staging tree, accepting
+retained entries to avoid deleting another writer's replacement. Each job
+attempt gets a fresh staging token, so retries do not collide with retained
+entries. Source files and a winning job's final names are never discarded.
+Policy-required stale sidecar deletions (chapter/cover `clear`, explicit-empty
+chapter writes, preserve-without-source-sidecar) are fallible and apply only
+after the media publication has won the final name: a sidecar that cannot be
+removed fails the run with a diagnosed cleanup error, while the already-published
+media is retained and reported in the machine result, so a surviving entry never
+contradicts the requested policy.
+
+The merge writes an exclusively created hidden staging sibling. The
+destination parent is re-pinned after the merge-progress callback, and the
+stage is created with `openat` relative to that pinned descriptor: a parent
+swapped for a symlink to an external directory in that window cannot
+redirect the creation, so the stage always lands inside the output root.
+**On Linux**, the reserved descriptor then stays open through every step:
+native copies write directly to it, FFmpeg inherits it and opens
+`/proc/self/fd/N` with an explicit MP4 muxer, and every post-merge tag,
+cover, and chapter mutation is bound to the same descriptor — a replacement
+installed at the staging pathname after the post-merge verification (even
+during the Tagging progress callback) cannot redirect a write at an
+external file. **Descriptor-bound merging requires Linux procfs: job
+execution is refused on every other platform** rather than accepted with a
+known-redirectable pathname write.
+
+After all mutations succeed, publication pins and validates the destination
+parent and creates the final name no-replace: if the staging path still
+names the reserved inode, Linux binds the link source to the open descriptor
+through procfs; if a post-verification swap deleted the staging entry, the
+reserved inode's contents are materialized at the final name with `O_EXCL`
+and a verified full-size copy. The final name is never inspected, removed,
+or released before that creation: a foreign file or symlink at the final
+name, including a late arrival, fails with a diagnosed collision instead of
+being read, renamed, or overwritten. If publication fails, valid staged
+media is retained and listed in `preserved_artifacts` for recovery.
+Artifact relatives use the root captured at publication, not a later
+retarget of a symlinked root.
+
+Chapter and cover sidecars are staged as hidden siblings of the media and
+are exposed at their final sibling names only after the media publication
+has won. Publication links the open inode this run created at the final name
+no-replace through the pinned parent: replacing the staging entry cannot
+redirect the link to a foreign file. A foreign entry at the final name —
+installed by a concurrent winner, or any other actor — is never read,
+replaced, followed, or deleted. A job that loses the media race never writes,
+overwrites, or deletes a winner's sidecar. Unpublished staged sidecars are
+left in place without separate artifact entries; the media and every sidecar
+already published are retained and reported in the machine result.
+Policy-required removal of a stale final sidecar (chapter `clear`, cover
+`clear`, cover `preserve` without a source sidecar) happens only after the
+media publication has won, so a losing job can never remove a winner's
+sidecar. (Job execution is Linux-only, so these paths are the only ones
+exercised; the library's non-Unix fallbacks remain for direct `Processor`
+consumers outside job mode.) This protects the job's staging area and
+final sibling names only; publishing into another shared destination still
+needs the caller's own race-safe publication.
+
 ### Verify Environment
 
 Check FFmpeg installation and version.
@@ -291,13 +414,16 @@ substitution semantics, and the field/cover/chapter policy vocabulary.
 Callers build pickers, examples, and validation from this document instead of
 maintaining their own registry, and reject protocol/resolver versions they do
 not understand. The command is self-contained (no FFmpeg, job, or network).
+The `--job-preview` and `--machine` surfaces carry the same
+`schema_version`/`resolver_version` identity, so a caller can verify that a
+path came from the resolver version it validated.
 
 ## Exit Codes
 
-| Code | Description                                                 |
-|------|------------------------------------------------------------|
-| `0`  | Success                                                     |
-| `1`  | Error (missing input, FFmpeg not found, processing failed) |
+| Code | Description                                                                                                     |
+|------|-----------------------------------------------------------------------------------------------------------------|
+| `0`  | Success (in `--machine` mode: every group succeeded)                                                            |
+| `1`  | Error (missing input, FFmpeg not found, processing failed; in `--machine` mode: partial or total failure)       |
 
 ## Contributing
 
