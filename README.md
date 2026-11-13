@@ -260,46 +260,53 @@ precheck reports an already-taken final name early and validates the created
 parent directories against the canonical output root, and the parent is
 re-validated immediately before the merge. The binding guarantee is the
 atomic no-replace publication below — no silent suffixing, rename, or
-overwrite, at any point. A failed merge removes its staging entry, never the
-source files. Cleanup pins and validates the parent, then uses `unlinkat`,
+overwrite, at any point. A failed run removes only its own staging entries,
+never the source files, and never an entry a winning job installed at the
+final names. Cleanup pins and validates the parent, then uses `unlinkat`,
 so a swapped symlink is removed as a link rather than followed outside the
 root. Policy-required stale sidecar deletions (chapter/cover `clear`,
-preserve-without-source-sidecar) are fallible: a sidecar that cannot be
-removed aborts the run before publication and source moves, so a surviving
-entry never contradicts the requested policy.
+preserve-without-source-sidecar) are fallible and apply only after the media
+publication has won the final name: a sidecar that cannot be removed fails
+the run with a diagnosed cleanup error, while the already-published media is
+retained and reported in the machine result, so a surviving entry never
+contradicts the requested policy.
 
-The merge writes an exclusively created hidden staging sibling. **On Linux**,
-the reserved descriptor stays open through merge verification: native copies
-write directly to it, and FFmpeg inherits it and opens `/proc/self/fd/N` with
-an explicit MP4 muxer. These procfs magic links bind the reserved inode even
-if an attacker replaces its staging name. A substituted staging entry is
-then refused by post-merge verification. **Other Unix platforms retain the
-pathname-based reserve-then-verify backstop**: verification rejects symlinked,
-empty, non-regular, or out-of-root results, but a staging-name swap before
-merging can still redirect the write before that rejection. This is an
-accepted platform limitation; descriptor-bound merging requires Linux procfs.
-Subsequent tag, cover, and chapter mutations operate on the verified stage.
+The merge writes an exclusively created hidden staging sibling. **On
+Linux**, the reserved descriptor stays open through every step: native
+copies write directly to it, FFmpeg inherits it and opens
+`/proc/self/fd/N` with an explicit MP4 muxer, and every post-merge tag,
+cover, and chapter mutation is bound to the same descriptor — a replacement
+installed at the staging pathname after the post-merge verification (even
+during the Tagging progress callback) cannot redirect a write at an
+external file. **Descriptor-bound merging requires Linux procfs: job
+execution is refused on every other platform** rather than accepted with a
+known-redirectable pathname write.
 
 After all mutations succeed, publication pins and validates the destination
-parent and creates the final name with no-replace `linkat`, then unlinks the
-staging entry. The final name is never inspected, removed, or released before
-that link: a foreign file or symlink at the final name, including a late
-arrival, fails with a diagnosed collision instead of being read, renamed, or
-overwritten. Linux binds the link source through
-an open, no-follow staging descriptor; other Unix platforms link its
-just-validated name within the pinned parent, retaining a source-entry swap
-window. If publication fails, valid staged media is retained and listed in
-`preserved_artifacts` for recovery. Artifact relatives use the root captured
-at publication, not a later retarget of a symlinked root.
+parent and creates the final name no-replace: if the staging path still
+names the reserved inode, Linux binds the link source to the open descriptor
+through procfs; if a post-verification swap deleted the staging entry, the
+reserved inode's contents are materialized at the final name with `O_EXCL`
+and a verified full-size copy. The final name is never inspected, removed,
+or released before that creation: a foreign file or symlink at the final
+name, including a late arrival, fails with a diagnosed collision instead of
+being read, renamed, or overwritten. If publication fails, valid staged
+media is retained and listed in `preserved_artifacts` for recovery.
+Artifact relatives use the root captured at publication, not a later
+retarget of a symlinked root.
 
-Chapter and cover sidecars retain their final sibling names. On Unix, stale
-entries are unlinked through a validated pinned parent and replacements are
-exclusively created with `openat`, so a pre-existing or newly installed
-symlink cannot redirect a sidecar write outside the root. Sidecars are still
-separate, non-atomic writes before media publication. Non-Unix platforms use
-root-checked pathname fallbacks. This protects the job's staging area only;
-publishing into another shared destination still needs the caller's own
-race-safe publication.
+Chapter and cover sidecars are staged as hidden siblings of the media and
+are exposed at their final sibling names only after the media publication
+has won, with `O_EXCL`-style no-replace link creation through the pinned
+parent — a job that loses the media race never writes, overwrites, or
+deletes a winner's sidecar, and its staged sidecars are discarded with its
+staging media. If a sidecar publication fails, the run is diagnosed with a
+collision, the foreign entry is left untouched, and the already-published
+media is retained. (Job execution is Linux-only, so these paths are the
+only ones exercised; the library's non-Unix fallbacks remain for direct
+`Processor` consumers outside job mode.) This protects the job's staging
+area and final sibling names only; publishing into another shared
+destination still needs the caller's own race-safe publication.
 
 ### Verify Environment
 

@@ -18,22 +18,31 @@ All notable changes to this project will be documented in this file. See [standa
 - Engine-side no-clobber for `--job` runs: no name is reserved at the final
   output path. An advisory precheck reports a taken final name early and
   validates the created parents, and the merge writes a hidden staging
-  sibling inside the re-validated parent; every media mutation (merge, tag,
-  cover, chapter embedding) happens on that staging file before the final
-  name appears through an atomic no-replace `linkat` relative to the pinned,
-  root-validated parent — so a foreign final entry, including a late
-  arrival, is diagnosed as a collision without being read, renamed, or
-  overwritten, and no path-based media write can be redirected at an
-  external file. The staged result must be regular, non-empty, and inside
-  the canonical root. A collision leaves the existing file untouched and
-  retains the completed stage as a recoverable artifact; a failed merge
-  removes its staging entry; rejected outputs are discarded root-aware and
-  pinned, so cleanup can never delete a file outside the root; a staging
-  entry swapped for a symlink is refused at verification and removed as a
-  link (never followed), so an external target is never published.
-  Policy-required stale sidecar deletions are fallible: an unremovable
-  `chapters.txt`/`cover.txt` aborts the run before publication and source
-  moves instead of publishing success alongside a surviving sidecar.
+  sibling inside the re-validated parent; on Linux every media mutation
+  (merge, tag, cover, chapter embedding) is bound to the reserved
+  descriptor, so a replacement installed at the staging pathname after the
+  post-merge verification cannot redirect a write at an external file —
+  descriptor-bound merging requires Linux procfs, so job execution is
+  refused on other platforms. The final name appears only through an
+  atomic no-replace publication (procfs-bound `linkat`, or an `O_EXCL`
+  full-size copy when the staging entry was deleted out from under the
+  descriptor) relative to the pinned, root-validated parent — so a foreign
+  final entry, including a late arrival, is diagnosed as a collision
+  without being read, renamed, or overwritten. A collision leaves the
+  existing file untouched and retains the completed stage as a recoverable
+  artifact; a failed run removes only its own staging entries; rejected
+  outputs are discarded root-aware and pinned, so cleanup can never delete
+  a file outside the root; a staging entry swapped for a symlink is
+  refused at verification and removed as a link (never followed), so an
+  external target is never published. Sidecars are staged as hidden
+  siblings and exposed at their final names only after the media
+  publication has won: a losing job never overwrites, deletes, or
+  publishes a winner's sidecars, and a sidecar collision is diagnosed
+  without touching the foreign entry, retaining the published media.
+  Policy-required stale sidecar deletions apply only after the media
+  publication won: an unremovable `chapters.txt`/`cover.txt` fails the run
+  with a diagnosed cleanup error while the published media is retained,
+  instead of publishing success alongside a surviving sidecar.
 - `ProcessorError` variants consolidated: a group failure now carries its
   diagnosed error and produced artifacts at the `RunOutcome`/group-outcome
   level (the machine contract) instead of the previous lossy group-failure
