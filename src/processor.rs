@@ -108,6 +108,17 @@ pub enum ProcessorError {
         artifacts: Vec<crate::job::Artifact>,
     },
 
+    /// The sidecar's final name was published (the no-replace link won)
+    /// but the staging entry could not be removed afterward. The final
+    /// sidecar exists on disk and IS this run's sidecar: callers must
+    /// report it as a retained artifact.
+    #[error("Published sidecar {path} but failed to remove its staging entry: {source}")]
+    SidecarPublishedCleanupFailed {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("Output path already exists; refusing to overwrite: {path}")]
     OutputCollision { path: PathBuf },
 
@@ -250,6 +261,11 @@ pub struct Processor {
     /// Test-only staging basename for deterministic pre-install races.
     #[cfg(test)]
     staging_name: Option<String>,
+    /// Test-only override of the staging name removed after the sidecar
+    /// link: naming an absent entry makes the post-link cleanup fail
+    /// deterministically, without permission tricks.
+    #[cfg(test)]
+    sidecar_unlink_name: Option<String>,
     /// Test-only substitute for [`Tagger::embed_chapters`], so the
     /// chapter-embed failure path can be exercised without a real file.
     #[cfg(test)]
@@ -396,6 +412,8 @@ impl Processor {
             #[cfg(test)]
             staging_name: None,
             #[cfg(test)]
+            sidecar_unlink_name: None,
+            #[cfg(test)]
             embed_hook,
         })
     }
@@ -434,6 +452,8 @@ impl Processor {
             #[cfg(test)]
             staging_name: None,
             #[cfg(test)]
+            sidecar_unlink_name: None,
+            #[cfg(test)]
             embed_hook,
         })
     }
@@ -458,6 +478,8 @@ impl Processor {
             claim_root: None,
             #[cfg(test)]
             staging_name: None,
+            #[cfg(test)]
+            sidecar_unlink_name: None,
             merger,
             tagger,
             #[cfg(test)]
@@ -1191,19 +1213,32 @@ impl Processor {
         struct StagedSidecar {
             final_path: PathBuf,
             staged_path: PathBuf,
+            /// The (dev, ino) of the inode this run created and wrote.
+            /// Publication must publish exactly this inode: a regular file
+            /// swapped in at the staging name after the write is refused.
+            identity: (u64, u64),
         }
         let mut staged_sidecars: Vec<StagedSidecar> = Vec::new();
-        let tag_fail =
-            |path: &std::path::Path, staged: &[StagedSidecar], e: TaggingError| -> ProcessorError {
-                // The media stage is always discarded; every staged sidecar is
-                // discarded too (a named failure is a sidecar-side failure).
-                for sidecar in staged {
-                    self.discard_output(&sidecar.staged_path);
-                }
-                self.discard_output(path);
-                self.discard_output(&staged_path);
-                ProcessorError::Tagging(e)
-            };
+        let tag_fail = |path: &std::path::Path,
+                        staged: &[StagedSidecar],
+                        root: &PathBuf,
+                        e: TaggingError|
+         -> ProcessorError {
+            // The media stage is always discarded; every staged sidecar
+            // is discarded too, but only when it still names the inode
+            // this run created (a foreign swap is left untouched).
+            for sidecar in staged {
+                self.discard_staged_sidecar_if_ours(
+                    &sidecar.final_path,
+                    &sidecar.staged_path,
+                    sidecar.identity,
+                    root,
+                );
+            }
+            self.discard_output(path);
+            self.discard_output(&staged_path);
+            ProcessorError::Tagging(e)
+        };
         // Policy-required final sidecar names to remove only after the media
         // publication has won, so a losing job can never delete a winner's
         // sidecar. The queue is shared by the cover and chapter policies.
@@ -1217,12 +1252,21 @@ impl Processor {
                 let source_sidecar = input_paths[0].with_extension("cover.txt");
                 if source_sidecar.is_file() {
                     let staged_sidecar = self.staged_sidecar_path(&output_path, "cover.txt");
-                    if let Err(e) = self.copy_job_sidecar(&source_sidecar, &staged_sidecar) {
-                        return Err(tag_fail(&staged_path, &staged_sidecars, e));
-                    }
+                    let identity = match self.copy_job_sidecar(&source_sidecar, &staged_sidecar) {
+                        Ok(identity) => identity,
+                        Err(e) => {
+                            return Err(tag_fail(
+                                &staged_path,
+                                &staged_sidecars,
+                                &job.output_root,
+                                e,
+                            ));
+                        }
+                    };
                     staged_sidecars.push(StagedSidecar {
                         final_path: output_path.with_extension("cover.txt"),
                         staged_path: staged_sidecar,
+                        identity,
                     });
                 } else {
                     remove_after_publish.push(output_path.with_extension("cover.txt"));
@@ -1235,7 +1279,7 @@ impl Processor {
                     file,
                     &job.output_root,
                 ) {
-                    return Err(tag_fail(&staged_path, &staged_sidecars, e));
+                    return Err(tag_fail(&staged_path, &staged_sidecars, &job.output_root, e));
                 }
             }
             crate::job::CoverPolicy::WriteUrl(explicit) => {
@@ -1248,7 +1292,7 @@ impl Processor {
                     if let Err(e) =
                         self.tagger.embed_cover_file(&mut staged_media, &staged_path, &url).await
                     {
-                        return Err(tag_fail(&staged_path, &staged_sidecars, e));
+                        return Err(tag_fail(&staged_path, &staged_sidecars, &job.output_root, e));
                     }
                 }
             }
@@ -1257,7 +1301,7 @@ impl Processor {
                 // holds; the stale sidecar is removed only after the media
                 // publication has claimed the final name.
                 if let Err(e) = self.tagger.clear_cover_file(&mut staged_media, &staged_path) {
-                    return Err(tag_fail(&staged_path, &staged_sidecars, e));
+                    return Err(tag_fail(&staged_path, &staged_sidecars, &job.output_root, e));
                 }
                 remove_after_publish.push(output_path.with_extension("cover.txt"));
             }
@@ -1277,7 +1321,7 @@ impl Processor {
                 if clear {
                     if let Err(e) = self.tagger.clear_chapters_file(&mut staged_media, &staged_path)
                     {
-                        return Err(tag_fail(&staged_path, &staged_sidecars, e));
+                        return Err(tag_fail(&staged_path, &staged_sidecars, &job.output_root, e));
                     }
                     // The stale sidecar is removed only after the media
                     // publication has claimed the final name, so a concurrent
@@ -1289,7 +1333,7 @@ impl Processor {
                         &staged_path,
                         &write_chapters,
                     ) {
-                        return Err(tag_fail(&staged_path, &staged_sidecars, e));
+                        return Err(tag_fail(&staged_path, &staged_sidecars, &job.output_root, e));
                     }
                     let artist = if effective.metadata.authors.is_empty() {
                         None
@@ -1297,23 +1341,36 @@ impl Processor {
                         Some(effective.metadata.authors.join(", "))
                     };
                     let staged_sidecar = self.staged_sidecar_path(&output_path, "chapters.txt");
-                    let sidecar_write =
-                        self.create_job_sidecar(&staged_sidecar).and_then(|mut file| {
-                            self.tagger.write_chapters_to(
-                                &mut file,
-                                &effective.metadata.title,
-                                artist.as_deref(),
-                                &write_chapters,
-                            )
-                        });
-                    if let Err(e) = sidecar_write {
-                        // A partially written sidecar would be an undisclosed
-                        // extra: the group reports no artifacts.
-                        return Err(tag_fail(&staged_sidecar, &staged_sidecars, e));
-                    }
+                    let sidecar_write = self.create_job_sidecar(&staged_sidecar).and_then(
+                        |(mut file, identity)| {
+                            self.tagger
+                                .write_chapters_to(
+                                    &mut file,
+                                    &effective.metadata.title,
+                                    artist.as_deref(),
+                                    &write_chapters,
+                                )
+                                .map(|()| identity)
+                        },
+                    );
+                    let identity = match sidecar_write {
+                        Ok(identity) => identity,
+                        Err(e) => {
+                            // A partially written sidecar would be an
+                            // undisclosed extra: the group reports no
+                            // artifacts.
+                            return Err(tag_fail(
+                                &staged_sidecar,
+                                &staged_sidecars,
+                                &job.output_root,
+                                e,
+                            ));
+                        }
+                    };
                     staged_sidecars.push(StagedSidecar {
                         final_path: output_path.with_extension("chapters.txt"),
                         staged_path: staged_sidecar,
+                        identity,
                     });
                 }
                 // A resolved empty list leaves the merged copy's chapters and
@@ -1321,7 +1378,7 @@ impl Processor {
             }
             crate::job::ChaptersPolicy::Clear => {
                 if let Err(e) = self.tagger.clear_chapters_file(&mut staged_media, &staged_path) {
-                    return Err(tag_fail(&staged_path, &staged_sidecars, e));
+                    return Err(tag_fail(&staged_path, &staged_sidecars, &job.output_root, e));
                 }
                 // A re-run with `clear` must not leave a sidecar that still
                 // advertises chapters at the deterministic output path; the
@@ -1338,12 +1395,21 @@ impl Processor {
                 let source_sidecar = input_paths[0].with_extension("chapters.txt");
                 if source_sidecar.is_file() {
                     let staged_sidecar = self.staged_sidecar_path(&output_path, "chapters.txt");
-                    if let Err(e) = self.copy_job_sidecar(&source_sidecar, &staged_sidecar) {
-                        return Err(tag_fail(&staged_sidecar, &staged_sidecars, e));
-                    }
+                    let identity = match self.copy_job_sidecar(&source_sidecar, &staged_sidecar) {
+                        Ok(identity) => identity,
+                        Err(e) => {
+                            return Err(tag_fail(
+                                &staged_sidecar,
+                                &staged_sidecars,
+                                &job.output_root,
+                                e,
+                            ));
+                        }
+                    };
                     staged_sidecars.push(StagedSidecar {
                         final_path: output_path.with_extension("chapters.txt"),
                         staged_path: staged_sidecar,
+                        identity,
                     });
                 } else {
                     remove_after_publish.push(output_path.with_extension("chapters.txt"));
@@ -1367,7 +1433,12 @@ impl Processor {
         // in the slice.
         let discard_unpublished = |staged: &[StagedSidecar]| {
             for sidecar in staged {
-                self.discard_output(&sidecar.staged_path);
+                self.discard_staged_sidecar_if_ours(
+                    &sidecar.final_path,
+                    &sidecar.staged_path,
+                    sidecar.identity,
+                    &job.output_root,
+                );
             }
         };
         let publication_root = self
@@ -1395,16 +1466,23 @@ impl Processor {
             e
         };
         for (i, staged_sidecar) in staged_sidecars.iter().enumerate() {
-            self.publish_staged_sidecar(&staged_sidecar.final_path, &staged_sidecar.staged_path)
-                .map_err(|e| {
-                    post_publish_fail(
-                        &staged_sidecars[i..],
-                        ProcessorError::SidecarFailed {
-                            source: Box::new(e),
-                            artifacts: published.to_vec(),
-                        },
-                    )
-                })?;
+            let sidecar_result = self.publish_staged_sidecar(
+                &staged_sidecar.final_path,
+                &staged_sidecar.staged_path,
+                staged_sidecar.identity,
+            );
+            if let Err(e) = sidecar_result {
+                let artifacts = self.sidecar_failure_artifacts(
+                    &publication_root,
+                    &e,
+                    &staged_sidecar.final_path,
+                    &published,
+                );
+                return Err(post_publish_fail(
+                    &staged_sidecars[i..],
+                    ProcessorError::SidecarFailed { source: Box::new(e), artifacts },
+                ));
+            }
             if let Some(artifact) =
                 crate::job::Artifact::from_absolute(&publication_root, &staged_sidecar.final_path)
             {
@@ -1873,6 +1951,30 @@ impl Processor {
         })
     }
 
+    /// The artifacts a sidecar publication failure must report: the
+    /// published media plus every sidecar already published, and — when
+    /// the failure is a post-link staging-cleanup refusal — the sidecar
+    /// whose final name the no-replace link already won. That sidecar
+    /// exists on disk and belongs to this run, so omitting it from the
+    /// failure outcome would report a file that is not there.
+    fn sidecar_failure_artifacts(
+        &self,
+        publication_root: &std::path::Path,
+        error: &ProcessorError,
+        final_sidecar: &std::path::Path,
+        published: &[crate::job::Artifact],
+    ) -> Vec<crate::job::Artifact> {
+        let mut artifacts = published.to_vec();
+        if matches!(error, ProcessorError::SidecarPublishedCleanupFailed { .. }) {
+            if let Some(artifact) =
+                crate::job::Artifact::from_absolute(publication_root, final_sidecar)
+            {
+                artifacts.push(artifact);
+            }
+        }
+        artifacts
+    }
+
     /// The staging sibling for a final-name sidecar: the same hidden
     /// namespace as the media stage, so a job that has not won publication
     /// never writes at a final sidecar name.
@@ -1895,6 +1997,7 @@ impl Processor {
         &self,
         final_sidecar: &std::path::Path,
         staged_sidecar: &std::path::Path,
+        identity: (u64, u64),
     ) -> Result<()> {
         let job = self.job.as_ref().ok_or_else(|| self.output_root_escape(final_sidecar))?;
         let root =
@@ -1923,12 +2026,15 @@ impl Processor {
             )
             .map_err(|_| self.output_root_escape(final_sidecar))?;
             // The sidecar to publish is the inode this run created and
-            // wrote: open it without following a replacement symlink and
-            // non-blocking (a swap-in FIFO would otherwise block the open
-            // forever), and name it through the descriptor. A swap
-            // installed between the open and the link cannot redirect the
-            // publication, because the link source is the open inode, not
-            // the staging pathname.
+            // wrote, named by the (dev, ino) identity captured at
+            // creation: open the staging name without following a
+            // replacement symlink and non-blocking (a swap-in FIFO would
+            // otherwise block the open forever), then verify the opened
+            // inode IS that identity. A concurrent replacement with any
+            // other regular file is refused, and a swap installed between
+            // the open and the link cannot redirect the publication,
+            // because the link source is the open inode, not the staging
+            // pathname.
             // SAFETY: dirfd is pinned and validated; staged_name is valid.
             let fd = unsafe {
                 libc::openat(
@@ -1944,6 +2050,13 @@ impl Processor {
             if unsafe { libc::fstat(fd, &mut meta) } != 0
                 || meta.st_mode & libc::S_IFMT != libc::S_IFREG
             {
+                // SAFETY: fd is owned here.
+                unsafe { libc::close(fd) };
+                return Err(self.output_root_escape(staged_sidecar));
+            }
+            if (meta.st_dev, meta.st_ino) != identity {
+                // The staging name no longer names the inode this run
+                // created: the replacement is never published.
                 // SAFETY: fd is owned here.
                 unsafe { libc::close(fd) };
                 return Err(self.output_root_escape(staged_sidecar));
@@ -1978,21 +2091,77 @@ impl Processor {
                 });
             }
             // SAFETY: dirfd is pinned and validated; the stage is consumed
-            // as a link, never followed.
-            if unsafe { libc::unlinkat(dirfd.0, staged_name.as_ptr(), 0) } != 0 {
-                return Err(ProcessorError::OutputDirCreation(format!(
-                    "Published sidecar but failed to remove staging entry: {}",
-                    std::io::Error::last_os_error()
-                )));
+            // as a link, never followed. A cleanup failure after the link
+            // won is a distinct, truthful outcome: the final sidecar
+            // exists and is this run's sidecar.
+            let unlink_target = {
+                #[cfg(test)]
+                {
+                    if let Some(name) = &self.sidecar_unlink_name {
+                        CString::new(name.as_bytes()).unwrap()
+                    } else {
+                        staged_name.clone()
+                    }
+                }
+                #[cfg(not(test))]
+                {
+                    staged_name.clone()
+                }
+            };
+            if unsafe { libc::unlinkat(dirfd.0, unlink_target.as_ptr(), 0) } != 0 {
+                return Err(ProcessorError::SidecarPublishedCleanupFailed {
+                    path: final_sidecar.to_path_buf(),
+                    source: std::io::Error::last_os_error(),
+                });
             }
             Ok(())
         })();
+        // On a publication failure, remove the staging entry only when it
+        // still names the inode this run created. A foreign entry
+        // installed at the staging name (a swapped-in regular file, FIFO,
+        // symlink, or anything else) is left untouched: it is not ours to
+        // remove, and deleting it would consume another writer's file.
         if result.is_err() {
-            // Our staged temp is removed so no hidden name lingers; the
-            // foreign final entry, if any, is untouched.
-            self.discard_output(staged_sidecar);
+            self.discard_staged_sidecar_if_ours(final_sidecar, staged_sidecar, identity, &root);
         }
         result
+    }
+
+    /// Remove the staging sidecar entry when it still names the inode
+    /// this run created; leave a foreign entry in place.
+    fn discard_staged_sidecar_if_ours(
+        &self,
+        final_sidecar: &std::path::Path,
+        staged_sidecar: &std::path::Path,
+        identity: (u64, u64),
+        root: &std::path::Path,
+    ) {
+        use std::os::unix::ffi::OsStrExt;
+        let dirfd = match pin_parent_in_root(final_sidecar, root) {
+            Some(dirfd) => dirfd,
+            None => return,
+        };
+        let name = match staged_sidecar.file_name().map(|n| n.as_bytes().to_vec()) {
+            Some(name) => match std::ffi::CString::new(name) {
+                Ok(name) => name,
+                Err(_) => return,
+            },
+            None => return,
+        };
+        let mut meta = unsafe { std::mem::zeroed() };
+        // SAFETY: dirfd is pinned and validated; name is valid; the entry
+        // is stat'ed as a link, never followed.
+        if unsafe { libc::fstatat(dirfd.0, name.as_ptr(), &mut meta, libc::AT_SYMLINK_NOFOLLOW) }
+            != 0
+        {
+            // The entry is gone; nothing to clean up.
+            return;
+        }
+        if (meta.st_dev, meta.st_ino) != identity {
+            // A foreign entry occupies the staging name: it is not ours.
+            return;
+        }
+        self.discard_output(staged_sidecar);
     }
 
     /// `true` when `parent`'s canonical location is not inside the job's
@@ -2089,16 +2258,24 @@ impl Processor {
         ))
     }
 
-    /// Replace a stale sidecar as an entry, then exclusively create its
-    /// replacement through a root-validated parent. Neither operation
-    /// follows a final symlink, including one installed between them.
-    fn create_job_sidecar(&self, path: &std::path::Path) -> crate::tagging::Result<std::fs::File> {
+    /// Exclusively create a sidecar through a root-validated parent and
+    /// return the file together with the (dev, ino) identity of the inode
+    /// this run created. The identity is the publication contract: it is
+    /// verified again at publication, so a regular file swapped in at the
+    /// staging name after the write cannot be published. If the exclusive
+    /// create is refused by an entry that this same run owns — a staging
+    /// entry from a killed earlier attempt, recognizable by this process's
+    /// PID and the shared staging prefix — that own leftover is removed
+    /// first and the create retried exactly once. Any other existing entry
+    /// is a collision with another job's staged sidecar and is left
+    /// untouched: never read, replaced, unlinked, or renamed.
+    fn create_job_sidecar(
+        &self,
+        path: &std::path::Path,
+    ) -> crate::tagging::Result<(std::fs::File, (u64, u64))> {
         let job = self.job.as_ref().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "sidecar creation requires a job")
         })?;
-        if std::fs::symlink_metadata(path).is_ok() {
-            self.discard_output(path);
-        }
         let root = std::fs::canonicalize(&job.output_root)?;
         #[cfg(unix)]
         {
@@ -2117,20 +2294,25 @@ impl Processor {
             })?;
             let name = CString::new(name.as_bytes())
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-            // SAFETY: dirfd is pinned and validated; O_EXCL refuses every
-            // existing entry, so even a newly installed symlink is not followed.
-            let fd = unsafe {
-                libc::openat(
-                    dirfd.0,
-                    name.as_ptr(),
-                    libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
-                    0o666,
-                )
-            };
+            let mut fd = self.create_sidecar_exclusive(&dirfd, &name);
+            if fd < 0 && self.remove_own_staged_leftover(&dirfd, &name) {
+                // A refused create against this run's own killed-attempt
+                // leftover: the own entry is removed, the exclusive create
+                // retried exactly once, and a second refusal (a real
+                // collision) surfaces untouched.
+                fd = self.create_sidecar_exclusive(&dirfd, &name);
+            }
             if fd < 0 {
                 return Err(TaggingError::Io(std::io::Error::last_os_error()));
             }
-            Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+            let mut meta = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(fd, &mut meta) } != 0 {
+                // SAFETY: fd is owned here.
+                unsafe { libc::close(fd) };
+                return Err(TaggingError::Io(std::io::Error::last_os_error()));
+            }
+            let identity = (meta.st_dev, meta.st_ino);
+            Ok((unsafe { std::fs::File::from_raw_fd(fd) }, identity))
         }
         #[cfg(not(unix))]
         {
@@ -2141,19 +2323,60 @@ impl Processor {
                     "sidecar parent escapes output root",
                 )));
             }
-            Ok(std::fs::OpenOptions::new().create_new(true).write(true).open(path)?)
+            // No identity is verifiable across a path reopen without a
+            // descriptor-bound pipeline; job execution is Linux-only, so
+            // the identity contract is inert here.
+            let file = std::fs::OpenOptions::new().create_new(true).write(true).open(path)?;
+            Ok((file, (0, 0)))
         }
+    }
+
+    /// Exclusive sidecar create against a pinned parent descriptor.
+    #[cfg(unix)]
+    fn create_sidecar_exclusive(&self, dirfd: &DirFd, name: &std::ffi::CString) -> i32 {
+        // SAFETY: dirfd is pinned and validated; name is valid; O_EXCL
+        // refuses every existing entry, so even a newly installed symlink
+        // is not followed.
+        unsafe {
+            libc::openat(
+                dirfd.0,
+                name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+                0o666,
+            )
+        }
+    }
+
+    /// Remove a staging entry that this same run owns. An entry qualifies
+    /// only when its name carries the shared staging prefix and this
+    /// process's PID: a deterministic marker of this run's own leftovers
+    /// from a killed earlier attempt, never another job's staged sidecar
+    /// (a concurrent job is a different process). The removal is an
+    /// `unlinkat` link against the pinned parent, never a follow.
+    #[cfg(unix)]
+    fn remove_own_staged_leftover(&self, dirfd: &DirFd, name: &std::ffi::CString) -> bool {
+        let ours = format!(".m4b-merge-staging-{}-", std::process::id());
+        // SAFETY: `name` is a valid NUL-terminated byte buffer.
+        let stem = match unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_str().ok() {
+            Some(stem) if stem.starts_with(&ours) => stem,
+            _ => return false,
+        };
+        let _ = stem;
+        // SAFETY: dirfd is pinned and validated; name is valid; the entry
+        // is removed as a link, never followed.
+        let removed = unsafe { libc::unlinkat(dirfd.0, name.as_ptr(), 0) };
+        removed == 0
     }
 
     fn copy_job_sidecar(
         &self,
         source: &std::path::Path,
         destination: &std::path::Path,
-    ) -> crate::tagging::Result<()> {
+    ) -> crate::tagging::Result<(u64, u64)> {
         let mut source = std::fs::File::open(source)?;
-        let mut output = self.create_job_sidecar(destination)?;
+        let (mut output, identity) = self.create_job_sidecar(destination)?;
         std::io::copy(&mut source, &mut output)?;
-        Ok(())
+        Ok(identity)
     }
 
     /// Remove a policy-required stale sidecar with failure propagation.
@@ -3530,6 +3753,7 @@ mod tests {
         // deleted, and our staged temp is discarded.
         let temp = TempDir::new().unwrap();
         let (processor, _root, output, _) = pub_setup(&temp);
+        use std::os::unix::fs::MetadataExt;
         let final_sidecar = output.with_extension("chapters.txt");
         let staged_sidecar = processor.staged_sidecar_path(&output, "chapters.txt");
         std::fs::write(&staged_sidecar, b"our staged chapters").unwrap();
@@ -3537,7 +3761,11 @@ mod tests {
         std::fs::write(&external, b"external untouched").unwrap();
         std::os::unix::fs::symlink(&external, &final_sidecar).unwrap();
 
-        let error = processor.publish_staged_sidecar(&final_sidecar, &staged_sidecar).unwrap_err();
+        let staged = std::fs::metadata(&staged_sidecar).unwrap();
+        let identity = (staged.dev(), staged.ino());
+        let error = processor
+            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, identity)
+            .unwrap_err();
         assert!(error.to_string().contains("refusing to overwrite"), "{error}");
         // The foreign entry is untouched and is still the symlink.
         assert_eq!(std::fs::read(&external).unwrap(), b"external untouched");
@@ -3597,14 +3825,24 @@ mod tests {
         let external = temp.path().join("external.txt");
         std::fs::write(&external, b"external untouched").unwrap();
         let stashed = staged_sidecar.with_extension("stashed.txt");
+        use std::os::unix::fs::MetadataExt;
+        // The identity is captured when this run created the sidecar,
+        // before the swap.
+        let staged = std::fs::metadata(&staged_sidecar).unwrap();
+        let identity = (staged.dev(), staged.ino());
         std::fs::rename(&staged_sidecar, &stashed).unwrap();
         std::os::unix::fs::symlink(&external, &staged_sidecar).unwrap();
 
-        let error = processor.publish_staged_sidecar(&final_sidecar, &staged_sidecar).unwrap_err();
+        let error = processor
+            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, identity)
+            .unwrap_err();
         assert!(error.to_string().contains("output root"), "{error}");
         assert!(!final_sidecar.exists(), "no sidecar is published at the final name");
+        assert!(
+            std::fs::symlink_metadata(&staged_sidecar).unwrap().file_type().is_symlink(),
+            "a foreign entry at the staging name is never consumed"
+        );
         assert_eq!(std::fs::read(&external).unwrap(), b"external untouched");
-        assert!(!staged_sidecar.exists(), "the staged name is cleaned up");
         assert!(stashed.exists(), "our staged content is retained, not consumed");
     }
 
@@ -3620,12 +3858,20 @@ mod tests {
         let final_sidecar = output.with_extension("chapters.txt");
         let staged_sidecar = processor.staged_sidecar_path(&output, "chapters.txt");
         std::fs::write(&staged_sidecar, b"our staged chapters").unwrap();
-        std::fs::remove_file(&staged_sidecar).unwrap();
         use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
+        // The identity is captured when this run created the sidecar,
+        // before the swap.
+        let staged = std::fs::metadata(&staged_sidecar).unwrap();
+        let identity = (staged.dev(), staged.ino());
+        // A concurrent writer swaps the sidecar for a named pipe.
+        std::fs::remove_file(&staged_sidecar).unwrap();
         let name = std::ffi::CString::new(staged_sidecar.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
 
-        let error = processor.publish_staged_sidecar(&final_sidecar, &staged_sidecar).unwrap_err();
+        let error = processor
+            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, identity)
+            .unwrap_err();
         assert!(!final_sidecar.exists(), "no sidecar is published at the final name");
         use std::os::unix::fs::FileTypeExt;
         assert!(
@@ -3633,6 +3879,160 @@ mod tests {
             "the foreign FIFO is left in place, not consumed"
         );
         let _ = error;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_regular_file_replacement_cannot_be_published() {
+        // The publication contract is the inode identity captured when
+        // this run created the sidecar: a concurrent replacement with
+        // ANOTHER regular file (a symlink, FIFO, and type change are all
+        // refused by the open) must not be linked as final.
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().unwrap();
+        let (processor, _root, output, _) = pub_setup(&temp);
+        let final_sidecar = output.with_extension("chapters.txt");
+        let staged_sidecar = processor.staged_sidecar_path(&output, "chapters.txt");
+        std::fs::write(&staged_sidecar, b"our staged chapters").unwrap();
+        let staged = std::fs::metadata(&staged_sidecar).unwrap();
+        let identity = (staged.dev(), staged.ino());
+
+        // A concurrent writer swaps the staging entry for a fresh
+        // regular file (a rename guarantees a different inode; remove +
+        // create can recycle one).
+        let replacement_file = staged_sidecar.with_extension("replacement");
+        std::fs::write(&replacement_file, b"replacement chapters").unwrap();
+        std::fs::rename(&replacement_file, &staged_sidecar).unwrap();
+        let replacement = std::fs::metadata(&staged_sidecar).unwrap();
+        assert_ne!(
+            (replacement.dev(), replacement.ino()),
+            identity,
+            "the replacement must be a different inode"
+        );
+
+        let error = processor
+            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, identity)
+            .unwrap_err();
+        assert!(!final_sidecar.exists(), "no replacement is published as final");
+        assert_eq!(
+            std::fs::read(&staged_sidecar).unwrap(),
+            b"replacement chapters",
+            "the replacement is left in place, not consumed"
+        );
+        let _ = error;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_sidecar_collision_is_not_removed() {
+        // An occupied staging name from another job (a different process's
+        // PID in the name) is a collision: the exclusive create fails, the
+        // foreign entry is never removed, replaced, read, or renamed. This
+        // run's own leftover (same PID marker) is the only name removed,
+        // and only to make the single retry possible.
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().unwrap();
+        let (processor, _root, output, _) = pub_setup(&temp);
+        let parent = output.parent().unwrap();
+        let foreign = parent
+            .join(format!(".m4b-merge-staging-{}-12345.chapters.txt", std::process::id() + 1));
+        std::fs::write(&foreign, b"other job's staged sidecar").unwrap();
+        let foreign_meta = std::fs::metadata(&foreign).unwrap();
+        let foreign_identity = (foreign_meta.dev(), foreign_meta.ino());
+        let foreign_len = foreign_meta.len();
+
+        let error = processor.create_job_sidecar(&foreign).unwrap_err();
+        let _ = error;
+        assert!(foreign.is_file(), "a foreign staged sidecar is left in place");
+        let after = std::fs::metadata(&foreign).unwrap();
+        assert_eq!(
+            (after.dev(), after.ino()),
+            foreign_identity,
+            "the foreign entry's inode is unchanged"
+        );
+        assert_eq!(after.len(), foreign_len, "the foreign entry is untouched");
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"other job's staged sidecar");
+
+        // The same collision for the run's own deterministic sidecar name:
+        // a leftover of a killed earlier attempt of THIS process is
+        // removed once and the retry creates the sidecar.
+        let staged_sidecar = processor.staged_sidecar_path(&output, "chapters.txt");
+        std::fs::write(&staged_sidecar, b"own leftover").unwrap();
+        let (file, identity) = processor.create_job_sidecar(&staged_sidecar).unwrap();
+        let fresh = std::fs::metadata(&staged_sidecar).unwrap();
+        assert_eq!(
+            (fresh.dev(), fresh.ino()),
+            identity,
+            "the created identity is the file's identity"
+        );
+        assert_eq!(std::fs::read(&staged_sidecar).unwrap(), b"");
+        drop(file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn published_sidecar_is_reported_when_staging_cleanup_fails() {
+        // The no-replace link wins, then the staging removal is refused
+        // (a read-only parent): the distinct, truthful outcome names the
+        // published sidecar, and the failure-artifact mapping carries it
+        // into the reported artifacts next to the media, instead of
+        // omitting a file left on disk.
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().unwrap();
+        let (mut processor, _root, output, _) = pub_setup(&temp);
+        let final_sidecar = output.with_extension("chapters.txt");
+        let staged_sidecar = processor.staged_sidecar_path(&output, "chapters.txt");
+        std::fs::write(&staged_sidecar, b"chapters").unwrap();
+        let staged_meta = std::fs::metadata(&staged_sidecar).unwrap();
+        let identity = (staged_meta.dev(), staged_meta.ino());
+        // After the no-replace link wins, the staging removal must fail:
+        // the test hook names an absent entry for the post-link unlink.
+        processor.sidecar_unlink_name = Some(".m4b-merge-staging-absent".into());
+
+        let error = processor
+            .publish_staged_sidecar(&final_sidecar, &staged_sidecar, identity)
+            .unwrap_err();
+
+        let ProcessorError::SidecarPublishedCleanupFailed { path, source } = &error else {
+            panic!("a post-link cleanup refusal is a distinct outcome: {error}");
+        };
+        assert_eq!(path, &final_sidecar, "the outcome names the published sidecar");
+        assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+        assert!(final_sidecar.is_file(), "the published sidecar exists on disk");
+        assert_eq!(std::fs::read(&final_sidecar).unwrap(), b"chapters");
+        assert!(
+            !staged_sidecar.exists(),
+            "the run's own staging entry is discarded with the failure"
+        );
+
+        // The failure-artifact mapping: media plus the published sidecar.
+        let root = std::fs::canonicalize(&processor.job.as_ref().unwrap().output_root).unwrap();
+        let published = vec![crate::job::Artifact {
+            relative_path: "A/Pub.m4b".to_string(),
+            kind: "audio",
+            exists: true,
+        }];
+        let artifacts =
+            processor.sidecar_failure_artifacts(&root, &error, &final_sidecar, &published);
+        assert_eq!(
+            artifacts.iter().map(|a| a.relative_path.as_str()).collect::<Vec<_>>(),
+            vec!["A/Pub.m4b", "A/Pub.chapters.txt"],
+            "a sidecar left on disk is never omitted from the result"
+        );
+
+        // Any other sidecar failure keeps reporting only what was
+        // already published.
+        let collision = ProcessorError::OutputCollision { path: final_sidecar.clone() };
+        let artifacts =
+            processor.sidecar_failure_artifacts(&root, &collision, &final_sidecar, &published);
+        assert_eq!(
+            artifacts.iter().map(|a| a.relative_path.as_str()).collect::<Vec<_>>(),
+            vec!["A/Pub.m4b"],
+            "a refused link publishes nothing and omits nothing new"
+        );
     }
 
     #[cfg(unix)]
