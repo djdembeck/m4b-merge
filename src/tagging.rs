@@ -823,8 +823,8 @@ impl Tagger {
                 // The documented `©nam` form is `title - subtitle`: recover
                 // the subtitle only when the existing title starts with the
                 // album plus the documented separator. Never split on
-                // arbitrary punctuation. A file with a title but no album
-                // has no base to subtract — refuse before mutation.
+                // arbitrary punctuation. A `©nam` with no `©alb` is the
+                // subtitle-only state, so `©nam` is the subtitle verbatim.
                 match (&existing_album, &existing_title) {
                     (Some(album), Some(t)) => {
                         // A title equal to the album is the established
@@ -855,7 +855,9 @@ impl Tagger {
                     }
                     // The subtitle-only state (a `©nam` with no `©alb`): the
                     // title is known to be absent, so `©nam` is the subtitle
-                    // verbatim.
+                    // verbatim. An externally-tagged file that carries only
+                    // `©nam` is indistinguishable from this state and is
+                    // treated as subtitle-only.
                     (None, Some(t)) => Some(t.clone()),
                     // An album without a title: the subtitle cannot be
                     // established — refuse.
@@ -964,12 +966,15 @@ impl Tagger {
     /// The open is atomic and root-relative: the asset root is opened as a
     /// directory descriptor, the cover is resolved against it without
     /// following symlinks (Linux: `openat2` with `RESOLVE_BENEATH |
-    /// RESOLVE_NO_SYMLINKS`; other Unix: `O_NOFOLLOW` per component plus a
-    /// static containment check), and the opened descriptor must name a
-    /// regular file before any byte is read. A path swap, symlink install,
-    /// FIFO, device node, or non-regular file between validation and the
-    /// read is a diagnosed refusal, never attacker-chosen bytes and never a
-    /// blocking open.
+    /// RESOLVE_NO_SYMLINKS`; other Unix: one `openat` with `O_NOFOLLOW` on
+    /// the final component, whose residual exposure to symlinked
+    /// intermediate components is closed by verifying the opened
+    /// descriptor's canonical location stays under the root, see
+    /// `fd_canonical`), and the opened descriptor must name a regular file
+    /// before any byte is read. A path swap, symlink install, FIFO, device
+    /// node, or non-regular file between validation and the read is a
+    /// diagnosed refusal, never attacker-chosen bytes and never a blocking
+    /// open.
     pub fn embed_cover_local<P: AsRef<Path>, A: AsRef<Path>>(
         &self,
         file_path: P,
@@ -1089,27 +1094,73 @@ impl Tagger {
         asset_root: &Path,
     ) -> Result<std::fs::File> {
         use std::os::fd::{AsRawFd, FromRawFd};
-        let root_fd = std::fs::OpenOptions::new()
-            .read(true)
-            .open(asset_root)
-            .and_then(|f| {
-                let meta = f.metadata()?;
-                if meta.is_dir() {
-                    Ok(f)
-                } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "asset root is not a directory",
-                    ))
+        // The root fd must NOT be obtained by opening `asset_root`
+        // directly: that follows a final-component symlink, so a root that
+        // is swapped for a symlink after `canonicalize` above would pin an
+        // outside directory, and the `openat2` lookup below would then
+        // resolve relative to it. Instead walk every component from `/`
+        // with `openat(O_NOFOLLOW)`: no component, including the last,
+        // may be a symlink.
+        use std::os::unix::ffi::OsStrExt;
+        let mut root_fd = std::fs::File::open("/").map_err(|e| {
+            TaggingError::CoverDownload(format!(
+                "Asset root {} is not usable: {}",
+                asset_root.display(),
+                e
+            ))
+        })?;
+        for comp in asset_root.components() {
+            let name = match comp {
+                // `asset_root` is the `canonicalize`d root: the leading
+                // `RootDir` names `/`, already held by the fd; only plain
+                // name components remain, so no `.`/`..` can appear.
+                std::path::Component::RootDir => continue,
+                std::path::Component::Normal(name) => name,
+                // Anything else is a diagnosed refusal, not guessed at.
+                _ => {
+                    return Err(TaggingError::CoverPathOutsideAssetRoot(
+                        cover_path.display().to_string(),
+                    ));
                 }
-            })
-            .map_err(|e| {
-                TaggingError::CoverDownload(format!(
-                    "Asset root {} is not usable: {}",
-                    asset_root.display(),
-                    e
-                ))
-            })?;
+            };
+            let mut name_bytes = name.as_bytes().to_vec();
+            name_bytes.push(0);
+            // SAFETY: `root_fd` is a valid directory descriptor for every
+            // iteration (`/` first, then each directory opened below) and
+            // `name_bytes` is NUL-terminated. `O_NOFOLLOW` refuses a
+            // symlink at this component; `O_PATH|O_DIRECTORY` refuses a
+            // non-directory. `O_PATH` (not `O_RDONLY`) needs only execute
+            // permission on each component — the fd is used solely as an
+            // `openat`/`openat2` dirfd, never read — so an execute-only
+            // (`0711`) ancestor stays walkable. The old directory fd is
+            // closed before the replacement is opened, so no fd leaks on
+            // any path.
+            let next = unsafe {
+                libc::openat(
+                    root_fd.as_raw_fd(),
+                    name_bytes.as_ptr().cast(),
+                    libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+                )
+            };
+            if next < 0 {
+                let error = std::io::Error::last_os_error();
+                return Err(match error.raw_os_error() {
+                    // A symlink component (ELOOP) or a non-directory
+                    // component (ENOTDIR) is a path-escape refusal, same
+                    // as the root-relative open below; EACCES and other
+                    // I/O failures are diagnosed refusals, not escapes.
+                    Some(code) if code == libc::ELOOP || code == libc::ENOTDIR => {
+                        TaggingError::CoverPathOutsideAssetRoot(cover_path.display().to_string())
+                    }
+                    _ => TaggingError::CoverDownload(format!(
+                        "Asset root component is not accessible: {error}"
+                    )),
+                });
+            }
+            let next_dir = unsafe { std::fs::File::from_raw_fd(next) };
+            // Closes the previous directory fd before it is shadowed.
+            drop(std::mem::replace(&mut root_fd, next_dir));
+        }
         #[cfg(target_os = "linux")]
         {
             // `openat2` resolves the whole relative path against the root
@@ -1200,10 +1251,12 @@ impl Tagger {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            // Portable fallback: no `openat2`. A per-component `O_NOFOLLOW`
-            // open refuses a symlink at every level (including the final
-            // entry), and the static containment check above keeps the
-            // resolution inside the root.
+            // Portable fallback: no `openat2`. A single `openat` with
+            // `O_NOFOLLOW` refuses a symlink at the final component only;
+            // the residual exposure to symlinked intermediate components
+            // is closed by the `fd_canonical` post-open check below, which
+            // verifies the opened descriptor's canonical location stays
+            // under the root.
             use std::os::unix::ffi::OsStrExt;
             // NUL-terminated copy (see the Linux arm).
             let mut name = relative.as_os_str().as_bytes().to_vec();
@@ -3630,6 +3683,57 @@ mod tests {
         assert!(
             matches!(err, TaggingError::CoverPathOutsideAssetRoot(_)),
             "expected symlink-escape rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cover_root_open_refuses_a_symlinked_root_swap() {
+        // The race shape: `canonicalize` has already resolved the root,
+        // and the root path is then swapped for a symlink to an outside
+        // directory. Opening the root with symlink-following would pin
+        // the outside directory and read from it; the root-fd walk must
+        // refuse the symlink component as an escape instead.
+        let temp_dir = TempDir::new().unwrap();
+        let real = temp_dir.path().join("real-assets");
+        std::fs::create_dir_all(&real).unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("cover.png"), [0x89u8]).unwrap();
+        let root = temp_dir.path().join("assets");
+        std::fs::create_dir_all(&root).unwrap();
+        // The swap after the caller's `canonicalize`: the name now
+        // resolves outside the intended directory.
+        std::fs::rename(&root, temp_dir.path().join("assets.bak")).unwrap();
+        std::os::unix::fs::symlink(&outside, &root).unwrap();
+
+        let err =
+            Tagger::open_cover_in_root(&root.join("cover.png"), Path::new("cover.png"), &root)
+                .unwrap_err();
+        assert!(
+            matches!(err, TaggingError::CoverPathOutsideAssetRoot(_)),
+            "a symlink-swapped root must be refused as an escape, got {err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cover_root_open_refuses_a_non_directory_root() {
+        // The asset root name is a regular file: `canonicalize` succeeds,
+        // so the root-relative walk runs, and the final component's
+        // `openat(O_DIRECTORY)` fails ENOTDIR. Like the ELOOP arm for a
+        // symlinked component, the refusal is an escape diagnosis, not a
+        // cover-content error.
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("assets");
+        std::fs::write(&root, b"not a directory").unwrap();
+
+        let err =
+            Tagger::open_cover_in_root(&root.join("cover.png"), Path::new("cover.png"), &root)
+                .unwrap_err();
+        assert!(
+            matches!(err, TaggingError::CoverPathOutsideAssetRoot(_)),
+            "a non-directory root must be refused as an escape, got {err:?}"
         );
     }
 

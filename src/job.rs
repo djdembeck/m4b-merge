@@ -657,10 +657,19 @@ pub(crate) fn redact_machine_error(
     });
     // Protect URLs before the path pass: replace each with a sentinel that
     // the path regex cannot corrupt, then restore the original text after.
+    // The marker numbering starts at a per-call base rotated against the
+    // original message, so a diagnostic that already carries marker-like
+    // bytes (`\u{1}<digits>\u{2}`) can never mint a marker the restore pass
+    // would mistake for one of ours.
+    let url_count = URL.find_iter(message).count();
+    let base = (0..)
+        .find(|&base| (0..url_count).all(|i| !message.contains(&format!("\u{1}{}\u{2}", base + i))))
+        .expect("a finite message collides with only finitely many markers");
     let mut protected = Vec::new();
     let masked = URL.replace_all(message, |caps: &regex::Captures| {
-        let marker = format!("\u{1}{:?}\u{2}", protected.len());
-        protected.push(caps.get(0).unwrap().as_str().to_string());
+        let url = caps.get(0).unwrap().as_str().to_string();
+        let marker = format!("\u{1}{}\u{2}", base + protected.len());
+        protected.push(url);
         marker
     });
     let canonical = output_root.and_then(|root| std::fs::canonicalize(root).ok());
@@ -700,8 +709,25 @@ pub(crate) fn redact_machine_error(
     });
     URL_MARKER
         .replace_all(&redacted, |caps: &regex::Captures| {
-            let idx = caps[1].parse::<usize>().expect("protected-URL marker index");
-            protected[idx].clone()
+            // Subtracting our numbering `base` is required: without it a
+            // foreign digit run in the original message that collides with
+            // our rotated numbering would restore the wrong URL (or a URL
+            // into a foreign position). A run that parses to a number our
+            // table does not cover is stripped of its sentinel bytes — a
+            // leaked `\u{1}`/`\u{2}` must not reach the diagnostic — while
+            // keeping the digit run. A run that overflows `usize` is opaque
+            // foreign content and is left verbatim. (A parseable foreign
+            // run can never be in-range: base rotation guarantees the
+            // original message contains no `\u{1}{base+i}\u{2}` for
+            // `i < url_count`, so only our own minted markers resolve.)
+            let matched = caps.get(0).unwrap().as_str();
+            match caps[1].parse::<usize>() {
+                Ok(n) => n
+                    .checked_sub(base)
+                    .and_then(|idx| protected.get(idx).cloned())
+                    .unwrap_or_else(|| caps[1].to_string()),
+                Err(_) => matched.to_string(),
+            }
         })
         .into_owned()
 }
@@ -1043,6 +1069,42 @@ mod tests {
             &[],
         );
         assert!(windows.contains("output_root\\Author"), "{windows}");
+    }
+
+    #[test]
+    fn redact_machine_error_never_panics_on_marker_like_text() {
+        // A diagnostic that already carries marker-shaped bytes
+        // (`\u{1}<digits>\u{2}`) must not panic the restore pass: with no
+        // protected URL the table is empty, and the foreign digit run
+        // survives verbatim.
+        let foreign =
+            format!("cover path rejected: x\u{1}A0\u{2} and \u{1}99999999999999999999\u{2}");
+        let redacted = redact_machine_error(&foreign, None, None, &[]);
+        assert!(redacted.contains("x\u{1}A0\u{2}"), "{redacted:?}");
+        assert!(redacted.contains("\u{1}99999999999999999999\u{2}"), "{redacted:?}");
+
+        // A real URL in the same message is protected and restored; the
+        // foreign marker-like text stays untouched and no protected value
+        // is lost or swapped.
+        let mixed =
+            format!("downloaded https://cdn.example.com/c.jpg then failed at x\u{1}A0\u{2}");
+        let redacted = redact_machine_error(&mixed, None, None, &[]);
+        assert!(redacted.contains("https://cdn.example.com/c.jpg"), "{redacted}");
+        assert!(redacted.contains("x\u{1}A0\u{2}"), "{redacted:?}");
+        assert!(!redacted.contains("cdn.example.com/c.jpg[redacted]"), "{redacted}");
+
+        // A digit run in the original message that looks exactly like one
+        // of our minted markers (base rotates to >= 1, so the foreign
+        // digits collide with our numbering) must not shift which URL is
+        // restored where: both URLs land in their own positions, and no
+        // marker bytes leak into the result.
+        let shifted = "x\u{1}0\u{2} see https://a.example/1 and https://b.example/2";
+        let redacted = redact_machine_error(shifted, None, None, &[]);
+        let first = redacted.find("https://a.example/1").expect("first URL missing");
+        let second = redacted.find("https://b.example/2").expect("second URL missing");
+        assert!(first < second, "{redacted:?}");
+        assert!(!redacted.contains('\u{1}'), "{redacted:?}");
+        assert!(!redacted.contains('\u{2}'), "{redacted:?}");
     }
 
     #[test]

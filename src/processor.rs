@@ -610,8 +610,11 @@ impl Processor {
                     // error: paths are actionable here, and the README
                     // scopes redaction to machine results. The machine
                     // document applies `redact_machine_error` (canonical
-                    // root, claim root, and the raw/current spellings) when
-                    // `JobResult::from_run` is built.
+                    // output root and the raw/current spellings) when
+                    // `JobResult::from_run` is built; the claim root needs
+                    // no separate redaction there, because by construction
+                    // (processor setup) it is the canonicalization of the
+                    // same output root that the redaction already covers.
                     let diagnosed = e.to_string();
                     failed_groups.push((group.name.clone(), diagnosed.clone()));
                     // Job failures retain staging entries; post-publication
@@ -1835,22 +1838,23 @@ impl Processor {
                     match copied {
                         Ok(bytes) if bytes == fd_meta.st_size as u64 => {}
                         other => {
-                            // A failed copy must not unlink by name alone: a
-                            // concurrent replace between the O_EXCL create
-                            // and now would make the name name a foreign
-                            // file. fstat the descriptor we created and
-                            // fstatat the final name (no-follow), and
-                            // require both regular files with equal
-                            // (dev, ino) before deleting anything; a
-                            // mismatch is a diagnosed refusal, the foreign
-                            // entry survives.
+                            // A failed copy retains the partial file: the
+                            // name-based `unlinkat` this path used to try
+                            // after an fstat/fstatat identity check could
+                            // still lose a check-to-unlink race, letting a
+                            // concurrent replace be deleted — a no-clobber
+                            // violation. Retention is deliberate: the
+                            // partial entry is ours (it was opened through
+                            // the O_EXCL fd below), never a foreign file.
+                            // fstat/fstatat below only enrich the
+                            // diagnosed error, not a deletion decision.
                             let mut created_meta = unsafe { std::mem::zeroed() };
                             let created_is_our_fd =
                                 unsafe { libc::fstat(final_file.as_raw_fd(), &mut created_meta) }
                                     == 0
                                     && created_meta.st_mode & libc::S_IFMT == libc::S_IFREG;
                             let mut current = unsafe { std::mem::zeroed() };
-                            let name_is_ours = created_is_our_fd
+                            let name_still_ours = created_is_our_fd
                                 && unsafe {
                                     libc::fstatat(
                                         dirfd.0,
@@ -1863,11 +1867,14 @@ impl Processor {
                                 && Self::stat_identity(&current)
                                     == Self::stat_identity(&created_meta);
                             let _ = final_file; // dropped: closes fd_final
-                            if name_is_ours {
-                                let _ = unsafe { libc::unlinkat(dirfd.0, final_name.as_ptr(), 0) };
-                            }
+                            let diagnosis = if name_still_ours {
+                                "; the partial output was left in place"
+                            } else {
+                                "; the final name now names a foreign entry; the partial \
+                                 output was left in place"
+                            };
                             return Err(ProcessorError::OutputDirCreation(format!(
-                                "Failed to publish merged output {}: {other:?}",
+                                "Failed to publish merged output {}: {other:?}{diagnosis}",
                                 output_path.display()
                             )));
                         }
@@ -4256,6 +4263,34 @@ mod tests {
         );
         assert!(artifact.exists);
         assert_eq!(root.join(&artifact.relative_path), staged);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_copy_retains_partial_output_and_reports_it() {
+        // The staging path no longer names the reserved inode, so
+        // publication must materialize it at the final name by copy. The
+        // descriptor is opened write-only, so the copy's first read fails
+        // with EBADF and the failed-copy arm runs deterministically.
+        let temp = TempDir::new().unwrap();
+        let (processor, _root, output_path, staged) = pub_setup(&temp);
+        std::fs::write(&staged, b"staged audio").unwrap();
+        let mut staged_file = std::fs::OpenOptions::new().write(true).open(&staged).unwrap();
+        std::fs::remove_file(&staged).unwrap();
+
+        let error =
+            processor.publish_job_output(&output_path, &staged, &mut staged_file).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("left in place"), "{message}");
+        // The partial output is retained at the final name, not removed.
+        let meta = std::fs::symlink_metadata(&output_path).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(meta.len(), 0, "the copy failed before writing a byte");
+        // The partial is never a preserved artifact: `preserved` is built
+        // from the staged path only, which no longer exists here.
+        let ProcessorError::PublicationFailed { preserved: None, .. } = error else {
+            panic!("the partial at the final name must not be reported as preserved");
+        };
     }
 
     #[cfg(unix)]

@@ -81,11 +81,11 @@ impl Capabilities {
                 ],
             },
             cover_policies: CoverPolicies {
-                // Advertise only the spellings `CoverPolicy` parses; the
-                // `{"write": "/absolute/path"}` object form stays described
-                // in the constraint text, not in the machine variant list.
+                // Advertise only the bare spellings `CoverPolicy` parses;
+                // its `{"write": "/absolute/path"}` object form is named in
+                // the constraint text, not in the machine variant list.
                 variants: vec!["write_url", "preserve", "clear"],
-                constraint: "preserve requires a single natively-copyable input file",
+                constraint: "write also accepts the object form {\"write\": \"/absolute/path\"} for a local cover file; preserve requires a single natively-copyable input file",
             },
             chapter_policies: ChapterPolicies {
                 variants: vec!["write", "preserve", "clear"],

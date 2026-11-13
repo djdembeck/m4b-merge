@@ -43,7 +43,9 @@ All notable changes to this project will be documented in this file. See [standa
   first-ordered `{author}`/`{narrator}`.
 - `m4b-merge --capabilities`: machine-readable schema/resolver identity and
   the full token and field/cover/chapter policy vocabulary, so callers build
-  pickers and validation from the engine instead of their own registry.
+  pickers and validation from the engine instead of their own registry. The
+  cover policy constraint now also describes the `{"write":
+  "/absolute/path"}` object form the job parser accepts.
 - `--job FILE` processes a book from a versioned JSON job file (schema
   `schema_version: 1`). The job is the single source of truth for the
   metadata base — an explicit catalog id via `input_provider`, or
@@ -109,6 +111,13 @@ All notable changes to this project will be documented in this file. See [standa
   reconciled by content digest like any unlabeled asset; no code path
   re-uploads or relabels them.
 - Release titles are the bare version (`vX.Y.Z`) instead of `Release vX.Y.Z`.
+- A failed publication copy now retains the partial file at the
+  destination name instead of unlinking it. This keeps the no-clobber
+  contract: a name replaced concurrently after the identity check is
+  never removed, even when the copy itself failed partway. The retained
+  partial is not reported in `preserved_artifacts`. Because it occupies
+  the destination name, a retry fails with `OutputCollision` until the
+  caller removes it.
 
 ### Changed
 - `--job` output paths: a `path_format` that resolves to no components (for

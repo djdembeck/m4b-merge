@@ -151,16 +151,41 @@ fn test_cli_no_inputs() {
 fn test_machine_setup_failures_emit_parseable_json() {
     // `--machine` promises a parseable, path-free JSON document on every
     // failure path, including the setup guards that exit before any group
-    // runs: no inputs, `--machine` without `--job`, and an unloadable job
-    // file. Each must exit nonzero with JSON on stdout and no groups.
+    // runs: no inputs, `--machine` without `--job`, an unloadable job
+    // file, a `--job` flag conflict, and `--job-preview` with `--machine`.
+    // Each must exit nonzero with JSON on stdout and no groups.
     let temp_dir = TempDir::new().unwrap();
     let dummy = temp_dir.path().join("dummy.mp3");
     std::fs::write(&dummy, b"not real audio").unwrap();
+    let dummy_str = dummy.to_str().unwrap();
+    // A loadable job for the guards that fire after `Job::load` (the
+    // `--job` flag-conflict guard runs before it; the `--job-preview`
+    // guard runs after).
+    let job_path = temp_dir.path().join("job.json");
+    std::fs::write(
+        &job_path,
+        format!(
+            r#"{{ "schema_version": 1, "inputs": ["{dummy_str}"],
+                  "input_supplied": {{ "title": "The Test Book" }},
+                  "output_root": {:?} }}"#,
+            temp_dir.path().join("output")
+        ),
+    )
+    .unwrap();
+    let job_str = job_path.to_str().unwrap();
 
     let cases = [
         (vec!["--machine"], "no input files"),
-        (vec!["--machine", "-i", dummy.to_str().unwrap()], "--machine requires --job"),
+        (vec!["--machine", "-i", dummy_str], "--machine requires --job"),
         (vec!["--machine", "--job", "missing-job.json"], "failed to load job file"),
+        (
+            vec!["--machine", "--job", job_str, "-i", dummy_str],
+            "--job is mutually exclusive with -i/--inputs",
+        ),
+        (
+            vec!["--machine", "--job-preview", "--job", job_str],
+            "--job-preview and --machine are mutually exclusive",
+        ),
     ];
     for (args, expected) in cases {
         let output =
