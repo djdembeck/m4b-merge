@@ -148,6 +148,67 @@ fn test_cli_no_inputs() {
 }
 
 #[test]
+fn test_machine_setup_failures_emit_parseable_json() {
+    // `--machine` promises a parseable, path-free JSON document on every
+    // failure path, including the setup guards that exit before any group
+    // runs: no inputs, `--machine` without `--job`, an unloadable job
+    // file, a `--job` flag conflict, and `--job-preview` with `--machine`.
+    // Each must exit nonzero with JSON on stdout and no groups.
+    let temp_dir = TempDir::new().unwrap();
+    let dummy = temp_dir.path().join("dummy.mp3");
+    std::fs::write(&dummy, b"not real audio").unwrap();
+    let dummy_str = dummy.to_str().unwrap();
+    // A loadable job for the guards that fire after `Job::load` (the
+    // `--job` flag-conflict guard runs before it; the `--job-preview`
+    // guard runs after).
+    let job_path = temp_dir.path().join("job.json");
+    std::fs::write(
+        &job_path,
+        format!(
+            r#"{{ "schema_version": 1, "inputs": ["{dummy_str}"],
+                  "input_supplied": {{ "title": "The Test Book" }},
+                  "output_root": {:?} }}"#,
+            temp_dir.path().join("output")
+        ),
+    )
+    .unwrap();
+    let job_str = job_path.to_str().unwrap();
+
+    let cases = [
+        (vec!["--machine"], "no input files"),
+        (vec!["--machine", "-i", dummy_str], "--machine requires --job"),
+        (vec!["--machine", "--job", "missing-job.json"], "failed to load job file"),
+        (
+            vec!["--machine", "--job", job_str, "-i", dummy_str],
+            "--job is mutually exclusive with -i/--inputs",
+        ),
+        (
+            vec!["--machine", "--job-preview", "--job", job_str],
+            "--job-preview and --machine are mutually exclusive",
+        ),
+    ];
+    for (args, expected) in cases {
+        let output =
+            Command::new(bin_path()).args(&args).output().expect("Failed to run m4b-merge");
+        assert!(!output.status.success(), "setup failure must exit nonzero: {args:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.is_empty(), "machine stdout must be non-empty for {args:?}");
+        let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+            panic!("machine stdout must parse as JSON for {args:?}: {e}\n{stdout}")
+        });
+        assert_eq!(doc["status"], "failed", "setup failure status: {doc}");
+        assert!(
+            doc["groups"].as_array().is_some_and(|groups| groups.is_empty()),
+            "no group results on a setup failure: {doc}"
+        );
+        let error = doc["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("top-level error must be a string for {args:?}: {doc}"));
+        assert!(error.contains(expected), "expected {expected:?} in machine error: {error}");
+    }
+}
+
+#[test]
 fn test_single_mp3_merge() {
     if !ffmpeg_available() {
         return;
@@ -732,4 +793,86 @@ fn test_non_us_region_warns_for_audiobookdb() {
         !us_stdout.contains("region"),
         "no region warning for the default US region, stdout: {us_stdout}"
     );
+}
+
+/// End-to-end `--job` behavior: parse the job file, load its supplied (offline)
+/// metadata, process a real M4B through the pipeline, and assert the written
+/// output path and the embedded tags. This is the CLI surface the plan
+/// requires; the processor-level tests construct the `Processor` directly and
+/// never exercise argument parsing or the job-loading path.
+#[test]
+fn test_job_supplied_metadata_cli_end_to_end() {
+    if !ffmpeg_available() {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let input_file = temp_dir.path().join("chapter1.m4b");
+    let status = Command::new("ffmpeg")
+        .args(&[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=5",
+            "-acodec",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-y",
+        ])
+        .arg(&input_file)
+        .status()
+        .expect("Failed to run FFmpeg");
+    assert!(status.success(), "FFmpeg should generate test M4B");
+
+    let output_dir = temp_dir.path().join("output");
+    std::fs::create_dir(&output_dir).unwrap();
+
+    // Supplied mode is authoritative and offline: no provider fetch, no
+    // rematching. Title + author drive the default `{author}/{title}` path.
+    // The title/author write policies are set to `write` explicitly: the
+    // policy defaults are `preserve`, which would leave the freshly-merged
+    // file (which carries no metadata) untouched and the tag assertions
+    // would fail. The other fields default to `preserve`, a no-op here.
+    let job_path = temp_dir.path().join("job.json");
+    let job_json = format!(
+        r#"{{ "schema_version": 1,
+             "inputs": [{:?}],
+             "input_supplied": {{ "title": "The Test Book",
+                                  "authors": ["Jane Author"] }},
+             "output_root": {:?},
+             "title": "write", "authors": "write" }}"#,
+        input_file, output_dir
+    );
+    std::fs::write(&job_path, job_json).unwrap();
+
+    let output = Command::new(bin_path())
+        .args(["--job", job_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to run m4b-merge");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "m4b-merge --job should succeed, stdout: {stdout} stderr: {stderr}"
+    );
+
+    // The output path is derived from the supplied metadata via the default
+    // `{author}/{title}` template, proving the job's metadata base drove naming.
+    let expected = output_dir.join("Jane Author").join("The Test Book.m4b");
+    assert!(expected.exists(), "expected output {} to exist; stdout: {stdout}", expected.display());
+
+    // The supplied metadata must be embedded into the output M4B.
+    let tag = mp4ameta::Tag::read_from_path(&expected).expect("read output tags");
+    // The tagger writes title and album as separate atoms; assert both so a
+    // missing `©nam` cannot pass unnoticed (a subtitle-less book carries the
+    // base title in both).
+    assert_eq!(tag.title(), Some("The Test Book"));
+    assert_eq!(tag.album(), Some("The Test Book"));
+    assert_eq!(tag.artist(), Some("Jane Author"));
 }

@@ -148,7 +148,7 @@ Automatic release is the default. For a deliberate release, open **Actions → R
 
 The highest valid SemVer reservation reachable from the frozen source supplies the automatic baseline; unfinished numbers remain reserved. An existing exact-source reservation wins on retry, even after newer releases. Different-source collisions, ambiguous reservations, and conflicting artifacts fail; tags never move. A new unreserved automatic candidate older than a newer reserved source coalesces without publication; explicit manual requests are not silently dropped.
 
-The selected version is compiled into the CLI and AudiobookDB user-agent through `M4B_MERGE_VERSION`. Native package metadata in Cargo.toml/Cargo.lock is independent. Untagged source builds say `dev-<source SHA>`; archives without git say `dev`, not a stale package release. Docker consumes VERSION and GIT_COMMIT for both the real binary and OCI metadata.
+The selected version is compiled into the CLI and AudiobookDB user-agent through `M4B_MERGE_VERSION`. Native package metadata in Cargo.toml/Cargo.lock is independent. Untagged source builds say `dev-<first 12 characters of the source SHA>`; archives without git say `dev`, not a stale package release. Docker consumes VERSION and GIT_COMMIT for both the real binary and OCI metadata.
 
 Publication preserves Linux/macOS/Windows assets and native amd64/arm64 images. It tests the version-stamped source, validates existing image source/version/architecture and immutable digests, and uploads only missing assets after checking their content/provenance. Registry/authentication failures are not absence. A draft release holds partial assets; it becomes published only after binaries, image manifest, and asset upload finish. Annalist's existing GitHub App fills notes at publication; deploy the shared previous-published-ancestor notes fix before cutover so failed reservations do not hide changes.
 
@@ -219,8 +219,13 @@ publishes that exact SHA:
   (same-SHA reuse, for retry after an interrupted run).
 - A tag that exists at a **different** SHA fails `reserve`/`select`
   hard — you cannot "republish" an older version or move a tag.
-- Publish runs are resumable: re-running the `Release` workflow on the
-  same commit reuses the existing tag/release and only adds missing outputs.
+- Publish runs are resumable in the missing-outputs sense: re-running the
+  `Release` workflow on the same commit reuses the existing tag/release and
+  only adds missing outputs. That holds when every already-uploaded asset
+  rebuilds to identical bytes. The macOS/Windows relinks are not
+  byte-reproducible, so a re-run that rebuilds an already-uploaded plain
+  named asset to different bytes fails before uploading. This is not only a
+  partial-upload retry case, so resolve the stale asset out of band first.
 - Runs are serialized across commits with GitHub Actions `queue: max`:
   up to 100 runs may queue, and extra runs are cancelled once the queue
   is full. Manual dispatch is main-only. The concurrency group is
@@ -236,13 +241,25 @@ publishes that exact SHA:
   those digests, never a later mutable-tag lookup. Mismatches and registry
   authentication/transport errors fail without overwriting existing images.
 - Release assets (including `m4b-merge-windows.exe`) are never overwritten.
-  Missing assets are uploaded on re-run; an existing asset is reused only
-  via one of two paths: a labeled asset must have a provenance label bound
-  to this publication (same SHA and tag) whose digest also matches, and an
-  unlabeled legacy asset is reused only when its content digest matches the
-  freshly built artifact. Malformed labels and conflicting
-  bindings/digests fail before any upload (see
-  `scripts/publish_release.py`).
+  Missing assets are uploaded on re-run as plain, correctly named assets
+  (no display label); the release page shows the exact asset name. An
+  existing asset is reused only via one of two paths: a labeled asset must
+  have a provenance label bound to this publication (same SHA and tag)
+  whose digest also matches, and an unlabeled asset (every plain-named new
+  upload, plus unlabeled legacy assets) is reused only when its content
+  digest matches the freshly built artifact. The legacy v2.0.0 and v2.0.1
+  assets predate the plain naming; their provenance labels were cleared out
+  of band, so they reconcile by digest like any unlabeled asset, and new
+  uploads never create labels. Malformed labels and conflicting
+  bindings/digests
+  fail before any upload (see `scripts/publish_release.py`). Because
+  macOS and Windows release relinks are not byte-reproducible, a
+  partial-upload retry that rebuilds an already-uploaded plain-named asset
+  to different bytes fails the run before uploading, and the stale asset
+  must be resolved out of band before re-running — a deliberate tradeoff
+  for keeping the release page showing clean asset names (the `gh release
+  upload` `#label` provenance suffix renders as the asset name in the web
+  UI).
 - No mutable `latest` Docker alias exists to roll back: CI's
   `latest=false` flavor on its Docker pusher keeps CI clear of it and the
   Release workflow's tag set (SHA staging tags plus the version tag)

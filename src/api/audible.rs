@@ -16,7 +16,18 @@ use super::client::{
 pub const DEFAULT_API_URL: &str = "https://api.audnex.us";
 
 /// Audible region for Audnexus lookups (`?region=` query parameter).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    clap::ValueEnum,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum MetadataRegion {
     Au,
     Ca,
@@ -347,6 +358,9 @@ impl ApiBookResponse {
 
         BookMetadata {
             metadata_id: self.asin,
+            // Audnexus identifies books by ASIN; there is no canonical
+            // AudiobookDB book id to carry.
+            book_id: String::new(),
             title: self.title,
             subtitle: self.subtitle,
             authors: self.authors.into_iter().map(|a| a.name).collect(),
@@ -637,6 +651,9 @@ mod tests {
         let metadata = response.into_book_metadata();
         assert_eq!(metadata.metadata_id, "B08XYZ1234");
         assert_eq!(metadata.year, Some(2023));
+        // Audnexus identifies books by ASIN; there is no canonical
+        // AudiobookDB book id, so `{book_id}` stays empty for audnexus.
+        assert!(metadata.book_id.is_empty());
         // The book endpoint does not carry chapters; they come from `/chapters`.
         assert!(metadata.chapters.is_empty());
     }

@@ -66,7 +66,7 @@ jobs:
 
           # Unexpected shell/git error → every concern on; outputs are still
           # emitted below and the step stays green so downstream jobs run.
-          # shellcheck disable=SC2317  # body runs from the ERR trap, not a call site
+          # shellcheck disable=SC2317,SC2329  # invoked from the ERR trap below, not a call site
           on_err() {
             local rc=$1 line=$2
             trap - ERR

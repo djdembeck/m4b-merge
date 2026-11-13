@@ -44,6 +44,14 @@ pub enum AudiobookdbError {
     Timeout,
     #[error("no book found for ID: {0}")]
     IdNotFound(String),
+    #[error(
+        "release {release_id} is not one of the releases of book {book_id}; an explicit release must not silently fall back"
+    )]
+    ReleaseNotFound { book_id: String, release_id: String },
+    #[error(
+        "release_id must be a non-blank release id, got {release_id:?}; an absent pin is None, a blank explicit pin is an invalid selection"
+    )]
+    ReleaseIdBlank { release_id: String },
     #[error("connection error: {0}")]
     Connection(String),
     #[error("serialization error: {0}")]
@@ -245,6 +253,13 @@ impl AudiobookdbClient {
             .or_else(|| book.releases.first().map(|r| r.id.clone()))
     }
 
+    /// Whether `release_id` is a member of `book`'s releases. An explicit pin
+    /// must be verified: a book whose release list is empty carries no
+    /// verifiable release, so a nonempty id is never a member there.
+    fn is_release_of_book(book: &AudiobookdbBook, release_id: &str) -> bool {
+        book.releases.iter().any(|r| r.id == release_id)
+    }
+
     /// Look up book metadata by identifier.
     ///
     /// ASIN-shaped identifiers (10 alphanumeric characters) are resolved via
@@ -253,7 +268,31 @@ impl AudiobookdbClient {
     /// `GET /books/{id}` directly. Any identifier not found on its endpoint is an
     /// `IdNotFound` error — the client does not fall back to `POST /search`, so
     /// an id is only resolved through the catalog endpoints.
+    ///
+    /// The release used for narrator/cover/chapter data is the ASIN-linked matched
+    /// release, falling back to the book's first release. Callers that must pin
+    /// an exact edition use [`Self::fetch_book_with_release`].
     pub async fn fetch_book(&self, book_id: &str) -> Result<BookMetadata, AudiobookdbError> {
+        self.fetch_book_with_release(book_id, None).await
+    }
+
+    /// Look up book metadata, pinning the edition to `release_id` when provided.
+    ///
+    /// An explicit release id must be one of the book's releases: an id the book
+    /// does not carry is an error, never a silent fall back to the book's first
+    /// release. Without a release id, the matched/first-release fallback of
+    /// [`Self::fetch_book`] applies.
+    pub async fn fetch_book_with_release(
+        &self,
+        book_id: &str,
+        release_id: Option<&str>,
+    ) -> Result<BookMetadata, AudiobookdbError> {
+        // Reserve the fallback for an *absent* pin. A blank explicit pin is
+        // an invalid selection, not "no pin": accepting it would silently
+        // fall back to the matched/first release, hiding a caller mistake.
+        if let Some(rid) = release_id.filter(|r| r.trim().is_empty()) {
+            return Err(AudiobookdbError::ReleaseIdBlank { release_id: rid.to_string() });
+        }
         let endpoint = Self::resolve_endpoint(book_id);
         let book = match endpoint {
             BookEndpoint::ExternalAsin => match self.resolve_external(book_id).await {
@@ -278,13 +317,45 @@ impl AudiobookdbClient {
             },
         };
 
-        // Fetch release data for chapter information. The matched release
-        // (ASIN-linked) is preferred; otherwise fall back to the book's first
-        // release. Missing release data is not fatal because many books simply
-        // lack chapter metadata.
-        let release_id = Self::release_id_for(&book, book.matched_release_id.as_deref());
-        let release_data =
-            if let Some(rid) = release_id { self.get_release(&rid).await.ok() } else { None };
+        // Fetch release data. Missing release data is not fatal in the
+        // matched/first fallback (many books lack chapter metadata) but is
+        // fatal with an explicit id, because the caller chose that edition
+        // deliberately. A blank pin is rejected at the entry, so `Some` here
+        // is always a non-blank explicit selection.
+        let (release_id, explicit) = match release_id {
+            Some(rid) => {
+                // An explicit pin must be verified as a member of the book's
+                // releases. A book whose release list is empty carries no
+                // release that can be verified, so an explicit id is rejected
+                // there too — never fetched and used unverified.
+                if !Self::is_release_of_book(&book, rid) {
+                    return Err(AudiobookdbError::ReleaseNotFound {
+                        book_id: book_id.to_string(),
+                        release_id: rid.to_string(),
+                    });
+                }
+                (Some(rid.to_string()), true)
+            }
+            None => (Self::release_id_for(&book, book.matched_release_id.as_deref()), false),
+        };
+        let release_data = match release_id {
+            Some(rid) => match self.get_release(&rid).await {
+                Ok(data) => Some(data),
+                // Fallback mode (matched/first release): many books lack
+                // chapter metadata, so a missing release is not fatal.
+                Err(e) if !explicit => {
+                    tracing::debug!(
+                        "Release fetch for fallback id {rid} failed ({}); continuing without it",
+                        e
+                    );
+                    None
+                }
+                // Explicit edition: the caller pinned this release, so a
+                // failed fetch is a diagnosed error.
+                Err(e) => return Err(e),
+            },
+            None => None,
+        };
 
         Ok(Self::map_book(book_id, &book, release_data.as_ref()))
     }
@@ -335,12 +406,36 @@ impl AudiobookdbClient {
             (!pos.is_empty()).then_some(pos)
         });
 
-        let year = book.copyright.map(|c| c as u32).or_else(|| {
-            book.originally_published_at
-                .as_ref()
-                .and_then(|d| d.split('-').next())
-                .and_then(|y| y.parse().ok())
-        });
+        // Release-first precedence: the selected release is the edition the
+        // caller pinned, so its title/subtitle/date win when present; the
+        // book's own title/subtitle are the fallback, and the year falls back
+        // to copyright, then original publication, in that order.
+        let title = release_data
+            .map(|r| r.title.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| book.title.clone());
+
+        let subtitle = release_data
+            .and_then(|r| r.subtitle.as_deref())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| book.subtitle.clone().filter(|s| !s.is_empty()))
+            .or_else(|| book.disambiguation.clone().filter(|s| !s.is_empty()));
+
+        let year = release_data
+            .and_then(|r| {
+                r.release_date
+                    .as_ref()
+                    .and_then(|d| d.split('-').next())
+                    .and_then(|y| y.parse().ok())
+            })
+            .or_else(|| book.copyright.map(|c| c as u32))
+            .or_else(|| {
+                book.originally_published_at
+                    .as_ref()
+                    .and_then(|d| d.split('-').next())
+                    .and_then(|y| y.parse().ok())
+            });
 
         let genres: Vec<String> = book.genres.iter().map(|g| g.title.clone()).collect();
 
@@ -354,12 +449,6 @@ impl AudiobookdbClient {
             .or(book.cover_image.as_ref())
             .or(book.images.first())
             .map(cover_url_of);
-
-        let subtitle = book
-            .subtitle
-            .clone()
-            .filter(|s| !s.is_empty())
-            .or_else(|| book.disambiguation.clone().filter(|s| !s.is_empty()));
 
         // Skip chapters with negative offsets or lengths rather than wrapping: they
         // are data errors, and dropping them is the safer fallback. Server order is
@@ -392,7 +481,10 @@ impl AudiobookdbClient {
                 .filter(|id| !id.is_empty())
                 .unwrap_or(caller_id)
                 .to_string(),
-            title: book.title.clone(),
+            // The book's own canonical id when the catalog carries one; an
+            // ASIN-shaped caller id is not a canonical book id.
+            book_id: book.id.as_deref().filter(|id| !id.is_empty()).unwrap_or_default().to_string(),
+            title,
             subtitle,
             authors,
             narrators,
@@ -465,6 +557,17 @@ struct AudiobookdbReleaseRef {
 
 #[derive(Debug, Deserialize, Clone)]
 struct AudiobookdbRelease {
+    /// The release's title (defaults to the book title on import; a
+    /// hand-entered edition may carry a distinct title). Treated as absent
+    /// when empty so the book title is the fallback.
+    #[serde(default)]
+    title: String,
+    /// The release's subtitle; display falls back to the book's when empty.
+    #[serde(default)]
+    subtitle: Option<String>,
+    /// The supported calendar date of this recording (ISO 8601 date).
+    #[serde(rename = "releaseDate", default)]
+    release_date: Option<String>,
     #[serde(rename = "chapterDetail", default)]
     chapter_detail: Option<AudiobookdbChapterDetail>,
     #[serde(default)]
@@ -709,6 +812,39 @@ mod tests {
         let parsed = AudiobookdbClient::parse_retry_after(&httpdate::fmt_http_date(date)).unwrap();
         assert!(parsed.as_millis() <= 30_000, "got {parsed:?}");
         assert!(parsed.as_millis() >= 29_000, "got {parsed:?}");
+    }
+
+    #[test]
+    fn test_release_first_normalization_precedence() {
+        // The selected release is the pinned edition: its title, subtitle
+        // and release date win over the book's title, subtitle and copyright
+        // year; empty/absent release fields fall back to the book's own
+        // values, and the year falls back to original publication last.
+        let book: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"id": "abc123def456", "title": "Book Title", "subtitle": "Book Subtitle", "copyright": 1999, "originallyPublishedAt": "1998-01-01"}"#)).unwrap();
+        // All release fields present: they win.
+        let rel: AudiobookdbRelease =
+            serde_json::from_value(json(r#"{"title": "Release Title", "subtitle": "Release Subtitle", "releaseDate": "2021-05-01"}"#)).unwrap();
+        let meta = AudiobookdbClient::map_book("abc123def456", &book, Some(&rel));
+        assert_eq!(meta.title, "Release Title");
+        assert_eq!(meta.subtitle.as_deref(), Some("Release Subtitle"));
+        assert_eq!(meta.year, Some(2021));
+        assert_eq!(meta.metadata_id, "abc123def456");
+        // Empty release fields: fall back to the book's title/subtitle and
+        // copyright year.
+        let rel: AudiobookdbRelease =
+            serde_json::from_value(json(r#"{"title": "", "subtitle": ""}"#)).unwrap();
+        let meta = AudiobookdbClient::map_book("abc123def456", &book, Some(&rel));
+        assert_eq!(meta.title, "Book Title");
+        assert_eq!(meta.subtitle.as_deref(), Some("Book Subtitle"));
+        assert_eq!(meta.year, Some(1999));
+        // Absent release + absent copyright: original publication is the year.
+        let no_copyright: AudiobookdbBook = serde_json::from_value(json(
+            r#"{"id": "abc123def456", "title": "T", "originallyPublishedAt": "1987-03-14"}"#,
+        ))
+        .unwrap();
+        let meta = AudiobookdbClient::map_book("abc123def456", &no_copyright, None);
+        assert_eq!(meta.year, Some(1987));
     }
 
     #[test]
@@ -1043,6 +1179,32 @@ mod tests {
     }
 
     #[test]
+    fn test_book_id_reflects_the_catalog_book_id() {
+        // The catalog carries a book id: it becomes the canonical book_id,
+        // and metadata_id prefers it over the caller's identifier.
+        let with_id: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"id": "575", "title": "Book 575"}"#)).unwrap();
+        let meta = AudiobookdbClient::map_book("B08XYZ1234", &with_id, None);
+        assert_eq!(meta.book_id, "575");
+        assert_eq!(meta.metadata_id, "575");
+
+        // Absent id: book_id stays empty (no path segment) while
+        // metadata_id keeps the caller's identifier.
+        let no_id: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"title": "No ID Book"}"#)).unwrap();
+        let meta = AudiobookdbClient::map_book("B08XYZ1234", &no_id, None);
+        assert!(meta.book_id.is_empty());
+        assert_eq!(meta.metadata_id, "B08XYZ1234");
+
+        // Empty-string id is treated as absent too.
+        let empty_id: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"id": "", "title": "Empty ID Book"}"#)).unwrap();
+        let meta = AudiobookdbClient::map_book("B08XYZ1234", &empty_id, None);
+        assert!(meta.book_id.is_empty());
+        assert_eq!(meta.metadata_id, "B08XYZ1234");
+    }
+
+    #[test]
     fn test_release_id_for_preferred_order() {
         let book: AudiobookdbBook = serde_json::from_value(json(
             r#"{"id": "b1", "title": "T", "releases": [{"id": "rel1"}]}"#,
@@ -1061,6 +1223,21 @@ mod tests {
         let bare: AudiobookdbBook =
             serde_json::from_value(json(r#"{"id": "b2", "title": "T"}"#)).unwrap();
         assert_eq!(AudiobookdbClient::release_id_for(&bare, None), None);
+    }
+
+    #[test]
+    fn test_release_membership_requires_a_verifiable_release() {
+        let book: AudiobookdbBook = serde_json::from_value(json(
+            r#"{"id": "b1", "title": "T", "releases": [{"id": "rel1"}, {"id": "rel2"}]}"#,
+        ))
+        .unwrap();
+        assert!(AudiobookdbClient::is_release_of_book(&book, "rel1"));
+        assert!(AudiobookdbClient::is_release_of_book(&book, "rel2"));
+        assert!(!AudiobookdbClient::is_release_of_book(&book, "rel-unknown"));
+        // A book with no releases cannot verify any explicit pin.
+        let bare: AudiobookdbBook =
+            serde_json::from_value(json(r#"{"id": "b2", "title": "T"}"#)).unwrap();
+        assert!(!AudiobookdbClient::is_release_of_book(&bare, "rel-any"));
     }
 
     #[test]
@@ -1250,6 +1427,88 @@ mod tests {
                 "/releases/rel123abc456",
             ],
             "ASIN 200 must resolve without touching the book endpoint again"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_explicit_release_selection_over_loopback() {
+        // The pinned-release path: the requested release id is verified as a
+        // member of the book and fetched; a non-member pin is rejected; and a
+        // failed fetch of an explicit release is a diagnosed error.
+        let book = r#"{
+            "id": "abc123def456",
+            "title": "T",
+            "people": [{"role": {"name": "author"}, "person": {"name": "Author A"}}],
+            "releases": [{"id": "relAaa1111"}, {"id": "relBbb2222"}]
+        }"#;
+        let release = r#"{
+            "id": "relAaa1111",
+            "chapterDetail": {"chapters": [
+                {"ordinal": 1, "title": "One", "startOffsetMs": 0, "lengthMs": 1000}
+            ]}
+        }"#;
+        let responses: std::collections::HashMap<String, (u16, String)> = [
+            (
+                "/books/abc123def456?include=people,releases,series,genres,images".to_string(),
+                (200, book.to_string()),
+            ),
+            // relBbb2222 is a member (membership passes) but its fetch 404s,
+            // which must be a diagnosed error for an explicit pin.
+            ("/releases/relAaa1111".to_string(), (200, release.to_string())),
+            ("/releases/relBbb2222".to_string(), (404, String::new())),
+        ]
+        .into_iter()
+        .collect();
+        let (base, requests): (String, Arc<std::sync::Mutex<Vec<String>>>) =
+            mock_book_api(responses).await;
+        let client = AudiobookdbClient::with_base_url(&base).expect("client should build");
+
+        // (1) A verified member release is fetched and mapped.
+        let meta = client
+            .fetch_book_with_release("abc123def456", Some("relAaa1111"))
+            .await
+            .expect("a member release resolves");
+        assert_eq!(meta.chapters.len(), 1, "the pinned release's chapters are mapped");
+        assert_eq!(
+            requests.lock().unwrap().clone(),
+            vec![
+                "/books/abc123def456?include=people,releases,series,genres,images",
+                "/releases/relAaa1111",
+            ],
+            "a pinned release fetches the book then that exact release"
+        );
+
+        // (2) A release id the book does not carry is ReleaseNotFound — and
+        // no release endpoint is fetched for it (membership fails before the
+        // fetch). Capture the request count first; only a book lookup may be
+        // added by this call.
+        let requests_before = requests.lock().unwrap().len();
+        let err = client
+            .fetch_book_with_release("abc123def456", Some("relZzz9999"))
+            .await
+            .expect_err("a non-member pin must be rejected");
+        assert!(
+            matches!(&err, AudiobookdbError::ReleaseNotFound { release_id, .. } if release_id == "relZzz9999"),
+            "expected ReleaseNotFound(relZzz9999), got {err:?}"
+        );
+        {
+            let reqs = requests.lock().unwrap();
+            let new: Vec<String> = reqs[requests_before..].to_vec();
+            assert!(
+                !new.iter().any(|p| p.contains("/releases/")),
+                "a non-member pin must not fetch any release endpoint: {new:?}"
+            );
+        }
+
+        // (3) A verified member whose fetch fails is a diagnosed error, not a
+        // silent fall back to chapter-less metadata.
+        let err = client
+            .fetch_book_with_release("abc123def456", Some("relBbb2222"))
+            .await
+            .expect_err("a failed explicit release fetch must error");
+        assert!(
+            matches!(&err, AudiobookdbError::NotFound(_)),
+            "expected a release fetch failure, got {err:?}"
         );
     }
 

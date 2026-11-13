@@ -11,7 +11,10 @@ The tool automates metadata lookup by ASIN or AudiobookDB book ID through [Audio
 
 - [Install](#install)
 - [Usage](#usage)
+  - [Authoritative Job File](#authoritative-job-file)
+- [Embedded Tags](#embedded-tags)
 - [Path Format Variables](#path-format-variables)
+- [Capabilities](#capabilities)
 - [Exit Codes](#exit-codes)
 - [Contributing](#contributing)
 - [License](#license)
@@ -76,6 +79,15 @@ Provide a metadata ID (ASIN or AudiobookDB book ID) to automatically fetch metad
 m4b-merge -i input/book_folder/ -a B012345678
 ```
 
+The looked-up edition is release-first: the selected release's title, subtitle,
+and release date win when present, and the book-level title/subtitle are the
+fallback (year falls back to the book copyright, then original publication; the
+subtitle falls back to the book subtitle, then the book's disambiguation). This
+applies to the legacy `--metadata-id` CLI path as well as the `--job`
+`input_provider` path, so for reissued editions the embedded title and year are
+the release's. An explicit `release_id` that the book does not carry is a
+diagnosed failure — never a silent fall back to the book's first release.
+
 Non-US Audible books need `--region` with `--metadata-source audnexus` (default `us`; accepted: `au ca de es fr in it jp us uk`).
 
 ### Custom Output & Organization
@@ -99,6 +111,204 @@ m4b-merge -i input/book_folder/ \
   --completed-directory /path/to/done
 ```
 
+### Authoritative Job File
+
+Process a book from a versioned JSON job file. The job is the single source
+of truth for the metadata base, the manual overrides, and the output; it is
+mutually exclusive with `-i`, `-o`, `-p`, `-a`, and `--completed-directory`.
+
+```bash
+m4b-merge --job job.json
+```
+
+The job selects its metadata base exactly one of two ways:
+
+- `input_provider` — an explicit catalog id (`book_id`, plus an exact
+  `release_id` for `audiobookdb`). The catalog is the authority; an
+  unresolvable id, a release the book does not carry, or a missing client
+  fails the job before any file is touched.
+- `input_supplied` — the values are authoritative as-is; no catalog lookup
+  is attempted and the job runs fully offline.
+
+On top of the base, an optional `overrides` object replaces individual
+fields; present non-blank values win over the base.
+
+```json
+{
+  "schema_version": 1,
+  "inputs": ["/data/book/track1.m4a"],
+  "input_supplied": {
+    "title": "The Great Gatsby",
+    "authors": ["F. Scott Fitzgerald"]
+  },
+  "output_root": "/library",
+  "path_format": "{author}/{title}",
+  "title": "write",
+  "subtitle": "preserve",
+  "authors": "write",
+  "year": "clear",
+  "cover": "write_url",
+  "chapters": "write"
+}
+```
+
+Field semantics:
+
+- `inputs` (required, non-empty) — the audio files to merge.
+- `output_root` (required) — the output directory root; created if missing.
+- `path_format` (optional) — output template inside the root; default
+  `{author}/{title}` (see Path Format Variables).
+- `source` (optional) — `{"source": "audiobookdb" | "audnexus",
+  "api_url": "…", "region": "…"}`; defaults to the CLI defaults when omitted
+  in provider mode, and is irrelevant in supplied mode.
+- `completed_directory` (optional) — after successful processing, the source
+  files are moved here. In job mode the CLI `--completed-directory` flag is
+  rejected (the job file owns it), so omitting this field means the sources
+  are not moved.
+- `overrides` (optional) — same shape as `input_supplied`; present
+  non-blank values win over the base.
+- `title` / `subtitle` — `preserve` (default), `clear`, or `write`. A `write`
+  writes the effective metadata's value (the title, and the subtitle when one
+  is present) — the same strings that name the output path, so the tag cannot
+  diverge from the file name — and fails the job if that value is blank.
+  Title and subtitle share the `©nam`/`©alb` atom pair: a write of one
+  component preserves the other, and `clear` of one removes only that
+  component. Clearing the title while the subtitle survives is the
+  subtitle-only state: the subtitle is written alone to `©nam` and `©alb` is
+  removed (a base title no longer exists). A re-run that preserves both
+  components leaves the subtitle-only file unchanged, and a job that
+  preserves the title while writing or clearing the subtitle is refused with
+  a diagnosed error before mutation, because the state has no base title to
+  preserve. `preserve` recovers the component from the existing tags; a file
+  whose tags cannot establish it fails before mutation rather than erasing
+  data.
+- `authors`, `narrators`, `series`, `description`, `genres`, `year` —
+  `preserve` (default), `write`, or `clear`. A `write` requires the effective
+  value to be non-blank, and fails the job if it is not. `preserve` fields
+  keep the file's existing values even when the effective metadata lacks them.
+- `cover` — `write_url` (default; embeds the provider cover URL when the
+  resolved metadata carries one — the legacy baseline), `{"write":
+  "/absolute/path"}` (local file; the path must lie inside the job's
+  `output_root`, which is the only asset area the job owns, and must be at
+  most 5 MiB — a path that escapes the root, including via a symlink, is
+  rejected before any read), `{"write_url": "https://…"}` (override, under
+  the existing SSRF guards), `preserve` (a single natively-copyable input
+  file only; keeps the source
+  M4B's embedded cover without a download), or `clear` (removes the cover).
+  A `preserve` cover policy on a multi-file group is rejected; a strict
+  preserve promise is only possible with a single natively-copyable input
+  file.
+- `chapters` — `write` (default; embeds chapters and writes the
+  `chapters.txt` sidecar: an explicit
+  `{"write": {"chapters": [{"title", "start_millis", "duration_millis"}]}}`
+  list when given, otherwise the resolved chapters; an empty explicit list
+  clears, while a list that resolved to nothing leaves the source chapters
+  untouched), `preserve` (a single natively-copyable input file only; skips
+  all chapter mutation so the source chapters survive), or `clear` (removes
+  existing chapters, no sidecar). A `preserve` chapters policy on a
+  multi-file group is rejected; a strict preserve promise is only possible
+  with a single natively-copyable input file.
+
+The output path is `output_root` + the (sanitized) template, so the same job
+against the same book always lands on the same path — no worker-time catalog
+rematching is needed by callers.
+
+#### Preview (`--job-preview`)
+
+A non-mutating preview of a job:
+
+```bash
+m4b-merge --job job.json --job-preview
+```
+
+It resolves the effective metadata exactly as execution does (base +
+overrides; a supplied job performs **no catalog request**) and the same
+parsed template with the same resolver, printing the exact sanitized
+relative output path (plus the effective metadata) as JSON. It creates no
+directories, writes no media, reserves no names, and makes no success
+promise: collisions and media errors are execution-time. The previewed path
+is the path execution produces, provided the metadata is the same — a
+**provider** preview that refetches at execution is **advisory** unless the
+caller captures the supplied resolved metadata (supplied mode has no fetch,
+so its preview is exact).
+
+#### Machine results (`--machine`)
+
+Machine-readable execution results for a job:
+
+```bash
+m4b-merge --job job.json --machine
+```
+
+Stable JSON on **stdout only** — all logs and progress go to stderr, so the
+document parses cleanly on success and on failure. Three rejections exit with
+a human error on stderr and empty stdout before the document is guaranteed:
+malformed arguments, `--dry-run` combined with `--machine` or
+`--job-preview`, and `--check-ffmpeg`, which exits before the machine path;
+every setup and run-level failure of a machine-accepted invocation
+(`--machine --job` without `--dry-run`) emits a `failed` document:
+
+```json
+{ "schema_version": 1, "resolver_version": "1",
+  "status": "succeeded | partial_failure | failed",
+  "groups": [{ "group": "job", "outcome": "succeeded", "input_files": ["track1.m4b"],
+    "artifacts": [ { "relative_path": "Author/Title.m4b", "kind": "audio", "exists": true },
+                    { "relative_path": "Author/Title.chapters.txt", "kind": "sidecar", "exists": true } ],
+    "files_moved": false } ] }
+```
+
+Every produced output and sidecar is enumerated; artifact paths are
+**relative to the job's `output_root`** and validated to lie inside it (no
+absolute-path fallback). `input_files` are relative to that root when they
+lie inside it and `[redacted]` otherwise; they are not artifacts. Errors use
+`output_root` in place of the root and redact other absolute filesystem paths.
+On job failure, `preserved_artifacts` lists recoverable non-empty staging
+files retained on disk, also relative to the validated root. Empty or invalid
+stages remain on disk but are not reported as recoverable artifacts. A
+failed group carries a diagnosed `error` (omitted when the group
+succeeded). `status`
+never claims success for a failed group; a partial or
+total failure exits 1 after the document is printed, and setup/run-level
+failures emit a `failed` document with a top-level `error` and empty
+`groups`. A **job run is one book**: one group named `"job"`, so
+`partial_failure` cannot occur from `--machine --job`; it is reserved for
+multi-group library consumers of `Processor::run`.
+
+#### No-clobber
+
+Job execution reserves no name at the final output path. An advisory
+precheck reports an already-taken final name early and validates the created
+parent directories against the canonical output root, and the parent is
+re-validated immediately before the merge. The binding guarantee is the
+atomic no-replace publication: the final name is created only by that step,
+and a foreign entry, including a late arrival, fails with a diagnosed
+collision.
+
+The caller-facing guarantees:
+
+- **No overwrite**: an existing final name is never read, renamed, or
+  replaced; a collision leaves it untouched and retains the completed
+  stage in `preserved_artifacts`.
+- **No suffixing, no rename**: a taken name is never silently suffixed,
+  renamed, or overwritten, at any point.
+- **Staging entries are never deleted by the engine**: on success, each
+  staging entry remains as a hard link alongside the published output,
+  owned by the job's staging-tree cleanup, which the caller performs; on
+  failure, the completed media stage is retained and reported in
+  `preserved_artifacts`. Callers must clean their job-owned staging tree,
+  accepting retained entries to avoid deleting another writer's
+  replacement. An occupied staging name is a collision, even if it carries
+  this attempt's visible token.
+- **Stale sidecars are removed only after the media publication has won
+  the final name**: a sidecar that cannot be removed fails the run with a
+  diagnosed cleanup error, while the already-published media is retained
+  and reported in the machine result, so a surviving entry never
+  contradicts the requested policy.
+
+Source files and a winning job's final names are never discarded. Each job
+attempt gets a fresh staging token, so retries do not collide with retained
+entries.
+
 ### Verify Environment
 
 Check FFmpeg installation and version.
@@ -111,15 +321,15 @@ m4b-merge --check-ffmpeg
 
 | Atom    | Source                                                        |
 |---------|---------------------------------------------------------------|
-| `©nam`  | Title; subtitle appended as `title - subtitle` when present   |
+| `©nam`  | Title; subtitle appended as `title - subtitle` when present; the subtitle alone when no base title exists |
 | `©ART`  | All authors, joined by `, `                                   |
 | `©aART` | Same as `©ART` (album artist)                                 |
-| `©alb`  | Base title only (never the subtitle)                           |
+| `©alb`  | Base title only (never the subtitle); removed when a base title does not exist (the subtitle-only state) |
 | `©gen`  | All genres, joined by `/` (single `©gen` value)                |
 | `©day`  | Release year                                                  |
 | `©cmt`  | Description                                                   |
 | `©wrt`  | All narrators, joined by `, `                                 |
-| `©grp`  | `Series: <name> #<position>`                                  |
+| `©grp`  | `Series: <name>`, with ` #<position>` appended when a position exists; multiple kept segments joined with ` | ` |
 
 A tag with no corresponding metadata is removed, so retagging from a different
 source cannot leave stale values behind. The one exception is `©grp`: the group
@@ -129,34 +339,75 @@ carries neither, the existing group is left as is (on a rebuild, legacy
 when series metadata is present, and unrelated segments are kept, so a group
 holding only legacy content is cleared entirely).
 
+When a job file drives processing, only the fields whose policy is `write` or
+`clear` are touched; `preserve` fields keep the file's existing values even
+when the effective metadata lacks them.
+
 ## Path Format Variables
 
-The output path is generated using the `-p` / `--path-format` template.
+The output path is generated from a template. Two template conventions exist:
+
+- **Legacy CLI** (`-p` / `--path-format`): the historical string-replacement
+  behavior. The template is expanded, then split on `/`, and each resulting
+  piece is sanitized.
+- **Job file** (`path_format` on `--job`): a parsed-template resolver
+  (identity: `resolver_version` from `--capabilities`). Only template
+  separators create directories; a token's value is substituted as component
+  data and sanitized in place, so a value can never introduce a directory,
+  re-substitute another token, traverse (`..`), address a drive, or escape
+  `output_root`.
 
 | Variable      | Description                      |
 |---------------|----------------------------------|
-| `{author}`   | Author name                     |
-| `{narrator}`  | Narrator name                   |
-| `{authors}`   | All authors, joined by `, ` (empty: `Unknown`) |
-| `{narrators}` | All narrators, joined by `, ` (empty: `Unknown`) |
+| `{author}`   | First ordered author name (empty: `Unknown`) |
+| `{narrator}`  | First ordered narrator name (empty: `Unknown`) |
+| `{authors}`   | All ordered authors, joined by `, ` (empty: `Unknown`) |
+| `{narrators}` | All ordered narrators, joined by `, ` (empty: `Unknown`) |
 | `{title}`    | Book title                      |
 | `{subtitle}`  | Book subtitle                   |
 | `{series_name}` | Series name                    |
 | `{series_position}` | Series position number    |
 | `{year}`     | Release year                    |
 | `{genre}`      | First genre                     |
-| `{metadata_id}` | Looked-up metadata ID (ASIN or AudiobookDB book ID) |
+| `{metadata_id}` | Provider-dependent looked-up ID (ASIN for audnexus, resolved catalog ID for audiobookdb); empty in supplied mode |
+| `{book_id}`   | Canonical AudiobookDB catalog book ID from the resolved metadata; populated only for AudiobookDB provider lookups, empty for audnexus and supplied mode. Distinct from `{metadata_id}`; job-resolver-only |
 
-A token whose value is missing or empty does not contribute a path segment (empty segments are stripped). The only exceptions are `{author}`, `{authors}`, `{narrator}`, and `{narrators}`, which substitute `Unknown` when no person is known.
+In the table above, `{book_id}` is a **job-resolver-only** token: the legacy
+CLI `-p`/`--path-format` template does not substitute it (an unmatched
+placeholder is left as literal text by the legacy path). All other tokens are
+shared by both conventions.
+
+A token whose value is missing or empty does not contribute a path segment
+(empty segments are stripped). The only exceptions are `{author}`,
+`{authors}`, `{narrator}`, and `{narrators}`, which substitute `Unknown` when
+no person is known. Unknown tokens in a job `path_format` are rejected with
+an actionable diagnostic (the token, its position, and the supported list)
+before any file is touched. A job `path_format` that resolves to no
+components at all (for example `{subtitle}` on a book with no subtitle) fails
+the group with an `EmptyPath` error before any file is touched; the legacy CLI
+path has no such case because it falls back to `output.m4b`.
 
 **Default:** `{author}/{title}`
 
+## Capabilities
+
+`m4b-merge --capabilities` prints the build's machine-readable identity and
+vocabulary as JSON: the accepted `schema_version`, the output-path
+`resolver_version`, the default template, every supported path token with its
+substitution semantics, and the field/cover/chapter policy vocabulary.
+Callers build pickers, examples, and validation from this document instead of
+maintaining their own registry, and reject protocol/resolver versions they do
+not understand. The command is self-contained (no FFmpeg, job, or network).
+The `--job-preview` and `--machine` surfaces carry the same
+`schema_version`/`resolver_version` identity, so a caller can verify that a
+path came from the resolver version it validated.
+
 ## Exit Codes
 
-| Code | Description                                                 |
-|------|------------------------------------------------------------|
-| `0`  | Success                                                     |
-| `1`  | Error (missing input, FFmpeg not found, processing failed) |
+| Code | Description                                                                                                     |
+|------|-----------------------------------------------------------------------------------------------------------------|
+| `0`  | Success (in `--machine` mode: every group succeeded)                                                            |
+| `1`  | Error (missing input, FFmpeg not found, processing failed; in `--machine` mode: partial or total failure)       |
 
 ## Contributing
 

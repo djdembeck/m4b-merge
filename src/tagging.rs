@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -29,6 +30,9 @@ pub enum TaggingError {
 
     #[error("Cover download error: {0}")]
     CoverDownload(String),
+    /// A local cover path fell outside the authorized asset area.
+    #[error("local cover path escapes the asset root: {0}")]
+    CoverPathOutsideAssetRoot(String),
 
     #[error("Invalid file format: {0}")]
     InvalidFormat(String),
@@ -49,6 +53,14 @@ pub enum TaggingError {
         "Refusing to embed chapters for {path}: {count} chapter(s) start at or past the {playlength} playlength ({details})"
     )]
     ChaptersOutOfRange { path: PathBuf, count: usize, playlength: String, details: String },
+
+    #[error("write policy for '{field}' has no valid value to write")]
+    WriteWithoutValue { field: &'static str },
+
+    #[error(
+        "cannot preserve '{field}' for {path}: the preserved component cannot be established from the existing ©nam/©alb atoms; refusing to mutate. Use an explicit write with the known value."
+    )]
+    PreserveUnresolvable { field: &'static str, path: PathBuf },
 }
 
 /// Result type for tagging operations
@@ -507,12 +519,422 @@ impl Tagger {
         Ok(())
     }
 
+    /// Write metadata tags according to per-field policies.
+    ///
+    /// Unlike [`Tagger::write_metadata`] (the standalone CLI's all-fields
+    /// behavior), this only mutates the atoms whose policy says so:
+    /// - `Write` sets the atom from the effective value;
+    /// - `Clear` removes the atom;
+    /// - `Preserve` leaves the file's existing value untouched.
+    ///
+    /// Title and subtitle are independent logical components of the shared
+    /// `©nam`/`©alb` representation: each is resolved on its own, and the
+    /// unselected component of a preserved pair is read back from the file's
+    /// existing atoms. A preserved component that cannot be established from
+    /// the defined representation (`©alb` for the title, the `©nam`/`©alb`
+    /// `"title - subtitle"` form for the subtitle) fails with
+    /// [`TaggingError::PreserveUnresolvable`] before any atom is mutated.
+    ///
+    /// Atom ownership: title/subtitle own `©nam` and `©alb`; authors own
+    /// `©ART`/`©aART`; narrators own `©wrt`; series owns the `Series:` segment
+    /// of `©grp`; description owns `©cmt`; genres own `©gen`; year owns `©day`.
+    /// Unrelated `©grp` segments and every atom not named here are never
+    /// touched, so preserving one field cannot erase another.
+    pub fn write_metadata_with_policies<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+        metadata: &BookMetadata,
+        policies: &crate::job::WritePolicies,
+    ) -> Result<()> {
+        let path = file_path.as_ref();
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.write_metadata_with_policies_file(&mut file, path, metadata, policies)
+    }
+
+    /// The policy-driven metadata write bound to an open file descriptor.
+    /// Job execution uses this so a post-merge replacement of the staging
+    /// name cannot redirect the write at an external file; the path is used
+    /// only for diagnostics.
+    pub fn write_metadata_with_policies_file(
+        &self,
+        file: &mut std::fs::File,
+        path: &Path,
+        metadata: &BookMetadata,
+        policies: &crate::job::WritePolicies,
+    ) -> Result<()> {
+        // Validate every explicit `write` before mutating anything: a write
+        // without a valid available value is an error, not a silent preserve.
+        Self::validate_policies(metadata, policies)?;
+
+        // An all-preserve set changes no atom, so do not rewrite the file at
+        // all: rewriting would reserialize the whole tag and is not
+        // byte-identical to the input.
+        if Self::all_preserve(policies) {
+            debug!("All policies preserve; leaving {} untouched", path.display());
+            return Ok(());
+        }
+
+        let mut tag = mp4ameta::Tag::read_from(file).unwrap_or_default();
+
+        // When both components are preserved, the shared `©nam`/`©alb` pair
+        // is left byte-for-byte untouched: rebuilding it would re-derive the
+        // subtitle from the `©nam`-minus-`©alb` suffix and trim it, silently
+        // dropping preserved tag data (e.g. `©nam = "Book -   "`). The
+        // all-preserve early return above only covers the whole set; this
+        // covers the case where another field is written and forces a tag
+        // write, so the preserved title atoms must still survive verbatim.
+        let both_preserve = matches!(
+            (policies.title, policies.subtitle),
+            (crate::job::TitlePolicy::Preserve, crate::job::SubtitlePolicy::Preserve)
+        );
+        if both_preserve {
+            debug!("Title and subtitle preserved; leaving ©nam/©alb untouched");
+        } else {
+            // Resolve the title/subtitle components independently from the
+            // existing atoms, then write `©nam`/`©alb` once. A written
+            // component uses the effective metadata value (the same string
+            // that names the output path); a preserved component is read back
+            // from the file.
+            let (title, subtitle) = Self::resolve_title_subtitle(
+                path,
+                &tag,
+                &policies.title,
+                &policies.subtitle,
+                policies.effective_title(metadata),
+                policies.effective_subtitle(metadata),
+            )?;
+
+            // A subtitle without a title is the subtitle-only state: `©nam`
+            // carries the subtitle alone and `©alb` is removed, because a
+            // base title no longer exists (never write the subtitle into
+            // `©alb` — it is documented as base-title-only). The unselected
+            // component is never erased by the other's clear. The value is
+            // used verbatim (no trim) so a preserved subtitle round-trips
+            // exactly.
+            let subtitle = subtitle.as_deref().filter(|s| !s.trim().is_empty());
+            match (title.as_deref(), subtitle) {
+                (Some(title), Some(subtitle)) => {
+                    tag.set_title(format!("{title} - {subtitle}"));
+                    tag.set_album(title);
+                }
+                (Some(title), None) => {
+                    tag.set_title(title);
+                    tag.set_album(title);
+                }
+                (None, Some(subtitle)) => {
+                    tag.set_title(subtitle);
+                    tag.remove_album();
+                }
+                (None, None) => {
+                    tag.remove_title();
+                    tag.remove_album();
+                }
+            }
+        }
+
+        match policies.authors {
+            crate::job::FieldPolicy::Write => match Self::join_values(&metadata.authors, ", ") {
+                Some(authors) => {
+                    tag.set_artist(authors.clone());
+                    tag.set_album_artist(authors);
+                }
+                None => unreachable!("validated: authors write requires values"),
+            },
+            crate::job::FieldPolicy::Clear => {
+                tag.remove_artists();
+                tag.remove_album_artists();
+            }
+            crate::job::FieldPolicy::Preserve => {}
+        }
+
+        match policies.narrators {
+            crate::job::FieldPolicy::Write => match Self::join_values(&metadata.narrators, ", ") {
+                Some(narrators) => tag.set_composer(narrators),
+                None => unreachable!("validated: narrators write requires values"),
+            },
+            crate::job::FieldPolicy::Clear => {
+                tag.remove_composers();
+            }
+            crate::job::FieldPolicy::Preserve => {}
+        }
+
+        self.write_series_policy(&mut tag, metadata, policies.series);
+
+        match policies.description {
+            crate::job::FieldPolicy::Write => {
+                tag.set_comment(&metadata.description);
+            }
+            crate::job::FieldPolicy::Clear => {
+                tag.remove_comments();
+            }
+            crate::job::FieldPolicy::Preserve => {}
+        }
+
+        match policies.genres {
+            crate::job::FieldPolicy::Write => {
+                match Self::join_values(&metadata.genres, Self::GENRE_SEPARATOR) {
+                    Some(genres) => tag.set_genre(genres),
+                    None => unreachable!("validated: genres write requires values"),
+                }
+            }
+            crate::job::FieldPolicy::Clear => {
+                tag.remove_genres();
+            }
+            crate::job::FieldPolicy::Preserve => {}
+        }
+
+        match policies.year {
+            crate::job::FieldPolicy::Write => {
+                tag.set_year(metadata.year.unwrap().to_string());
+            }
+            crate::job::FieldPolicy::Clear => {
+                tag.remove_year();
+            }
+            crate::job::FieldPolicy::Preserve => {}
+        }
+
+        tag.write_to(file)
+            .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write tags: {}", e)))?;
+
+        info!("Successfully wrote policy-driven metadata to: {}", path.display());
+        Ok(())
+    }
+
+    /// True when no policy mutates an atom: an all-preserve set can skip the
+    /// file write entirely, keeping the output byte-identical to the input.
+    /// The job pipeline uses this to report `metadata_applied` truthfully
+    /// (an all-preserve job made no tag write).
+    pub(crate) fn all_preserve_public(policies: &crate::job::WritePolicies) -> bool {
+        Self::all_preserve(policies)
+    }
+
+    fn all_preserve(policies: &crate::job::WritePolicies) -> bool {
+        policies.title == crate::job::TitlePolicy::Preserve
+            && policies.subtitle == crate::job::SubtitlePolicy::Preserve
+            && policies.authors == crate::job::FieldPolicy::Preserve
+            && policies.narrators == crate::job::FieldPolicy::Preserve
+            && policies.series == crate::job::FieldPolicy::Preserve
+            && policies.description == crate::job::FieldPolicy::Preserve
+            && policies.genres == crate::job::FieldPolicy::Preserve
+            && policies.year == crate::job::FieldPolicy::Preserve
+    }
+
+    /// Refuse a policy set whose `Write` has no valid available value.
+    fn validate_policies(
+        metadata: &BookMetadata,
+        policies: &crate::job::WritePolicies,
+    ) -> Result<()> {
+        if policies.title == crate::job::TitlePolicy::Write
+            && policies.effective_title(metadata).is_none()
+        {
+            return Err(TaggingError::WriteWithoutValue { field: "title" });
+        }
+        if policies.subtitle == crate::job::SubtitlePolicy::Write
+            && policies.effective_subtitle(metadata).is_none()
+        {
+            return Err(TaggingError::WriteWithoutValue { field: "subtitle" });
+        }
+        let multi = |name: &'static str, values: &[String]| {
+            if Self::join_values(values, ", ").is_none() {
+                Err(TaggingError::WriteWithoutValue { field: name })
+            } else {
+                Ok(())
+            }
+        };
+        if policies.authors == crate::job::FieldPolicy::Write {
+            multi("authors", &metadata.authors)?;
+        }
+        if policies.narrators == crate::job::FieldPolicy::Write {
+            multi("narrators", &metadata.narrators)?;
+        }
+        if policies.series == crate::job::FieldPolicy::Write
+            && metadata.series_name.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none()
+        {
+            return Err(TaggingError::WriteWithoutValue { field: "series" });
+        }
+        if policies.description == crate::job::FieldPolicy::Write
+            && metadata.description.trim().is_empty()
+        {
+            return Err(TaggingError::WriteWithoutValue { field: "description" });
+        }
+        if policies.genres == crate::job::FieldPolicy::Write {
+            multi("genres", &metadata.genres)?;
+        }
+        if policies.year == crate::job::FieldPolicy::Write && metadata.year.is_none() {
+            return Err(TaggingError::WriteWithoutValue { field: "year" });
+        }
+        Ok(())
+    }
+
+    /// Resolve the effective title and subtitle atoms from the policies and
+    /// the file's existing `©nam`/`©alb`.
+    ///
+    /// `None` means the component is cleared. A preserved component reads
+    /// back from the existing atoms; when the file has no album atom the
+    /// base title cannot be established and the write fails before mutation
+    /// rather than erasing data — except in the subtitle-only state (a
+    /// `©nam` with no `©alb`), which this tool writes when the title is
+    /// cleared while the subtitle survives: there the title is known to be
+    /// absent and the subtitle is `©nam` verbatim.
+    fn resolve_title_subtitle(
+        path: &Path,
+        tag: &mp4ameta::Tag,
+        title_policy: &crate::job::TitlePolicy,
+        subtitle_policy: &crate::job::SubtitlePolicy,
+        title_value: Option<String>,
+        subtitle_value: Option<String>,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let existing_title = tag.title().map(|t| t.to_string()).filter(|t| !t.is_empty());
+        let existing_album = tag.album().map(|t| t.to_string()).filter(|t| !t.is_empty());
+
+        let title: Option<String> = match title_policy {
+            // The value comes from the effective metadata (validated
+            // non-blank above), never from a string the policy carries.
+            crate::job::TitlePolicy::Write => title_value,
+            crate::job::TitlePolicy::Clear => None,
+            crate::job::TitlePolicy::Preserve => {
+                // `©alb` is documented as the base title only, so it is the
+                // defined representation of the title component. A file with
+                // a title but no album is the subtitle-only state (what this
+                // tool writes when the title is cleared while the subtitle
+                // survives): the title is known to be absent, so nothing is
+                // established here and the subtitle arm reads `©nam` back as
+                // the subtitle verbatim. (The all-preserve pair never
+                // reaches this function — `both_preserve` leaves the atoms
+                // untouched.)
+                match &existing_album {
+                    Some(album) => Some(album.clone()),
+                    None if existing_title.is_some() => Err(TaggingError::PreserveUnresolvable {
+                        field: "title",
+                        path: path.to_path_buf(),
+                    })?,
+                    None => None,
+                }
+            }
+        };
+
+        let subtitle: Option<String> = match subtitle_policy {
+            // The value comes from the effective metadata (validated
+            // non-blank in `validate_policies`), so there is no separate
+            // write-without-value check here.
+            crate::job::SubtitlePolicy::Write => subtitle_value,
+            crate::job::SubtitlePolicy::Clear => None,
+            crate::job::SubtitlePolicy::Preserve => {
+                // The documented `©nam` form is `title - subtitle`: recover
+                // the subtitle only when the existing title starts with the
+                // album plus the documented separator. Never split on
+                // arbitrary punctuation. A `©nam` with no `©alb` is the
+                // subtitle-only state, so `©nam` is the subtitle verbatim.
+                match (&existing_album, &existing_title) {
+                    (Some(album), Some(t)) => {
+                        // A title equal to the album is the established
+                        // "no subtitle" representation — what `apply_metadata`
+                        // writes and ffmpeg's concat carries over — not an
+                        // error.
+                        if t == album {
+                            return Ok((title, None));
+                        }
+                        let sep = format!("{album} - ");
+                        // The `©nam`/`©alb` pair is the documented
+                        // representation: a title that does not extend the
+                        // album by the documented separator is inconsistent,
+                        // so the subtitle cannot be established — refuse
+                        // before mutation rather than drop it as empty.
+                        let Some(stripped) = t.strip_prefix(&sep) else {
+                            return Err(TaggingError::PreserveUnresolvable {
+                                field: "subtitle",
+                                path: path.to_path_buf(),
+                            });
+                        };
+                        // Preserve the subtitle verbatim (no trim): an all-preserve
+                        // job must not rewrite the file, so the recovered suffix
+                        // keeps its exact bytes. Only an all-whitespace suffix is
+                        // treated as "no subtitle", not an error.
+                        let sub = stripped.to_string();
+                        (!sub.trim().is_empty()).then_some(sub)
+                    }
+                    // The subtitle-only state (a `©nam` with no `©alb`): the
+                    // title is known to be absent, so `©nam` is the subtitle
+                    // verbatim. An externally-tagged file that carries only
+                    // `©nam` is indistinguishable from this state and is
+                    // treated as subtitle-only.
+                    (None, Some(t)) => Some(t.clone()),
+                    // An album without a title: the subtitle cannot be
+                    // established — refuse.
+                    (Some(_), None) => Err(TaggingError::PreserveUnresolvable {
+                        field: "subtitle",
+                        path: path.to_path_buf(),
+                    })?,
+                    (None, None) => None,
+                }
+            }
+        };
+
+        Ok((title, subtitle))
+    }
+
+    /// Write the `Series:` segment of `©grp` per policy, keeping unrelated
+    /// segments. `Preserve` never touches `©grp`; `Write` adds the segment
+    /// (validated to have a series name); `Clear` removes only the `Series:`
+    /// segment. The tool-generated `Narrator:` legacy segment is filtered out
+    /// on a write, matching [`Tagger::apply_metadata`]. A clear keeps any
+    /// `Narrator:` and unrelated segments — it must not erase content that
+    /// this field does not own.
+    fn write_series_policy(
+        &self,
+        tag: &mut mp4ameta::Tag,
+        metadata: &BookMetadata,
+        policy: crate::job::FieldPolicy,
+    ) {
+        if policy == crate::job::FieldPolicy::Preserve {
+            return;
+        }
+        if policy == crate::job::FieldPolicy::Clear {
+            let grouping = tag.grouping().map(|g| g.to_string()).unwrap_or_default();
+            let kept = grouping
+                .split(" | ")
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty() && !segment.starts_with("Series:"))
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            if kept.is_empty() {
+                tag.remove_groupings();
+            } else {
+                tag.set_grouping(kept.join(" | "));
+            }
+            return;
+        }
+        let mut segments = Self::preserved_grouping_segments(tag.grouping().map(|s| s as &str));
+        segments.push(Self::series_info(metadata).expect("validated: series write"));
+        tag.set_grouping(segments.join(" | "));
+    }
+
+    /// The `Series:` segment text for the metadata.
+    fn series_info(metadata: &BookMetadata) -> Option<String> {
+        let name = metadata.series_name.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+        Some(match &metadata.series_position {
+            Some(pos) => format!("Series: {} #{pos}", name),
+            None => format!("Series: {name}"),
+        })
+    }
+
     /// Download cover art from URL and embed it in the MP4 file
     pub async fn embed_cover<P: AsRef<Path>>(&self, file_path: P, cover_url: &str) -> Result<()> {
         let path = file_path.as_ref();
 
         Self::ensure_file_exists(path)?;
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.embed_cover_file(&mut file, path, cover_url).await
+    }
 
+    /// `embed_cover` bound to an open file descriptor (see
+    /// `write_metadata_with_policies_file` for why job execution uses it).
+    pub async fn embed_cover_file(
+        &self,
+        file: &mut std::fs::File,
+        path: &Path,
+        cover_url: &str,
+    ) -> Result<()> {
         debug!("Downloading cover from: {}", cover_url);
 
         // Download cover image
@@ -521,15 +943,490 @@ impl Tagger {
         debug!("Downloaded cover image ({} bytes)", image_data.len());
 
         // Embed in file
-        self.embed_cover_data(path, &image_data)
+        self.embed_cover_data_file(file, path, &image_data)
     }
 
+    /// Maximum size of a local cover image in bytes (matches the URL limit).
+    pub const LOCAL_COVER_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+    /// Embed a cover image from a validated local file.
+    ///
+    /// The path must be absolute (job validation enforces this), the file
+    /// must exist and be at most [`Self::LOCAL_COVER_MAX_BYTES`] bytes. The
+    /// bytes then go through the same `covr` format handling as a URL
+    /// download (JPEG/PNG as-is, WebP/GIF transcoded to JPEG).
+    /// Embed a cover from a validated local file. The file must lie inside
+    /// `asset_root` (the job's `output_root`, the only area the job owns);
+    /// absolute paths that escape the root, or paths containing symlinks that
+    /// resolve outside it, are rejected before any read. The read itself is
+    /// bounded to [`Self::LOCAL_COVER_MAX_BYTES`]: a file that grows past the
+    /// limit between the size check and the read is refused (no unbounded
+    /// `fs::read` after a size-only check).
+    ///
+    /// The open is atomic and root-relative: the asset root is opened as a
+    /// directory descriptor, the cover is resolved against it without
+    /// following symlinks (Linux: `openat2` with `RESOLVE_BENEATH |
+    /// RESOLVE_NO_SYMLINKS`; other Unix: one `openat` with `O_NOFOLLOW` on
+    /// the final component, whose residual exposure to symlinked
+    /// intermediate components is closed by verifying the opened
+    /// descriptor's canonical location stays under the root, see
+    /// `fd_canonical`), and the opened descriptor must name a regular file
+    /// before any byte is read. A path swap, symlink install, FIFO, device
+    /// node, or non-regular file between validation and the read is a
+    /// diagnosed refusal, never attacker-chosen bytes and never a blocking
+    /// open.
+    pub fn embed_cover_local<P: AsRef<Path>, A: AsRef<Path>>(
+        &self,
+        file_path: P,
+        cover_path: &Path,
+        asset_root: A,
+    ) -> Result<()> {
+        let path = file_path.as_ref();
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.embed_cover_local_file(&mut file, path, cover_path, asset_root)
+    }
+
+    /// `embed_cover_local` bound to an open file descriptor (see
+    /// `write_metadata_with_policies_file` for why job execution uses it).
+    pub fn embed_cover_local_file<A: AsRef<Path>>(
+        &self,
+        file: &mut std::fs::File,
+        path: &Path,
+        cover_path: &Path,
+        asset_root: A,
+    ) -> Result<()> {
+        if !cover_path.is_absolute() {
+            return Err(TaggingError::CoverDownload(format!(
+                "Local cover path must be absolute, got {}",
+                cover_path.display()
+            )));
+        }
+        // The asset root must itself be canonicalizable so the
+        // root-relative open is well-defined; a missing root is a job
+        // configuration error, not a cover content error.
+        let configured_root = asset_root.as_ref();
+        let canonical_root = configured_root.canonicalize().map_err(|e| {
+            TaggingError::CoverDownload(format!(
+                "Asset root {} is not usable: {}",
+                configured_root.display(),
+                e
+            ))
+        })?;
+        // The cover must stay under the asset root statically as well, so a
+        // misspelled absolute path outside the area is refused before the
+        // root-relative open runs. The user's spelling is tried against the
+        // configured root first, then the canonical root: when
+        // `output_root` is reached through a symlink, the raw spelling
+        // matches the configured root, not its canonical form.
+        let relative = match cover_path.strip_prefix(configured_root) {
+            Ok(relative) => relative.to_path_buf(),
+            Err(_) => cover_path
+                .strip_prefix(&canonical_root)
+                .map(|relative| relative.to_path_buf())
+                .map_err(|_| {
+                    TaggingError::CoverPathOutsideAssetRoot(cover_path.display().to_string())
+                })?,
+        };
+        let cover_file = Self::open_cover_in_root(cover_path, &relative, &canonical_root)?;
+        // Bound the read to limit+1 bytes (a single open-then-bounded-read,
+        // not a size-then-read TOCTOU window). If the buffer fills to the
+        // limit+1 mark, the file is too large: refuse it.
+        let mut data = Vec::with_capacity(Self::LOCAL_COVER_MAX_BYTES as usize + 1);
+        let n = cover_file.take(Self::LOCAL_COVER_MAX_BYTES + 1).read_to_end(&mut data).map_err(
+            |e| {
+                TaggingError::CoverDownload(format!(
+                    "Failed to read local cover {}: {}",
+                    cover_path.display(),
+                    e
+                ))
+            },
+        )?;
+        if (n as u64) > Self::LOCAL_COVER_MAX_BYTES {
+            return Err(TaggingError::CoverDownload(format!(
+                "Local cover file {} exceeds the {} byte limit",
+                cover_path.display(),
+                Self::LOCAL_COVER_MAX_BYTES
+            )));
+        }
+        self.embed_cover_data_file(file, path, &data)
+    }
+
+    /// Open a cover path relative to the canonical asset root without
+    /// following symlinks, returning the open file. `relative` is the
+    /// caller-validated remainder of `cover_path` under the root. The
+    /// opened descriptor must name a regular file: a FIFO, socket, device,
+    /// symlink escape, or non-existent entry is a diagnosed refusal, and no
+    /// read (let alone a blocking one) can happen on a non-regular file.
+    #[cfg(not(unix))]
+    fn open_cover_in_root(
+        cover_path: &Path,
+        relative: &Path,
+        asset_root: &Path,
+    ) -> Result<std::fs::File> {
+        // No `openat2`/`O_NOFOLLOW` on this platform: fall back to a
+        // canonicalized open plus the containment check the caller already
+        // applied. Job execution is Linux-only, so this arm is a
+        // compile-time surface, not a security boundary.
+        let canonical = asset_root.join(relative).canonicalize().map_err(|e| {
+            TaggingError::CoverDownload(format!(
+                "Local cover file {} is not readable: {}",
+                cover_path.display(),
+                e
+            ))
+        })?;
+        if !canonical.starts_with(asset_root) {
+            return Err(TaggingError::CoverPathOutsideAssetRoot(cover_path.display().to_string()));
+        }
+        std::fs::File::open(&canonical).map_err(|e| {
+            TaggingError::CoverDownload(format!(
+                "Failed to open local cover {}: {e}",
+                cover_path.display()
+            ))
+        })
+    }
+
+    /// Unix implementation of the root-relative cover open (see the
+    /// non-unix twin for the platform fallback).
+    #[cfg(unix)]
+    fn open_cover_in_root(
+        cover_path: &Path,
+        relative: &Path,
+        asset_root: &Path,
+    ) -> Result<std::fs::File> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // The root fd must NOT be obtained by opening `asset_root`
+        // directly: that follows a final-component symlink, so a root that
+        // is swapped for a symlink after `canonicalize` above would pin an
+        // outside directory, and the `openat2` lookup below would then
+        // resolve relative to it. Instead walk every component from `/`
+        // with `openat(O_NOFOLLOW)`: no component, including the last,
+        // may be a symlink.
+        use std::os::unix::ffi::OsStrExt;
+        // Directory-open flags for the per-component walk. Linux/Android
+        // have `O_PATH`: execute-only (`0711`) ancestors stay walkable.
+        // The other Unix targets (macOS in the release pipeline) do not
+        // export `O_PATH` in libc 0.2.186, so open `O_RDONLY` there: read
+        // permission is needed on each walked component, and the fd is
+        // used solely as an `openat`/`openat2` dirfd in both cases,
+        // never read.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        const DIR_OPEN_FLAGS: libc::c_int =
+            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        const DIR_OPEN_FLAGS: libc::c_int =
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY;
+        let mut root_fd = std::fs::File::open("/").map_err(|e| {
+            TaggingError::CoverDownload(format!(
+                "Asset root {} is not usable: {}",
+                asset_root.display(),
+                e
+            ))
+        })?;
+        for comp in asset_root.components() {
+            let name = match comp {
+                // `asset_root` is the `canonicalize`d root: the leading
+                // `RootDir` names `/`, already held by the fd; only plain
+                // name components remain, so no `.`/`..` can appear.
+                std::path::Component::RootDir => continue,
+                std::path::Component::Normal(name) => name,
+                // Anything else is a diagnosed refusal, not guessed at.
+                _ => {
+                    return Err(TaggingError::CoverPathOutsideAssetRoot(
+                        cover_path.display().to_string(),
+                    ));
+                }
+            };
+            let mut name_bytes = name.as_bytes().to_vec();
+            name_bytes.push(0);
+            // SAFETY: `root_fd` is a valid directory descriptor for every
+            // iteration (`/` first, then each directory opened below) and
+            // `name_bytes` is NUL-terminated. `O_NOFOLLOW` refuses a
+            // symlink at this component; `O_DIRECTORY` refuses a
+            // non-directory, on every Unix target. On Linux/Android the
+            // walk uses `O_PATH`, which needs only execute permission on
+            // each component (an execute-only `0711` ancestor stays
+            // walkable); on the other Unix targets it uses `O_RDONLY`,
+            // which needs read permission on each component. In both
+            // cases the fd is used solely as an `openat`/`openat2`
+            // dirfd, never read. The old directory fd is closed before
+            // the replacement is opened, so no fd leaks on any path.
+            let next = unsafe {
+                libc::openat(root_fd.as_raw_fd(), name_bytes.as_ptr().cast(), DIR_OPEN_FLAGS)
+            };
+            if next < 0 {
+                let error = std::io::Error::last_os_error();
+                return Err(match error.raw_os_error() {
+                    // A symlink component (ELOOP) or a non-directory
+                    // component (ENOTDIR) is a path-escape refusal, same
+                    // as the root-relative open below; EACCES and other
+                    // I/O failures are diagnosed refusals, not escapes.
+                    Some(code) if code == libc::ELOOP || code == libc::ENOTDIR => {
+                        TaggingError::CoverPathOutsideAssetRoot(cover_path.display().to_string())
+                    }
+                    _ => TaggingError::CoverDownload(format!(
+                        "Asset root component is not accessible: {error}"
+                    )),
+                });
+            }
+            let next_dir = unsafe { std::fs::File::from_raw_fd(next) };
+            // Closes the previous directory fd before it is shadowed.
+            drop(std::mem::replace(&mut root_fd, next_dir));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // `openat2` resolves the whole relative path against the root
+            // descriptor: `RESOLVE_BENEATH` refuses every escape (including
+            // a symlinked component that points out of the root, and
+            // `..`), and `RESOLVE_NO_SYMLINKS` refuses any symlink at all.
+            // The syscall is atomic — there is no window between validation
+            // and the open.
+            use std::os::unix::ffi::OsStrExt;
+            // A NUL-terminated copy: the syscall reads the name up to the
+            // NUL, and `as_bytes()` alone would expose heap garbage after
+            // the name.
+            let mut name = relative.as_os_str().as_bytes().to_vec();
+            name.push(0);
+            // `openat2` (Linux syscall 437) is not exported by glibc and is
+            // not in libc 0.2.186, so issue it through `libc::syscall`.
+            // SAFETY: open_how is a plain-struct syscall argument; zeroed
+            // initialization is the kernel-documented form.
+            let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+            // `O_NONBLOCK` keeps a FIFO (or any other non-regular entry)
+            // from blocking the open; it is inert on a regular file, which
+            // is the only entry accepted below.
+            how.flags = libc::O_RDONLY as u64 | libc::O_CLOEXEC as u64 | libc::O_NONBLOCK as u64;
+            how.mode = 0;
+            how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS;
+            // SAFETY: SYS_openat2 takes (dirfd, path, how, size); root_fd is
+            // a valid directory fd, name a NUL-terminated relative path, and
+            // how fully initialized with a size covering the whole struct.
+            // The result is an fd (non-negative, fits in c_int) or a
+            // negative errno.
+            let fd = unsafe {
+                libc::syscall(
+                    libc::SYS_openat2,
+                    root_fd.as_raw_fd(),
+                    name.as_ptr() as *const std::ffi::c_char,
+                    &how as *const libc::open_how as libc::c_long,
+                    std::mem::size_of::<libc::open_how>() as u32,
+                ) as libc::c_int
+            };
+            if fd < 0 {
+                let error = std::io::Error::last_os_error();
+                return match error.raw_os_error() {
+                    // Missing file, missing directory component, or no read
+                    // permission: a content problem, not an escape.
+                    Some(code)
+                        if code == libc::ENOENT
+                            || code == libc::ENOTDIR
+                            || code == libc::EACCES =>
+                    {
+                        Err(TaggingError::CoverDownload(format!(
+                            "Local cover file {} is not readable: {error}",
+                            cover_path.display()
+                        )))
+                    }
+                    // `openat2` unavailable (pre-5.6 kernel) or rejected
+                    // (e.g. by a seccomp filter): an environment limit, not
+                    // a path escape — say so, with a way out.
+                    Some(code) if code == libc::ENOSYS || code == libc::EINVAL => {
+                        Err(TaggingError::CoverDownload(format!(
+                            "Local cover validation needs the openat2 syscall, which this \
+                             environment does not support ({error}); run on a Linux kernel 5.6 \
+                             or newer, or drop the local cover from the job"
+                        )))
+                    }
+                    // A symlink component (any level, including the final
+                    // entry) or a `BENEATH`-violation: a path that does not
+                    // stay inside the root as plain entries.
+                    _ => Err(TaggingError::CoverPathOutsideAssetRoot(
+                        cover_path.display().to_string(),
+                    )),
+                };
+            }
+            drop(root_fd);
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
+            let meta = file.metadata().map_err(|e| {
+                TaggingError::CoverDownload(format!(
+                    "Failed to stat local cover {}: {e}",
+                    cover_path.display()
+                ))
+            })?;
+            if !meta.is_file() {
+                return Err(TaggingError::CoverDownload(format!(
+                    "Local cover {} is not a regular file",
+                    cover_path.display()
+                )));
+            }
+            Ok(file)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Portable fallback: no `openat2`. A single `openat` with
+            // `O_NOFOLLOW` refuses a symlink at the final component only;
+            // the residual exposure to symlinked intermediate components
+            // is closed by the `fd_canonical` post-open check below, which
+            // verifies the opened descriptor's canonical location stays
+            // under the root.
+            use std::os::unix::ffi::OsStrExt;
+            // NUL-terminated copy (see the Linux arm).
+            let mut name = relative.as_os_str().as_bytes().to_vec();
+            name.push(0);
+            // `O_NONBLOCK` keeps a FIFO (or any other non-regular entry)
+            // from blocking the open; it is inert on a regular file.
+            let fd = unsafe {
+                libc::openat(
+                    root_fd.as_raw_fd(),
+                    name.as_ptr().cast(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                )
+            };
+            if fd < 0 {
+                let error = std::io::Error::last_os_error();
+                return match error.kind() {
+                    std::io::ErrorKind::NotFound => Err(TaggingError::CoverDownload(format!(
+                        "Local cover file {} is not readable: {error}",
+                        cover_path.display()
+                    ))),
+                    _ => Err(TaggingError::CoverPathOutsideAssetRoot(
+                        cover_path.display().to_string(),
+                    )),
+                };
+            }
+            drop(root_fd);
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
+            let meta = file.metadata().map_err(|e| {
+                TaggingError::CoverDownload(format!(
+                    "Failed to stat local cover {}: {e}",
+                    cover_path.display()
+                ))
+            })?;
+            if !meta.is_file() {
+                return Err(TaggingError::CoverDownload(format!(
+                    "Local cover {} is not a regular file",
+                    cover_path.display()
+                )));
+            }
+            // `O_NOFOLLOW` only refuses a symlink at the final component; a
+            // symlinked intermediate component would have been followed
+            // during resolution. Close the gap by verifying the opened
+            // descriptor's own canonical location stays under the root
+            // (Linux resolves it through procfs; other Unix targets through
+            // `F_GETPATH`).
+            let resolved = Self::fd_canonical(fd);
+            if !resolved.is_some_and(|p| p.starts_with(asset_root)) {
+                return Err(TaggingError::CoverPathOutsideAssetRoot(
+                    cover_path.display().to_string(),
+                ));
+            }
+            Ok(file)
+        }
+    }
+
+    /// Resolve the canonical location of an open file descriptor without
+    /// going back through its pathname: Linux exposes it through procfs,
+    /// Apple, DragonFly, and NetBSD provide `F_GETPATH`. Used only by the
+    /// non-Linux unix fallback (the Linux arm uses `openat2` directly).
+    #[cfg(unix)]
+    #[cfg_attr(any(target_os = "linux", target_os = "android"), allow(dead_code))]
+    fn fd_canonical(fd: std::os::fd::RawFd) -> Option<std::path::PathBuf> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            std::fs::canonicalize(format!("/proc/self/fd/{fd}")).ok()
+        }
+        #[cfg(any(target_vendor = "apple", target_os = "dragonfly", target_os = "netbsd"))]
+        {
+            use std::os::unix::ffi::OsStrExt;
+
+            let mut buf = [0u8; 4096];
+            // SAFETY: F_GETPATH writes a NUL-terminated path into this
+            // buffer, which is at least PATH_MAX bytes on these targets.
+            let result = unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) };
+            if result < 0 {
+                return None;
+            }
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            std::fs::canonicalize(std::ffi::OsStr::from_bytes(&buf[..end])).ok()
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple",
+            target_os = "dragonfly",
+            target_os = "netbsd"
+        )))]
+        {
+            let _ = fd;
+            None
+        }
+    }
+
+    /// Remove all embedded cover art. A deliberate `clear` cover policy;
+    /// `preserve` never calls this.
+    pub fn clear_cover<P: AsRef<Path>>(&self, file_path: P) -> Result<()> {
+        let path = file_path.as_ref();
+        Self::ensure_file_exists(path)?;
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.clear_cover_file(&mut file, path)
+    }
+
+    /// `clear_cover` bound to an open file descriptor (see
+    /// `write_metadata_with_policies_file` for why job execution uses it).
+    pub fn clear_cover_file(&self, file: &mut std::fs::File, path: &Path) -> Result<()> {
+        let mut tag = mp4ameta::Tag::read_from(file)
+            .map_err(|e| TaggingError::Mp4Meta(format!("Failed to read tag: {}", e)))?;
+
+        tag.remove_artworks();
+
+        tag.write_to(file)
+            .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write tags: {}", e)))?;
+
+        info!("Cleared existing cover from: {}", path.display());
+        Ok(())
+    }
+
+    /// Remove all chapter representations (Nero `chpl` list and QuickTime
+    /// chapter track) from the file. A deliberate `clear` chapters policy;
+    /// `preserve` never calls this.
+    pub fn clear_chapters<P: AsRef<Path>>(&self, file_path: P) -> Result<()> {
+        let path = file_path.as_ref();
+        Self::ensure_file_exists(path)?;
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.clear_chapters_file(&mut file, path)
+    }
+
+    /// `clear_chapters` bound to an open file descriptor (see
+    /// `write_metadata_with_policies_file` for why job execution uses it).
+    pub fn clear_chapters_file(&self, file: &mut std::fs::File, path: &Path) -> Result<()> {
+        let mut tag = mp4ameta::Tag::read_from(file)
+            .map_err(|e| TaggingError::Mp4Meta(format!("Failed to read tag: {}", e)))?;
+
+        tag.chapter_list_mut().clear();
+        tag.chapter_track_mut().clear();
+
+        tag.write_to(file)
+            .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write chapters: {}", e)))?;
+
+        info!("Cleared existing chapters from: {}", path.display());
+        Ok(())
+    }
     /// Embed pre-downloaded cover image data into an MP4 file
     pub fn embed_cover_data<P: AsRef<Path>>(&self, file_path: P, image_data: &[u8]) -> Result<()> {
         let path = file_path.as_ref();
 
         Self::ensure_file_exists(path)?;
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.embed_cover_data_file(&mut file, path, image_data)
+    }
 
+    /// `embed_cover_data` bound to an open file descriptor (see
+    /// `write_metadata_with_policies_file` for why job execution uses it).
+    pub fn embed_cover_data_file(
+        &self,
+        file: &mut std::fs::File,
+        path: &Path,
+        image_data: &[u8],
+    ) -> Result<()> {
         debug!("Embedding cover art into: {}", path.display());
 
         // Detect image format
@@ -547,13 +1444,13 @@ impl Tagger {
         };
 
         // Read existing tag or create new one
-        let mut tag = mp4ameta::Tag::read_from_path(path).unwrap_or_default();
+        let mut tag = mp4ameta::Tag::read_from(file).unwrap_or_default();
 
         let artwork = mp4ameta::Img::new(img_fmt, data);
         tag.set_artwork(artwork);
 
         // Write the tag back to file
-        tag.write_to_path(path)
+        tag.write_to(file)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to embed cover: {}", e)))?;
 
         info!("Successfully embedded cover art in: {}", path.display());
@@ -590,7 +1487,18 @@ impl Tagger {
 
         // Validate file exists
         Self::ensure_file_exists(path)?;
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        self.embed_chapters_file(&mut file, path, chapters)
+    }
 
+    /// `embed_chapters` bound to an open file descriptor (see
+    /// `write_metadata_with_policies_file` for why job execution uses it).
+    pub fn embed_chapters_file(
+        &self,
+        file: &mut std::fs::File,
+        path: &Path,
+        chapters: &[crate::metadata::Chapter],
+    ) -> Result<()> {
         // Skip if empty (with debug log)
         if chapters.is_empty() {
             debug!("No chapters to embed, skipping");
@@ -613,7 +1521,7 @@ impl Tagger {
         info!("Embedding {} chapters into: {}", chapters_vec.len(), path.display());
 
         // Read existing tag
-        let mut tag = mp4ameta::Tag::read_from_path(path)
+        let mut tag = mp4ameta::Tag::read_from(file)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to read tag: {}", e)))?;
 
         // Reject chapters at or beyond the file duration before writing. mp4ameta
@@ -643,7 +1551,7 @@ impl Tagger {
         tag.chapter_track_mut().extend(mp4_chapters);
 
         // Write back to file
-        tag.write_to_path(path)
+        tag.write_to(file)
             .map_err(|e| TaggingError::Mp4Meta(format!("Failed to write chapters: {}", e)))?;
 
         info!("Successfully embedded {} chapters", chapters_vec.len());
@@ -773,6 +1681,21 @@ impl Tagger {
 
         debug!("Writing chapters.txt to: {}", path.display());
 
+        let mut file = std::fs::File::create(path)?;
+        self.write_chapters_to(&mut file, album, artist, chapters)?;
+
+        info!("Successfully wrote chapters.txt to: {}", path.display());
+        Ok(())
+    }
+
+    /// Render a chapter sidecar into an already-open, caller-owned file.
+    pub(crate) fn write_chapters_to(
+        &self,
+        output: &mut impl std::io::Write,
+        album: &str,
+        artist: Option<&str>,
+        chapters: &[crate::metadata::Chapter],
+    ) -> Result<()> {
         // Build chapters content
         let mut content = String::new();
 
@@ -797,10 +1720,7 @@ impl Tagger {
             content.push_str(&format!("{} {}\n", timestamp, chapter.title));
         }
 
-        // Write to file
-        std::fs::write(path, content)?;
-
-        info!("Successfully wrote chapters.txt to: {}", path.display());
+        output.write_all(content.as_bytes())?;
         Ok(())
     }
 
@@ -1019,25 +1939,52 @@ fn convert_cover_to_jpeg(image_data: &[u8]) -> Result<Vec<u8>> {
         ))
     })?;
 
-    let temp_dir = tempfile::TempDir::new().map_err(|e| {
-        TaggingError::CoverConversion(format!("Failed to create temp dir for cover: {e}"))
-    })?;
-    let input_path = temp_dir.path().join("cover_input");
-    let output_path = temp_dir.path().join("cover_output.jpg");
-
-    std::fs::write(&input_path, image_data).map_err(|e| {
-        TaggingError::CoverConversion(format!("Failed to write temp cover file: {e}"))
-    })?;
+    use std::io::Write;
 
     // `-frames:v 1` keeps animated inputs to a single still frame. No scaling
-    // filter is applied, so the source dimensions are preserved.
-    let output = std::process::Command::new(ffmpeg.ffmpeg_path())
-        .args(["-hide_banner", "-loglevel", "error", "-i"])
-        .arg(&input_path)
-        .args(["-frames:v", "1", "-c:v", "mjpeg", "-q:v", "2", "-f", "image2", "-y"])
-        .arg(&output_path)
-        .output()
+    // filter is applied, so the source dimensions are preserved. Both image
+    // streams use pipes so FFmpeg diagnostics cannot expose temporary paths.
+    let mut child = std::process::Command::new(ffmpeg.ffmpeg_path())
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-f",
+            "image2",
+            "pipe:1",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| TaggingError::CoverConversion(format!("Failed to run FFmpeg: {e}")))?;
+
+    // Feed stdin concurrently with draining stdout/stderr: an animated image
+    // can produce its first JPEG before FFmpeg consumes all remaining input.
+    // Dropping stdin signals EOF; always reap even if the input write fails.
+    let stdin = child.stdin.take();
+    let (input_result, output) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            stdin
+                .ok_or_else(|| std::io::Error::other("FFmpeg stdin is not available"))
+                .and_then(|mut stdin| stdin.write_all(image_data))
+        });
+        let output = child.wait_with_output();
+        let input_result = writer
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("FFmpeg cover input writer panicked")));
+        (input_result, output)
+    });
+    let output =
+        output.map_err(|e| TaggingError::CoverConversion(format!("Failed to run FFmpeg: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1046,10 +1993,18 @@ fn convert_cover_to_jpeg(image_data: &[u8]) -> Result<Vec<u8>> {
             stderr.trim()
         )));
     }
+    if let Err(e) = input_result {
+        // With `-frames:v 1`, FFmpeg may close its input after decoding the
+        // first frame of a larger animation. A successful decoder exit is
+        // authoritative for that expected broken pipe.
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(TaggingError::CoverConversion(format!(
+                "Failed to pipe cover image to FFmpeg: {e}"
+            )));
+        }
+    }
 
-    let jpeg = std::fs::read(&output_path).map_err(|e| {
-        TaggingError::CoverConversion(format!("Failed to read converted cover: {e}"))
-    })?;
+    let jpeg = output.stdout;
 
     if jpeg.is_empty() {
         return Err(TaggingError::CoverConversion(
@@ -1325,8 +2280,14 @@ mod tests {
 
     #[test]
     fn test_convert_cover_to_jpeg_rejects_non_image() {
-        let result = convert_cover_to_jpeg(b"this is not an image");
-        assert!(matches!(result, Err(TaggingError::CoverConversion(_))));
+        let error = convert_cover_to_jpeg(b"this is not an image")
+            .expect_err("invalid image data must fail conversion");
+        assert!(matches!(&error, TaggingError::CoverConversion(_)));
+        let message = error.to_string();
+        assert!(message.contains("FFmpeg failed to convert cover image"), "{message}");
+        assert!(!message.contains("cover_input"), "{message}");
+        assert!(!message.contains("cover_output"), "{message}");
+        assert!(!message.contains(std::env::temp_dir().to_string_lossy().as_ref()), "{message}");
     }
 
     #[test]
@@ -2115,5 +3076,781 @@ mod tests {
         let tagger = Tagger::new();
         let result = tagger.embed_chapters(&m4b_path, &chapters);
         assert!(matches!(result, Err(TaggingError::DuplicateChapterTimes)));
+    }
+    /// Build a real M4B pre-tagged with a known `©nam`/`©alb` pair plus the
+    /// atoms other policies must not touch.
+    fn tagged_m4b(dir: &TempDir, nam: &str, album: &str) -> PathBuf {
+        let path = create_minimal_m4b(dir);
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title(nam);
+        tag.set_album(album);
+        tag.set_artist("Original Artist");
+        tag.set_composer("Original Narrator");
+        tag.set_comment("Original Description");
+        tag.set_genre("Original/Genre");
+        tag.set_year("2001");
+        tag.set_grouping("My Custom Segment | Series: Old #1");
+        tag.write_to_path(&path).unwrap();
+        path
+    }
+
+    fn meta() -> BookMetadata {
+        BookMetadata::new("ID1234567890", "New Title", "new description")
+            .add_author("New Author")
+            .add_narrator("New Narrator")
+            .add_genre("New Genre")
+            .with_subtitle("New Sub")
+            .with_series("New Series", "2")
+            .with_year(2024)
+    }
+
+    /// A policy set that writes every field; the written values come from the
+    /// effective metadata (the same strings that name the output), so the
+    /// policies carry no values of their own.
+    fn all_write_policies() -> crate::job::WritePolicies {
+        crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Write,
+            authors: crate::job::FieldPolicy::Write,
+            narrators: crate::job::FieldPolicy::Write,
+            series: crate::job::FieldPolicy::Write,
+            description: crate::job::FieldPolicy::Write,
+            genres: crate::job::FieldPolicy::Write,
+            year: crate::job::FieldPolicy::Write,
+        }
+    }
+
+    #[test]
+    fn policy_write_all_fields_updates_only_named_atoms() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        tagger.write_metadata_with_policies(&path, &meta(), &all_write_policies()).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "New Title - New Sub");
+        assert_eq!(tag.album().unwrap(), "New Title");
+        assert_eq!(tag.artist().unwrap(), "New Author");
+        assert_eq!(tag.album_artist().unwrap(), "New Author");
+        assert_eq!(tag.composer().unwrap(), "New Narrator");
+        assert_eq!(tag.genre().unwrap(), "New Genre");
+        assert_eq!(tag.year().unwrap(), "2024");
+        // The unrelated grouping segment must survive a full write.
+        assert_eq!(tag.grouping().unwrap(), "My Custom Segment | Series: New Series #2");
+    }
+
+    #[test]
+    fn policy_preserve_all_leaves_file_untouched() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let before = std::fs::read(&path).unwrap();
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Old Title - Old Sub");
+        assert_eq!(tag.album().unwrap(), "Old Title");
+        assert_eq!(tag.artist().unwrap(), "Original Artist");
+        assert_eq!(tag.composer().unwrap(), "Original Narrator");
+        assert_eq!(tag.comment().unwrap(), "Original Description");
+        assert_eq!(tag.genre().unwrap(), "Original/Genre");
+        assert_eq!(tag.year().unwrap(), "2001");
+        assert_eq!(tag.grouping().unwrap(), "My Custom Segment | Series: Old #1");
+        // An all-preserve set must leave the file byte-identical: no atom is
+        // rewritten and the file is not reserialized at all.
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn policy_both_preserve_leaves_title_atoms_verbatim_when_other_field_writes() {
+        // When title AND subtitle are both preserved, the shared `©nam`/`©alb`
+        // pair must be left byte-for-byte even though another field write
+        // forces the tag to be reserialized. Rebuilding it would re-derive
+        // the subtitle from the `©nam`-minus-`©alb` suffix and trim it,
+        // silently dropping preserved bytes.
+        let temp_dir = TempDir::new().unwrap();
+        // A whitespace-only subtitle suffix: the canonical no-subtitle case
+        // (`©nam == ©alb`) is the easy one; this is the data-loss case.
+        let path = tagged_m4b(&temp_dir, "Book -   ", "Book");
+        let tagger = Tagger::new();
+        // Preserve the title pair, write only the year.
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Write,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        // The written year is applied...
+        assert_eq!(tag.year().unwrap(), "2024");
+        // ...and the preserved title atoms survive byte-for-byte.
+        assert_eq!(tag.title().unwrap(), "Book -   ");
+        assert_eq!(tag.album().unwrap(), "Book");
+    }
+
+    #[test]
+    fn policy_title_only_preserves_subtitle_component() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        // The title is written from the effective metadata (the same string
+        // that names the output), and the unselected subtitle component must
+        // survive a title-only write.
+        assert_eq!(tag.title().unwrap(), "New Title - Old Sub");
+        assert_eq!(tag.album().unwrap(), "New Title");
+        // Unselected atoms stay.
+        assert_eq!(tag.artist().unwrap(), "Original Artist");
+    }
+
+    #[test]
+    fn policy_subtitle_only_preserves_title_component() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Write,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        // The subtitle is written from the effective metadata; the unselected
+        // title component must survive a subtitle-only write.
+        assert_eq!(tag.title().unwrap(), "Old Title - New Sub");
+        assert_eq!(tag.album().unwrap(), "Old Title");
+    }
+
+    #[test]
+    fn policy_clear_title_preserves_subtitle_component() {
+        // A clear-title must not erase the subtitle; the subtitle is the
+        // only surviving component, represented alone in `©nam` with `©alb`
+        // removed (a base title no longer exists, and `©alb` is
+        // base-title-only).
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Clear,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Old Sub");
+        assert!(tag.album().is_none(), "subtitle-only state carries no album atom");
+    }
+
+    #[test]
+    fn policy_clear_title_with_write_subtitle() {
+        // clear-title + write-subtitle: the written subtitle is the only
+        // surviving component.
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Clear,
+            subtitle: crate::job::SubtitlePolicy::Write,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "New Sub");
+        assert!(tag.album().is_none(), "subtitle-only state carries no album atom");
+    }
+
+    #[test]
+    fn policy_subtitle_only_round_trips_through_preserve() {
+        // The subtitle-only state (title cleared, subtitle surviving) must
+        // survive a later job without silent erasure: a subsequent
+        // title-preserve + subtitle-preserve run reads the state back as
+        // "no title, this subtitle" and leaves the atoms untouched
+        // byte-for-byte (the all-preserve early return still applies).
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Clear,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..crate::job::WritePolicies {
+                title: crate::job::TitlePolicy::Preserve,
+                subtitle: crate::job::SubtitlePolicy::Preserve,
+                authors: crate::job::FieldPolicy::Preserve,
+                narrators: crate::job::FieldPolicy::Preserve,
+                series: crate::job::FieldPolicy::Preserve,
+                description: crate::job::FieldPolicy::Preserve,
+                genres: crate::job::FieldPolicy::Preserve,
+                year: crate::job::FieldPolicy::Preserve,
+            }
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let all_preserve = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        // A later all-preserve job: the file must not be rewritten...
+        let before = std::fs::read(&path).unwrap();
+        tagger.write_metadata_with_policies(&path, &meta(), &all_preserve).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        // ...and the subtitle must be intact (not silently erased).
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Old Sub");
+        assert!(tag.album().is_none());
+
+        // In the subtitle-only state, preserving the title while clearing
+        // the subtitle refuses: the titleless `©nam` cannot be read back as
+        // a title to preserve.
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Clear,
+            ..all_preserve
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::PreserveUnresolvable { .. }));
+        // The refusal must not have mutated the file.
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        // A later title-write + subtitle-preserve run recovers the subtitle
+        // verbatim and restores the album atom.
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_preserve
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "New Title - Old Sub");
+        assert_eq!(tag.album().unwrap(), "New Title");
+    }
+
+    #[test]
+    fn policy_preserve_subtitle_on_equal_title_album_is_no_sub() {
+        // A file whose `©nam` equals `©alb` is the established no-subtitle
+        // representation (what `apply_metadata` writes and ffmpeg's concat
+        // carries over): a subtitle preserve must read it as "no subtitle",
+        // not fail, and a plain all-preserve run against it must succeed.
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title", "Old Title");
+        let tagger = Tagger::new();
+        // Write the title, preserve the subtitle: the subtitle preserve must
+        // read the equal title/album pair as "no subtitle", not fail.
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        // Title written from metadata; the preserved subtitle was none, so
+        // `©nam` is the bare title and `©alb` the base title only.
+        assert_eq!(tag.title().unwrap(), "New Title");
+        assert_eq!(tag.album().unwrap(), "New Title");
+    }
+
+    #[test]
+    fn policy_write_subtitle_with_blank_effective_value_fails() {
+        // A subtitle write with no (or blank) effective subtitle value is a
+        // diagnosed failure before any atom is mutated, not a silent clear.
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let meta_no_sub = BookMetadata::new("ID1234567890", "New Title", "d").with_subtitle("  ");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            subtitle: crate::job::SubtitlePolicy::Write,
+            ..all_write_policies()
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta_no_sub, &policies).unwrap_err();
+        assert!(matches!(
+            err,
+            TaggingError::WriteWithoutValue { field } if field == "subtitle"
+        ));
+        // No atom changed: the file is untouched.
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Old Title - Old Sub");
+    }
+
+    #[test]
+    fn policy_clear_specific_atoms_removes_only_them() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Clear,
+            narrators: crate::job::FieldPolicy::Clear,
+            series: crate::job::FieldPolicy::Clear,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Clear,
+            year: crate::job::FieldPolicy::Clear,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert!(tag.artist().is_none());
+        assert!(tag.composer().is_none());
+        assert!(tag.genre().is_none());
+        assert!(tag.year().is_none());
+        // The `Series:` segment is gone; the unrelated segment survives.
+        assert_eq!(tag.grouping().unwrap(), "My Custom Segment");
+        // Title/subtitle/description preserved.
+        assert_eq!(tag.title().unwrap(), "Old Title - Old Sub");
+        assert_eq!(tag.comment().unwrap(), "Original Description");
+    }
+
+    #[test]
+    fn policy_write_without_value_fails_before_mutation() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let tagger = Tagger::new();
+        // A metadata with no authors, writing authors: must fail, file intact.
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Write,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        let empty_authors = BookMetadata::new("ID1234567890", "T", "");
+        let err =
+            tagger.write_metadata_with_policies(&path, &empty_authors, &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::WriteWithoutValue { field: "authors" }));
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.artist().unwrap(), "Original Artist");
+        assert_eq!(tag.title().unwrap(), "Old Title - Old Sub");
+    }
+
+    #[test]
+    fn policy_preserve_title_without_album_fails_before_mutation() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        // A foreign file with a title but no album atom.
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("Only A Title");
+        tag.set_artist("Some Artist");
+        tag.write_to_path(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Write,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::PreserveUnresolvable { field: "title", .. }));
+        // File untouched: the title atom is still the original.
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Only A Title");
+        assert_eq!(tag.artist().unwrap(), "Some Artist");
+        assert!(tag.album().is_none());
+    }
+
+    #[test]
+    fn policy_preserve_subtitle_with_inconsistent_nam_fails_before_mutation() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        // `©nam` does not extend `©alb` by the documented ` - ` separator.
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("Completely Different Name");
+        tag.set_album("Base Title");
+        tag.write_to_path(&path).unwrap();
+
+        let tagger = Tagger::new();
+        // Writing the title (a valid write) rebuilds the `©nam`/`©alb` pair;
+        // the preserved subtitle must be re-established from the existing
+        // atoms, but the inconsistent pair cannot, so it fails before any atom
+        // is mutated. (When both components are preserved the pair is left
+        // untouched, so this check applies only to the rebuild path.)
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::PreserveUnresolvable { field: "subtitle", .. }));
+    }
+
+    #[test]
+    fn policy_preserve_subtitle_keeps_verbatim_bytes() {
+        // A preserved subtitle must round-trip exactly: trailing whitespace in
+        // the `©nam` suffix is tag data, not noise to trim.
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Book - Sub  ", "Book");
+        let tagger = Tagger::new();
+        // An authors write rebuilds the `©nam`/`©alb` pair from the preserved
+        // components; the preserved subtitle must round-trip exactly.
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Write,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Book - Sub  ");
+        assert_eq!(tag.album().unwrap(), "Book");
+    }
+
+    #[test]
+    fn policy_clear_series_keeps_narrator_and_unrelated() {
+        // Clearing `series` removes only the `Series:` segment; the
+        // `Narrator:` and unrelated segments are not this field's to erase.
+        let temp_dir = TempDir::new().unwrap();
+        // Title extends album by the documented ` - ` separator so the
+        // preserved subtitle resolves.
+        let path = tagged_m4b(&temp_dir, "Base - Sub", "Base");
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_grouping("Narrator: X | Series: Y | Custom");
+        tag.write_to_path(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Preserve,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Clear,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.grouping().unwrap(), "Narrator: X | Custom");
+    }
+
+    #[test]
+    fn write_title_and_subtitle_from_effective_metadata() {
+        // A title and subtitle `write` uses the effective metadata's values
+        // (the same strings that name the output), so a job that supplies a
+        // title with no subtitle writes the bare title to `©nam`/`©alb`.
+        let temp_dir = TempDir::new().unwrap();
+        let path = tagged_m4b(&temp_dir, "Old Title - Old Sub", "Old Title");
+        let meta_no_sub = BookMetadata::new("ID1234567890", "New Title", "d");
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Clear,
+            authors: crate::job::FieldPolicy::Preserve,
+            narrators: crate::job::FieldPolicy::Preserve,
+            series: crate::job::FieldPolicy::Preserve,
+            description: crate::job::FieldPolicy::Preserve,
+            genres: crate::job::FieldPolicy::Preserve,
+            year: crate::job::FieldPolicy::Preserve,
+        };
+        tagger.write_metadata_with_policies(&path, &meta_no_sub, &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "New Title");
+        assert_eq!(tag.album().unwrap(), "New Title");
+    }
+
+    #[test]
+    fn clear_chapters_removes_both_representations() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let tagger = Tagger::new();
+        tagger
+            .embed_chapters(&path, &[Chapter::new("C1", Duration::ZERO, Duration::from_secs(5))])
+            .unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.chapter_list().len(), 1);
+
+        tagger.clear_chapters(&path).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert!(tag.chapter_list().is_empty());
+        assert!(tag.chapter_track().is_empty());
+    }
+
+    #[test]
+    fn local_cover_embeds_and_rejects_bad_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let asset_root = temp_dir.path().join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let cover = asset_root.join("cover.png");
+        // Minimal 1x1 PNG.
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(&cover, PNG).unwrap();
+
+        let tagger = Tagger::new();
+        // A file inside the asset area is accepted.
+        tagger.embed_cover_local(&path, &cover, &asset_root).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert!(tag.artwork().is_some());
+
+        // Relative path is rejected.
+        let err = tagger.embed_cover_local(&path, Path::new("cover.png"), &asset_root).unwrap_err();
+        assert!(matches!(err, TaggingError::CoverDownload(_)));
+        // Missing file is rejected.
+        let missing = asset_root.join("missing.png");
+        let err = tagger.embed_cover_local(&path, &missing, &asset_root).unwrap_err();
+        assert!(matches!(err, TaggingError::CoverDownload(_)));
+    }
+
+    #[test]
+    fn local_cover_rejects_escaping_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let asset_root = temp_dir.path().join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        // A PNG that lives OUTSIDE the asset area.
+        let outside = temp_dir.path().join("outside.png");
+        let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        std::fs::write(&outside, &png).unwrap();
+        let tagger = Tagger::new();
+        // A direct path outside the asset area is rejected, not read.
+        let err = tagger.embed_cover_local(&path, &outside, &asset_root).unwrap_err();
+        assert!(
+            matches!(err, TaggingError::CoverPathOutsideAssetRoot(_)),
+            "expected path-escape rejection, got {err:?}"
+        );
+        // A symlink inside the asset area that points out of it is rejected.
+        let link = asset_root.join("link.png");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        #[cfg(unix)]
+        let err = tagger.embed_cover_local(&path, &link, &asset_root).unwrap_err();
+        #[cfg(unix)]
+        assert!(
+            matches!(err, TaggingError::CoverPathOutsideAssetRoot(_)),
+            "expected symlink-escape rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cover_root_open_refuses_a_symlinked_root_swap() {
+        // The race shape: `canonicalize` has already resolved the root,
+        // and the root path is then swapped for a symlink to an outside
+        // directory. Opening the root with symlink-following would pin
+        // the outside directory and read from it; the root-fd walk must
+        // refuse the symlink component as an escape instead.
+        let temp_dir = TempDir::new().unwrap();
+        let real = temp_dir.path().join("real-assets");
+        std::fs::create_dir_all(&real).unwrap();
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("cover.png"), [0x89u8]).unwrap();
+        let root = temp_dir.path().join("assets");
+        std::fs::create_dir_all(&root).unwrap();
+        // The swap after the caller's `canonicalize`: the name now
+        // resolves outside the intended directory.
+        std::fs::rename(&root, temp_dir.path().join("assets.bak")).unwrap();
+        std::os::unix::fs::symlink(&outside, &root).unwrap();
+
+        let err =
+            Tagger::open_cover_in_root(&root.join("cover.png"), Path::new("cover.png"), &root)
+                .unwrap_err();
+        assert!(
+            matches!(err, TaggingError::CoverPathOutsideAssetRoot(_)),
+            "a symlink-swapped root must be refused as an escape, got {err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cover_root_open_refuses_a_non_directory_root() {
+        // The asset root name is a regular file: `canonicalize` succeeds,
+        // so the root-relative walk runs, and the final component's
+        // `openat(O_DIRECTORY)` fails ENOTDIR. Like the ELOOP arm for a
+        // symlinked component, the refusal is an escape diagnosis, not a
+        // cover-content error.
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("assets");
+        std::fs::write(&root, b"not a directory").unwrap();
+
+        let err =
+            Tagger::open_cover_in_root(&root.join("cover.png"), Path::new("cover.png"), &root)
+                .unwrap_err();
+        assert!(
+            matches!(err, TaggingError::CoverPathOutsideAssetRoot(_)),
+            "a non-directory root must be refused as an escape, got {err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn local_cover_accepts_configured_and_canonical_root_spellings() {
+        // Containment strips the cover path against the configured root
+        // first, then the canonical root: an asset area reached through a
+        // symlink must be accepted in BOTH spellings (the raw symlink path
+        // matches the configured root, the canonical path matches only the
+        // fallback arm).
+        let temp_dir = TempDir::new().unwrap();
+        let real_assets = temp_dir.path().join("real-assets");
+        std::fs::create_dir_all(&real_assets).unwrap();
+        let linked_assets = temp_dir.path().join("linked-assets");
+        std::os::unix::fs::symlink(&real_assets, &linked_assets).unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        // Same minimal 1x1 PNG as `local_cover_embeds_and_rejects_bad_paths`.
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let cover = real_assets.join("cover.png");
+        std::fs::write(&cover, PNG).unwrap();
+
+        let tagger = Tagger::new();
+        // Configured-root arm: the raw spelling matches the symlinked root.
+        tagger.embed_cover_local(&path, &linked_assets.join("cover.png"), &linked_assets).unwrap();
+        // Canonical-root fallback arm: the raw spelling matches only the
+        // canonical form of the symlinked root.
+        tagger.embed_cover_local(&path, &real_assets.join("cover.png"), &linked_assets).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert!(tag.artwork().is_some(), "both spellings must embed the cover");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn local_cover_rejects_non_regular_files_without_blocking() {
+        // A FIFO inside the asset root passes containment, but the opened
+        // descriptor must be refused as non-regular before any read: the
+        // old `File::open` on a FIFO blocks indefinitely waiting for a
+        // writer.
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let asset_root = temp_dir.path().join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let fifo = asset_root.join("cover.fifo");
+        // A NUL-terminated copy: the syscall reads the name up to the NUL.
+        let mut fifo_bytes = fifo.as_os_str().as_bytes().to_vec();
+        fifo_bytes.push(0);
+        // SAFETY: fifo_bytes is a valid NUL-terminated pathname.
+        assert_eq!(unsafe { libc::mkfifo(fifo_bytes.as_ptr().cast(), 0o600) }, 0);
+        assert!(!std::fs::metadata(&fifo).unwrap().is_file());
+        let tagger = Tagger::new();
+        let err = tagger.embed_cover_local(&path, &fifo, &asset_root).unwrap_err();
+        assert!(
+            matches!(err, TaggingError::CoverDownload(_)),
+            "expected non-regular-file refusal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn local_cover_rejects_oversized_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let asset_root = temp_dir.path().join("assets");
+        std::fs::create_dir_all(&asset_root).unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let big = asset_root.join("big.png");
+        // limit + 1 bytes; the bounded read must refuse it.
+        let data = vec![0u8; Tagger::LOCAL_COVER_MAX_BYTES as usize + 1];
+        std::fs::write(&big, data).unwrap();
+        let tagger = Tagger::new();
+        let err = tagger.embed_cover_local(&path, &big, &asset_root).unwrap_err();
+        assert!(
+            matches!(err, TaggingError::CoverDownload(_)),
+            "expected oversize rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn clear_cover_removes_embedded_artwork() {
+        let temp_dir = TempDir::new().unwrap();
+        let asset_root = temp_dir.path().to_path_buf();
+        let path = create_minimal_m4b(&temp_dir);
+        let cover = temp_dir.path().join("cover.png");
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(&cover, PNG).unwrap();
+
+        let tagger = Tagger::new();
+        tagger.embed_cover_local(&path, &cover, &asset_root).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert!(tag.artwork().is_some());
+
+        tagger.clear_cover(&path).unwrap();
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert!(tag.artwork().is_none());
     }
 }

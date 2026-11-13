@@ -6,6 +6,87 @@ All notable changes to this project will be documented in this file. See [standa
 
 
 ### Added
+- `--job-preview`: a non-mutating preview for `--job` runs that prints the
+  exact sanitized relative output path (plus the effective metadata)
+  resolved by the same parsed template and resolver execution uses; it
+  creates no directories, writes no media, and promises no success.
+- `--machine` (job mode): stable execution results as JSON on stdout only
+  (logs and progress go to stderr), enumerating every produced output and
+  sidecar with per-group identity/outcome and diagnosed errors; artifact
+  paths are relative to the job's `output_root` and validated inside it,
+  never absolute; failure exits 1; stdout always parses.
+- Engine-side no-clobber for `--job` runs: an existing final name is never
+  overwritten, suffixed, or renamed; the engine publishes only via atomic
+  no-replace, and a failed publication retains the recoverable stage in
+  `preserved_artifacts`. See README §No-clobber for the full contract.
+- No-unlink job staging: the engine never removes a media or sidecar
+  staging pathname, even when a collision carries this attempt's visible
+  token. Successful publication leaves staging hard links for caller-owned
+  staging-tree cleanup; failed runs retain the completed media stage
+  and report recoverable non-empty stages in `preserved_artifacts`.
+  Staging entries are not auto-cleaned, and fresh per-attempt tokens let
+  retries coexist with retained stages. Required final-sidecar removals
+  remain fallible and unchanged.
+- `ProcessorError` variants consolidated: a group failure now carries its
+  diagnosed error and produced artifacts at the `RunOutcome`/group-outcome
+  level (the machine contract) instead of the previous lossy group-failure
+  variant; a pre-1.0 library API change (the documented contracts are the
+  CLI and README).
+- One parsed-template output-path resolver for `--job` runs (`resolver_version`
+  from `--capabilities`): only template separators create directories; a
+  token's value is sanitized as component data so it cannot introduce
+  directories, re-substitute tokens, traverse (`..`), address a drive, or
+  escape `output_root`. Unknown tokens are rejected with the token, its
+  position, and the supported list. The legacy `-p`/`--path-format`
+  string-replacement behavior is unchanged. New tokens: canonical `{book_id}`
+  (distinct from the provider-dependent `{metadata_id}`) and singular/plural
+  first-ordered `{author}`/`{narrator}`.
+- `m4b-merge --capabilities`: machine-readable schema/resolver identity and
+  the full token and field/cover/chapter policy vocabulary, so callers build
+  pickers and validation from the engine instead of their own registry. The
+  cover policy constraint now also describes the `{"write":
+  "/absolute/path"}` object form the job parser accepts.
+- `--job FILE` processes a book from a versioned JSON job file (schema
+  `schema_version: 1`). The job is the single source of truth for the
+  metadata base — an explicit catalog id via `input_provider`, or
+  authoritative `input_supplied` values with no catalog lookup — the manual
+  `overrides` layer, and the output (`inputs`, `output_root`,
+  `path_format`, default `{author}/{title}`). It is mutually exclusive with
+  the legacy `-i`/`-o`/`-p`/`-a`/`--completed-directory` flags. An
+  unresolvable explicit id, a release the book does not carry, or a missing
+  client fails the job before discovery, merge, or source moves. The
+  provider cover URL (when present) is embedded, and the resolved chapters
+  are embedded with a `chapters.txt` sidecar.
+- Independent cover and chapter write policies on the `--job` input.
+  Cover: `write_url` (default; the provider cover URL when present), `{"write":
+  "/absolute/path"}` (local file inside the job's `output_root`; paths that
+  escape the asset area, including via a symlink, are rejected before any
+  read, and the read is bounded to 5 MiB), `{"write_url": "https://…"}`,
+  `preserve` (a single natively-copyable input file only), or `clear`.
+  Chapters: `write` (default; explicit list
+  with integer-millisecond times, or the resolved chapters, plus the
+  `chapters.txt` sidecar; an explicit empty list clears, while a list that
+  resolved to nothing leaves the source chapters untouched — clearing is a
+  deliberate policy, never the result of an empty resolve), `preserve`
+  (a single natively-copyable input file only; the source sidecar
+  is carried when present, and a stale sidecar at the output path is removed
+  when the source has none), or `clear`. Both
+  policies reject `preserve` on a multi-file group; a strict preservation
+  promise is only possible with a single natively-copyable input file. A
+  cover `clear` removes the merged
+  artwork, and a sidecar write failure fails the group before the sources
+  move.
+- Per-field metadata write policies on the `--job` input: `preserve`
+  (default), `write`, and `clear` for title, subtitle, authors, narrators,
+  series, description, genres, and year. Title and subtitle are independent
+  components of the shared `©nam`/`©alb` pair: writing one preserves the
+  other, and clearing one removes only that component — clearing the title
+  leaves the subtitle as the sole surviving component: it is written alone to
+  `©nam`, and `©alb` is removed because no base title survives. A preserved title or subtitle that
+  cannot be established from the file's existing atoms fails before any atom
+  is mutated. A `write` without a non-blank effective value is rejected.
+  `preserve` fields keep the file's existing values even when the effective
+  metadata lacks them, so an omitted policy is never an implicit clear.
 - Chapter embedding into M4B files using native mp4ameta library
 - Chapters are now embedded directly into the M4B container, not just written to chapters.txt
 - Full chapter metadata round-trip: extraction from source → embedding in output
@@ -20,9 +101,29 @@ All notable changes to this project will be documented in this file. See [standa
 ### Fixed
 - Chapterless input groups (split MP3/M4A without embedded chapters and without provider chapters) now get one generated chapter per input track, titled `Chapter 01`, `Chapter 02`, … and embedded in the merged M4B, matching the pre-rewrite `ChaptersFromFileTracks` behaviour. Chapters and the `chapters.txt` sidecar are written even when no provider metadata was available.
 - Audnexus lookups now fetch chapter markers from `/books/{asin}/chapters` (the book endpoint never returns them), honor `isAccurate`, and carry the configured region on both requests.
-- Chapter embedding now writes the QuickTime chapter text track (`chap` reference) alongside the Nero `chpl` list via mp4ameta, so Apple/AVFoundation players see chapter markers.
+- Chapter embedding now writes the QuickTime chapter track (`chap` reference) alongside the Nero `chpl` list via mp4ameta, so Apple/AVFoundation players see chapter markers.
+- Release assets are uploaded with their plain file names (`m4b-merge-linux`,
+  `m4b-merge-linux-arm64`, `m4b-merge-macos`, `m4b-merge-windows.exe`). New
+  uploads no longer attach a `m4b-publish-v1;…` display label, which the
+  GitHub web UI rendered as the asset name and made the release page show
+  long, unreadable names. The v2.0.0 and v2.0.1 assets had their provenance
+  labels cleared by a one-time manual API cleanup, so they are now
+  reconciled by content digest like any unlabeled asset; no code path
+  re-uploads or relabels them.
+- Release titles are the bare version (`vX.Y.Z`) instead of `Release vX.Y.Z`.
+- A failed publication copy now retains the partial file at the
+  destination name instead of unlinking it. This keeps the no-clobber
+  contract: a name replaced concurrently after the identity check is
+  never removed, even when the copy itself failed partway. The retained
+  partial is not reported in `preserved_artifacts`. Because it occupies
+  the destination name, a retry fails with `OutputCollision` until the
+  caller removes it.
 
 ### Changed
+- `--job` output paths: a `path_format` that resolves to no components (for
+  example `{subtitle}` on a book with no subtitle) now fails the group with an
+  `EmptyPath` error before any file is touched, instead of the legacy
+  `output.m4b` fallback; the legacy `-p`/`--path-format` path is unchanged.
 - **Breaking (Linux):** release Linux assets are now static-musl binaries.
   From the release following v2.0.0, `m4b-merge-linux` is x86-64 static
   musl and `m4b-merge-linux-arm64` is ARM64 static musl; no GNU-linked
@@ -44,6 +145,15 @@ All notable changes to this project will be documented in this file. See [standa
   selected source's default API URL. `--api-url` no longer implies the Audnexus
   source: it only overrides the URL for the source chosen by `--metadata-source`,
   and m4b-merge warns when a URL is passed to the AudiobookDB client.
+- **Deliberate behavior change:** looked-up editions are now release-first. The
+  selected release's title, subtitle, and release date win when present, with the
+  book-level title/subtitle as fallback (year falls back to the book copyright,
+  then original publication; subtitle to the book subtitle, then its
+  disambiguation). This applies to the legacy `--metadata-id` CLI path as well as
+  the `--job` `input_provider` path, so reissued editions now embed the release
+  title and `©day` where they previously embedded the book title and copyright
+  year. A pinned `release_id` the book does not carry fails with a diagnosed
+  error rather than silently falling back to the book's first release.
 
 ## [1.0.1](https://github.com/djdembeck/m4b-merge/compare/v1.0.0...v1.0.1) (2026-08-03)
 

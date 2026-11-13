@@ -6,7 +6,7 @@ pub fn is_valid_metadata_id(id: &str) -> bool {
 }
 
 /// Chapter information for audiobooks
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Chapter {
     pub title: String,
     pub start_time: Duration,
@@ -34,9 +34,17 @@ impl Chapter {
 }
 
 /// Complete metadata for an audiobook
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BookMetadata {
+    /// The provider-dependent id the book was looked up by (an ASIN for
+    /// audnexus, the resolved catalog id for audiobookdb). Empty for supplied
+    /// metadata.
     pub metadata_id: String,
+    /// The canonical AudiobookDB book id, kept distinct from
+    /// [`Self::metadata_id`]. Only set when the metadata base is an
+    /// `input_provider` reference that named a book id; a supplied job has no
+    /// canonical id and the `{book_id}` template token contributes nothing.
+    pub book_id: String,
     pub title: String,
     pub subtitle: Option<String>,
     pub authors: Vec<String>,
@@ -59,6 +67,7 @@ impl BookMetadata {
     ) -> Self {
         Self {
             metadata_id: metadata_id.into(),
+            book_id: String::new(),
             title: title.into(),
             subtitle: None,
             authors: Vec::new(),
