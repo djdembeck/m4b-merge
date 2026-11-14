@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file. See [standa
 
 
 ### Added
+- Optional `book_id` on `input_supplied` (and the `overrides` layer) for
+  `--job` runs: the caller's canonical AudiobookDB book id, used as-is and
+  never catalog-authenticated, populates the `{book_id}` token in supplied
+  mode; a blank value is treated as absent. `schema_version` stays 1 and
+  `resolver_version` stays 1.
 - `--job-preview`: a non-mutating preview for `--job` runs that prints the
   exact sanitized relative output path (plus the effective metadata)
   resolved by the same parsed template and resolver execution uses; it
