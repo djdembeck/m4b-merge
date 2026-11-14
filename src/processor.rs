@@ -1717,12 +1717,14 @@ impl Processor {
         format!(".m4b-merge-staging-{}-{nanos}", std::process::id())
     }
 
-    /// The (dev, ino) identity of a `stat` result, with the device value
-    /// normalized to u64 (it is i32 on Apple) so identities compare
-    /// consistently on every platform.
+    /// The (dev, ino) identity of a `stat` result, with both values
+    /// normalized to u64 (device is i32 on Apple, inode is u16 on Windows)
+    /// so identities compare consistently on every platform. Callers exist
+    /// only in the unix pipeline, so non-unix builds keep this as inert.
+    #[cfg_attr(not(unix), allow(dead_code))]
     #[allow(clippy::unnecessary_cast)]
     fn stat_identity(meta: &libc::stat) -> (u64, u64) {
-        (meta.st_dev as u64, meta.st_ino)
+        (meta.st_dev as u64, meta.st_ino as u64)
     }
 
     /// Fresh per-attempt staging basename: pid, nanos, and a process-global
@@ -2727,6 +2729,38 @@ mod tests {
         // The descriptor-bound path is available on this platform: the
         // pre-staging refusal in `process_group_job` never fires.
         assert!(Processor::job_execution_supported());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stat_identity_normalizes_platform_widths_to_u64() {
+        // Widths vary by platform (Apple device is i32, Windows inode is
+        // u16); the normalized (u64, u64) pair must equal the std
+        // metadata view on every platform, not just the wide ones.
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("identity.txt");
+        std::fs::write(&path, b"x").unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: fstat writes the struct fully before it is read.
+        assert_eq!(unsafe { libc::fstat(file.as_raw_fd(), st.as_mut_ptr()) }, 0, "fstat failed");
+        let st = unsafe { st.assume_init_read() };
+        let identity = Processor::stat_identity(&st);
+        // The normalized values must equal the raw libc fields widened to
+        // u64; this pins the width contract even where the fields are
+        // already u64 (Linux). The Windows compile itself is covered by
+        // the Release job, since no cross toolchain runs here.
+        assert_eq!(identity.0, st.st_dev as u64, "device width");
+        assert_eq!(identity.1, st.st_ino as u64, "inode width");
+        assert_eq!(
+            identity,
+            (meta.dev(), meta.ino()),
+            "stat_identity must match the std metadata identity"
+        );
     }
 
     #[cfg(not(target_os = "linux"))]
