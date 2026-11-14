@@ -1453,8 +1453,11 @@ mod tests {
             crate::api::MetadataRegion::Us,
         )
         .unwrap();
+        // The request id (1234) differs from the catalog's returned id
+        // (575), so a passing assertion proves the id came from the
+        // catalog, not an echo of the request.
         let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
-            "input_provider": { "book_id": "575" },
+            "input_provider": { "book_id": "1234" },
             "source": { "source": "audiobookdb", "api_url": "http://127.0.0.1:PORT" },
             "overrides": { "book_id": "999", "title": "Override Title" },
             "output_root": "/o" }"#
