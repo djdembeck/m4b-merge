@@ -329,6 +329,11 @@ pub struct SuppliedInput {
     pub genres: Vec<String>,
     #[serde(default)]
     pub year: Option<u32>,
+    /// The canonical AudiobookDB book id, when the caller already knows it.
+    /// Supplied mode stays offline: the value is used as-is, never
+    /// authenticated against a catalog. Blank is treated as absent.
+    #[serde(default)]
+    pub book_id: Option<String>,
 }
 
 /// Manual override layer; legal on both bases.
@@ -344,6 +349,9 @@ pub struct OverrideFields {
     pub description: Option<String>,
     pub genres: Option<Vec<String>>,
     pub year: Option<u32>,
+    /// Overrides the supplied base's canonical book id; blank is absent.
+    /// Ignored in provider mode, where the catalog-resolved id wins.
+    pub book_id: Option<String>,
 }
 
 /// Metadata-source selection; only used in provider mode.
@@ -470,6 +478,10 @@ impl Job {
     /// does not carry, a client that cannot be built — are diagnosed before any
     /// merge or source move.
     pub async fn resolve(&self, source: Option<&MetadataSource>) -> Result<EffectiveJob> {
+        // Which base the override layer applies to: in provider mode the
+        // catalog-resolved book id is authoritative and `overrides.book_id`
+        // is ignored; only a supplied base accepts the caller's book id.
+        let supplied_mode = self.input_provider.is_none();
         let base = match (&self.input_provider, &self.input_supplied) {
             (Some(provider), None) => {
                 let source = source.ok_or_else(|| {
@@ -513,7 +525,7 @@ impl Job {
         };
 
         let mut effective = base;
-        apply_overrides(&mut effective, self.overrides.as_ref());
+        apply_overrides(&mut effective, self.overrides.as_ref(), supplied_mode);
 
         // The title must be non-blank after overrides for naming.
         if effective.title.trim().is_empty() {
@@ -601,9 +613,17 @@ impl Job {
     fn base_from_supplied(&self, supplied: &SuppliedInput) -> Result<BookMetadata> {
         Ok(BookMetadata {
             metadata_id: String::new(),
-            // Supplied mode has no canonical catalog book id: the `{book_id}`
-            // token contributes no segment, and `metadata_id` stays empty too.
-            book_id: String::new(),
+            // The caller's canonical catalog book id, when supplied: no
+            // catalog lookup authenticates it. Blank means absent, so the
+            // `{book_id}` token contributes no segment. `metadata_id` stays
+            // empty: supplied mode has no looked-up id.
+            book_id: supplied
+                .book_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_default(),
             title: supplied.title.clone(),
             subtitle: supplied.subtitle.clone(),
             authors: supplied.authors.clone(),
@@ -984,7 +1004,10 @@ fn kept_people(values: &[String]) -> Vec<String> {
 }
 
 /// Apply the override layer: present non-blank values win over the base.
-fn apply_overrides(meta: &mut BookMetadata, overrides: Option<&OverrideFields>) {
+/// `supplied` selects the base kind: only a supplied base accepts
+/// `book_id`; in provider mode the catalog-resolved book id is
+/// authoritative and a conflicting override of it is ignored.
+fn apply_overrides(meta: &mut BookMetadata, overrides: Option<&OverrideFields>, supplied: bool) {
     let Some(overrides) = overrides else { return };
     if let Some(title) = overrides.title.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         meta.title = title.to_string();
@@ -1022,6 +1045,11 @@ fn apply_overrides(meta: &mut BookMetadata, overrides: Option<&OverrideFields>) 
     }
     if let Some(year) = overrides.year {
         meta.year = Some(year);
+    }
+    if supplied {
+        if let Some(id) = overrides.book_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            meta.book_id = id.to_string();
+        }
     }
 }
 
@@ -1384,6 +1412,147 @@ mod tests {
         assert_eq!(effective.metadata.title, "Override");
         assert_eq!(effective.metadata.subtitle.as_deref(), Some("Sub"));
         assert_eq!(effective.metadata.authors, vec!["B", "C"]);
+    }
+
+    #[tokio::test]
+    async fn provider_mode_ignores_book_id_override() {
+        // Provider mode: the catalog-resolved book id is authoritative. A
+        // conflicting non-blank `overrides.book_id` must not replace it,
+        // while the rest of the override layer keeps applying.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 8192 {
+                    let Ok(n) = socket.read(&mut chunk).await else { break };
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let book = r#"{"id":"575","title":"Catalog Title"}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{book}",
+                    book.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let source = crate::api::MetadataSource::new_with_region(
+            crate::api::MetadataSourceKind::Audiobookdb,
+            Some(&format!("http://127.0.0.1:{}", addr.port())),
+            crate::api::MetadataRegion::Us,
+        )
+        .unwrap();
+        // The request id (1234) differs from the catalog's returned id
+        // (575), so a passing assertion proves the id came from the
+        // catalog, not an echo of the request.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
+            "input_provider": { "book_id": "1234" },
+            "source": { "source": "audiobookdb", "api_url": "http://127.0.0.1:PORT" },
+            "overrides": { "book_id": "999", "title": "Override Title" },
+            "output_root": "/o" }"#
+            .replace("PORT", &addr.port().to_string());
+        let job: Job = serde_json::from_str(&raw).unwrap();
+        let effective = job.resolve(Some(&source)).await.unwrap();
+        assert_eq!(
+            effective.metadata.book_id, "575",
+            "the catalog-resolved id survives the conflicting override"
+        );
+        assert_eq!(effective.metadata.title, "Override Title", "other overrides keep applying");
+    }
+
+    #[tokio::test]
+    async fn supplied_book_id_populates_metadata_and_token() {
+        // A supplied book_id is the caller's canonical id: it populates
+        // `BookMetadata.book_id` (so `{book_id}` resolves it) while
+        // `metadata_id` stays empty — the two ids remain distinct.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
+            "input_supplied": { "title": "T", "authors": ["A"], "book_id": " 575 " },
+            "path_format": "{book_id}/{title}",
+            "output_root": "/o" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        job.validate().unwrap();
+        let effective = job.resolve(None).await.unwrap();
+        assert_eq!(effective.metadata.book_id, "575");
+        assert_eq!(effective.metadata.metadata_id, "");
+        let path = crate::path_resolver::PathResolver::resolve_output(
+            effective.template(),
+            &effective.metadata,
+        )
+        .unwrap();
+        assert_eq!(path, "575/T.m4b");
+    }
+
+    #[tokio::test]
+    async fn supplied_book_id_override_wins_over_base() {
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
+            "input_supplied": { "title": "T", "book_id": "111" },
+            "overrides": { "book_id": "222" },
+            "output_root": "/o" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        let effective = job.resolve(None).await.unwrap();
+        assert_eq!(effective.metadata.book_id, "222");
+    }
+
+    #[tokio::test]
+    async fn blank_supplied_and_override_book_id_yield_no_segment() {
+        // Blank is absent, matching the override layer's convention: the
+        // `{book_id}` token contributes no segment, and a blank override
+        // does not erase a non-blank base id.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
+            "input_supplied": { "title": "T", "authors": ["A"], "book_id": "   " },
+            "path_format": "{author}/{book_id}/{title}",
+            "output_root": "/o" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        let effective = job.resolve(None).await.unwrap();
+        assert_eq!(effective.metadata.book_id, "");
+        assert_eq!(
+            crate::path_resolver::PathResolver::resolve_output(
+                effective.template(),
+                &effective.metadata,
+            )
+            .unwrap(),
+            "A/T.m4b"
+        );
+
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
+            "input_supplied": { "title": "T", "book_id": "111" },
+            "overrides": { "book_id": "  " },
+            "output_root": "/o" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        let effective = job.resolve(None).await.unwrap();
+        assert_eq!(effective.metadata.book_id, "111");
+    }
+
+    #[tokio::test]
+    async fn supplied_job_without_book_id_still_resolves() {
+        // Existing jobs that omit the optional field deserialize unchanged.
+        let raw = r#"{ "schema_version": 1, "inputs": ["in.m4b"],
+            "input_supplied": { "title": "T", "authors": ["A"] },
+            "path_format": "{book_id}/{title}",
+            "output_root": "/o" }"#;
+        let job: Job = serde_json::from_str(raw).unwrap();
+        job.validate().unwrap();
+        let effective = job.resolve(None).await.unwrap();
+        assert_eq!(effective.metadata.book_id, "");
+        assert_eq!(
+            crate::path_resolver::PathResolver::resolve_output(
+                effective.template(),
+                &effective.metadata,
+            )
+            .unwrap(),
+            "T.m4b"
+        );
     }
 
     #[tokio::test]

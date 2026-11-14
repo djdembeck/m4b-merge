@@ -41,9 +41,10 @@ pub struct BookMetadata {
     /// metadata.
     pub metadata_id: String,
     /// The canonical AudiobookDB book id, kept distinct from
-    /// [`Self::metadata_id`]. Only set when the metadata base is an
-    /// `input_provider` reference that named a book id; a supplied job has no
-    /// canonical id and the `{book_id}` template token contributes nothing.
+    /// [`Self::metadata_id`]. Set from a catalog-resolved provider lookup or
+    /// a supplied/override `book_id` (which is used as-is, never
+    /// catalog-authenticated); empty when the caller has none, in which case
+    /// the `{book_id}` template token contributes no segment.
     pub book_id: String,
     pub title: String,
     pub subtitle: Option<String>,

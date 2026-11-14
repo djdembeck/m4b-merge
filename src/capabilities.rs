@@ -132,8 +132,10 @@ fn token_capabilities() -> Vec<TokenCapability> {
                     "B08XYZ1234",
                 ),
                 TokenKind::BookId => (
-                    "canonical AudiobookDB book id, distinct from metadata_id and ASIN; no segment \
-                 for supplied metadata or audnexus lookups",
+                    "canonical AudiobookDB book id, distinct from metadata_id and ASIN; from the \
+                 catalog-resolved id in provider mode (an override book_id is ignored there) or \
+                 from a supplied/override book_id in supplied mode (used as-is, never \
+                 catalog-authenticated); no segment when absent",
                     "575",
                 ),
             };

@@ -128,10 +128,15 @@ The job selects its metadata base exactly one of two ways:
   unresolvable id, a release the book does not carry, or a missing client
   fails the job before any file is touched.
 - `input_supplied` — the values are authoritative as-is; no catalog lookup
-  is attempted and the job runs fully offline.
+  is attempted and the job runs fully offline. An optional `book_id` names
+  the canonical AudiobookDB book id for the `{book_id}` token when the caller
+  already knows it; it is used as-is, never authenticated against a catalog,
+  and a blank value is treated as absent.
 
 On top of the base, an optional `overrides` object replaces individual
-fields; present non-blank values win over the base.
+fields; present non-blank values win over the base. `overrides.book_id`
+applies only to a supplied base: in provider mode the catalog-resolved
+book id is authoritative and a conflicting override is ignored.
 
 ```json
 {
@@ -370,7 +375,7 @@ The output path is generated from a template. Two template conventions exist:
 | `{year}`     | Release year                    |
 | `{genre}`      | First genre                     |
 | `{metadata_id}` | Provider-dependent looked-up ID (ASIN for audnexus, resolved catalog ID for audiobookdb); empty in supplied mode |
-| `{book_id}`   | Canonical AudiobookDB catalog book ID from the resolved metadata; populated only for AudiobookDB provider lookups, empty for audnexus and supplied mode. Distinct from `{metadata_id}`; job-resolver-only |
+| `{book_id}`   | Canonical AudiobookDB catalog book ID; from the catalog-resolved id in `audiobookdb` provider mode (a conflicting override is ignored), or from a supplied/override `book_id` in supplied mode (used as-is, never catalog-authenticated). Distinct from `{metadata_id}`; job-resolver-only |
 
 In the table above, `{book_id}` is a **job-resolver-only** token: the legacy
 CLI `-p`/`--path-format` template does not substitute it (an unmatched
