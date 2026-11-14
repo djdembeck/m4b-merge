@@ -1719,7 +1719,9 @@ impl Processor {
 
     /// The (dev, ino) identity of a `stat` result, with both values
     /// normalized to u64 (device is i32 on Apple, inode is u16 on Windows)
-    /// so identities compare consistently on every platform.
+    /// so identities compare consistently on every platform. Callers exist
+    /// only in the unix pipeline, so non-unix builds keep this as inert.
+    #[cfg_attr(not(unix), allow(dead_code))]
     #[allow(clippy::unnecessary_cast)]
     fn stat_identity(meta: &libc::stat) -> (u64, u64) {
         (meta.st_dev as u64, meta.st_ino as u64)
@@ -2748,6 +2750,12 @@ mod tests {
         assert_eq!(unsafe { libc::fstat(file.as_raw_fd(), st.as_mut_ptr()) }, 0, "fstat failed");
         let st = unsafe { st.assume_init_read() };
         let identity = Processor::stat_identity(&st);
+        // The normalized values must equal the raw libc fields widened to
+        // u64; this pins the width contract even where the fields are
+        // already u64 (Linux). The Windows compile itself is covered by
+        // the Release job, since no cross toolchain runs here.
+        assert_eq!(identity.0, st.st_dev as u64, "device width");
+        assert_eq!(identity.1, st.st_ino as u64, "inode width");
         assert_eq!(
             identity,
             (meta.dev(), meta.ino()),
