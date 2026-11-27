@@ -190,7 +190,11 @@ Field semantics:
   recognized leading series bracket (`"[Series 02] - Title"`) or trailing
   parenthetical qualifier (`"Title (Unabridged)"`) is stripped, and the base
   must then equal `©nam` (no subtitle) or extend it by `" - "` (the
-  subtitle). A preserved subtitle
+  subtitle). Parens inside the title do not block the qualifier strip: a
+  stray `)` such as the one in `"Smile :-) Today (Unabridged)"` is title
+  text, not a group. A terminal qualifier that is itself unbalanced, or a
+  title portion that opens a `(` it never closes, is not a recognized
+  decoration and still refuses. A preserved subtitle
   paired with a written title is absent when the existing atoms carry none
   (the decorated base equals `©nam`, or the album has no `©nam`); the written
   title becomes both `©nam` and `©alb`. A pair that stays ambiguous fails

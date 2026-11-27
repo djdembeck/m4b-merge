@@ -111,9 +111,12 @@ fn truncate_chapter_title(title: &str) -> String {
 /// is never mistaken for the series prefix, and parens inside the series
 /// bracket never disqualify a terminal group whose own remainder is
 /// well-formed. `None` means the album carries no recognized decoration
-/// (or its terminal group is unbalanced), so an unrelated album is never
+/// (or its terminal group is unbalanced, or the title portion before the
+/// group opens a `(` it never closes), so an unrelated album is never
 /// guessed at; the caller must still match the base against `©nam` before
-/// trusting it.
+/// trusting it. A stray `)` in the title portion is ordinary title text —
+/// an emoticon such as `"Smile :-) Today (Unabridged)"` keeps its qualifier
+/// — and does not block the strip.
 fn undecorated_album_base(album: &str) -> Option<&str> {
     // The prefix is parsed once; the unpaired-close guard judges only the
     // remainder beyond it, so an unmatched paren inside the series bracket
@@ -134,12 +137,12 @@ fn undecorated_album_base(album: &str) -> Option<&str> {
 /// closes — is a fragment, not a decoration, and is excluded before
 /// matching: the series-prefix-only base is filtered out when its terminal
 /// `)` has no `(` that pairs with it inside the base (the opener was
-/// stripped away with the series prefix), and the terminal-group strips
-/// only ever produce a base whose parens balance.
-/// A base whose parens are unbalanced for any other reason (an emoticon
-/// in the title) is not a terminal group and stays a candidate; the
-/// caller still matches the base against `t` before trusting it. The first
-/// base that equals `t` establishes an absent subtitle; the first base
+/// stripped away with the series prefix), and the terminal-group strip
+/// refuses a title portion that opens a `(` it never closes.
+/// The title portion's parens need not balance (an emoticon such as
+/// `"Smile :-) Today"` carries a stray `)`); such a base stays a candidate
+/// because the caller still matches it against `t` before trusting it. The
+/// first base that equals `t` establishes an absent subtitle; the first base
 /// that `t` extends by the documented `" - "` separator returns the
 /// recovered subtitle verbatim. `None` refuses the pair.
 fn match_decorated_album_candidates(album: &str, t: &str) -> Option<Option<String>> {
@@ -183,13 +186,16 @@ fn album_without_series_prefix(album: &str) -> Option<&str> {
 /// bracket is recognized, only a group whose opener starts after that
 /// bracket may be stripped — the bracket's own `(` belongs to the series
 /// name — so the detection runs on the series-stripped remainder and the
-/// base keeps the prefix. A remainder that carries a paren it never closes
-/// is a fragment of unbalanced text, not a decoration: `None`. The balance
-/// guard judges only the remainder beyond the series prefix, so an
+/// base keeps the prefix. A remainder that ends with a `)` no `(` pairs
+/// with is a fragment of unbalanced text, not a decoration: `None`. The
+/// balance guard judges only the remainder beyond the series prefix, so an
 /// unmatched paren inside the series bracket does not disqualify a
-/// well-formed terminal group. A group that decorates nothing — the title
-/// portion before it is blank — is not a qualifier on a real title, so the
-/// pair must refuse: `None` as well.
+/// well-formed terminal group. The title portion before the group must not
+/// open a `(` it never closes — the group was cut out of a larger,
+/// malformed group — while a stray `)` there is title text (an emoticon
+/// such as `"Smile :-) Today"`) and does not disqualify the group. A group
+/// that decorates nothing — the title portion before it is blank — is not a
+/// qualifier on a real title, so the pair must refuse: `None` as well.
 fn album_without_terminal_group(album: &str) -> Option<&str> {
     // `remainder` is a suffix of `album`; `prefix` is the series bracket's
     // byte length, so the opener index maps straight back into `album`.
@@ -206,7 +212,7 @@ fn album_without_terminal_group(album: &str) -> Option<&str> {
     // qualifier on a real title: with a series prefix the base would keep
     // only that prefix, so the pair must refuse rather than rewrite.
     let title = &remainder[..pos - 1];
-    if title.trim().is_empty() || !parens_balanced(title) {
+    if title.trim().is_empty() || has_unclosed_open(title) {
         return None;
     }
     let base = &album[..prefix + pos - 1];
@@ -248,21 +254,25 @@ fn paired_terminal_group_open(album: &str) -> Option<usize> {
     None
 }
 
-/// True when `text`'s parens balance: the depth never goes negative and the
-/// final depth is zero.
-fn parens_balanced(text: &str) -> bool {
+/// True when `text` opens a `(` that no `)` inside the text closes: the
+/// terminal group was cut out of a larger, malformed group, so the strip
+/// must refuse rather than guess the base. A stray `)` is not evidence of
+/// that — an emoticon (`"Smile :-) Today"`) or any other title text may
+/// carry one, and the stripped base still has to match `©nam` before it is
+/// trusted — so only an unclosed opener disqualifies the title portion.
+/// `depth` counts openers still awaiting a close and never goes negative: a
+/// stray `)` is ignored instead of being credited to a later `(`, so it
+/// cannot mask an opener that is never closed.
+fn has_unclosed_open(text: &str) -> bool {
     let mut depth = 0i32;
     for c in text.chars() {
         match c {
             '(' => depth += 1,
-            ')' => depth -= 1,
+            ')' if depth > 0 => depth -= 1,
             _ => {}
         }
-        if depth < 0 {
-            return false;
-        }
     }
-    depth == 0
+    depth > 0
 }
 
 /// Describe every chapter that starts at or beyond `file_duration`.
@@ -3930,6 +3940,56 @@ mod tests {
     }
 
     #[test]
+    fn policy_title_write_recovers_subtitle_behind_qualified_album_with_emoticon() {
+        // The trailing qualifier is a well-formed decoration even when the
+        // title portion carries an emoticon: the `)` in `:-)` belongs to the
+        // title, not to a group, so the stripped base must stay a candidate
+        // and the subtitle must recover.
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("Smile :-) Today - A Field Guide");
+        tag.set_album("Smile :-) Today (Unabridged)");
+        tag.write_to_path(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title(), Some("New Title - A Field Guide"));
+        assert_eq!(tag.album(), Some("New Title"));
+    }
+
+    #[test]
+    fn policy_title_write_refuses_unclosed_open_behind_emoticon() {
+        // The stray `)` of an emoticon must not be credited to a later `(`:
+        // the opener in `(Part` is never closed, so the qualifier was cut out
+        // of a malformed group and the pair refuses before mutation.
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("Smile :-) Today (Part - A Field Guide");
+        tag.set_album("Smile :-) Today (Part (Unabridged)");
+        tag.write_to_path(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::PreserveUnresolvable { field: "subtitle", .. }));
+        assert_eq!(std::fs::read(&path).unwrap(), before, "refusal must not mutate the file");
+    }
+
+    #[test]
     fn policy_title_write_refuses_terminal_group_opening_inside_series_bracket() {
         // The series bracket's own `(` belongs to the series name: a terminal
         // group whose opener is inside the bracket is not a decoration, so
@@ -4089,9 +4149,18 @@ mod tests {
         // qualifier's, so the inner group is consumed as a depth increment
         // and the whole balanced group is stripped.
         assert_eq!(undecorated_album_base("Book (Part One (2001))"), Some("Book"));
+        // A stray `)` in the title portion is title text (an emoticon), not
+        // a fragment: the well-formed qualifier is still stripped.
+        assert_eq!(undecorated_album_base("Smile :-) Today (Unabridged)"), Some("Smile :-) Today"));
         // Genuinely unbalanced nested inputs stay refused.
         assert_eq!(undecorated_album_base("Book (Part One"), None);
         assert_eq!(undecorated_album_base("Book (Part One (2001)"), None);
+        // An unclosed `(` in the title portion means the qualifier was cut
+        // out of a larger malformed group, so it stays refused.
+        assert_eq!(undecorated_album_base("Book (Part (Unabridged)"), None);
+        // A stray `)` is not credited to a later `(`: the opener after the
+        // emoticon is still unclosed, so the qualifier stays refused.
+        assert_eq!(undecorated_album_base("Smile :-) Today (Part (Unabridged)"), None);
     }
 
     #[test]
