@@ -99,6 +99,37 @@ fn truncate_chapter_title(title: &str) -> String {
     title[..end].to_string()
 }
 
+/// Strip the album decorations recognized by the title/subtitle resolver and
+/// return the base title they mask.
+///
+/// Two shapes are recognized: a leading series bracket (`"[Series 02] - "`)
+/// and a trailing parenthetical qualifier (`" (Unabridged)"`), applied at most
+/// once each. `None` means the album carries no recognized decoration, so an
+/// unrelated album is never guessed at; the caller must still match the base
+/// against `©nam` before trusting it.
+fn undecorated_album_base(album: &str) -> Option<&str> {
+    let mut base = album;
+    let mut stripped = false;
+
+    if let Some(after_bracket) = base.strip_prefix('[') {
+        if let Some(pos) = after_bracket.find("] - ") {
+            base = &after_bracket[pos + "] - ".len()..];
+            stripped = true;
+        }
+    }
+
+    if base.ends_with(')') {
+        if let Some(pos) = base.rfind(" (") {
+            if pos > 0 {
+                base = &base[..pos];
+                stripped = true;
+            }
+        }
+    }
+
+    (stripped && !base.trim().is_empty()).then_some(base)
+}
+
 /// Describe every chapter that starts at or beyond `file_duration`.
 ///
 /// Returns `(count, details)` for the offending chapters — ready to drop into an
@@ -533,7 +564,12 @@ impl Tagger {
     /// existing atoms. A preserved component that cannot be established from
     /// the defined representation (`©alb` for the title, the `©nam`/`©alb`
     /// `"title - subtitle"` form for the subtitle) fails with
-    /// [`TaggingError::PreserveUnresolvable`] before any atom is mutated.
+    /// [`TaggingError::PreserveUnresolvable`] before any atom is mutated,
+    /// except a preserved subtitle paired with a `write` title: the subtitle
+    /// is recovered through a decorated album's undecorated base, and an
+    /// album with no `©nam` establishes an absent subtitle, so both atoms are
+    /// rebuilt from the written title. A pair that stays ambiguous still
+    /// refuses, so a real subtitle is never dropped silently.
     ///
     /// Atom ownership: title/subtitle own `©nam` and `©alb`; authors own
     /// `©ART`/`©aART`; narrators own `©wrt`; series owns the `Series:` segment
@@ -776,6 +812,17 @@ impl Tagger {
     /// `©nam` with no `©alb`), which this tool writes when the title is
     /// cleared while the subtitle survives: there the title is known to be
     /// absent and the subtitle is `©nam` verbatim.
+    ///
+    /// A preserved subtitle is recoverable from the documented
+    /// `©nam = ©alb - subtitle` form, or from a `©alb` decorated with a
+    /// recognized leading series bracket (`"[Series 02] - "`) or trailing
+    /// parenthetical qualifier (`" (Unabridged)"`). The undecorated base must
+    /// then match `©nam` exactly (no subtitle) or extend it by the documented
+    /// `" - "` separator (the subtitle). Any other `©nam`/`©alb` pair refuses
+    /// rather than dropping tag data. When the title is written, an album with
+    /// no `©nam` (nothing to lose) or a decorated album whose base matches
+    /// establishes an absent subtitle, and both atoms are rebuilt from the
+    /// written title.
     fn resolve_title_subtitle(
         path: &Path,
         tag: &mp4ameta::Tag,
@@ -813,6 +860,8 @@ impl Tagger {
             }
         };
 
+        let title_written = matches!(title_policy, crate::job::TitlePolicy::Write);
+
         let subtitle: Option<String> = match subtitle_policy {
             // The value comes from the effective metadata (validated
             // non-blank in `validate_policies`), so there is no separate
@@ -835,23 +884,40 @@ impl Tagger {
                             return Ok((title, None));
                         }
                         let sep = format!("{album} - ");
-                        // The `©nam`/`©alb` pair is the documented
-                        // representation: a title that does not extend the
-                        // album by the documented separator is inconsistent,
-                        // so the subtitle cannot be established — refuse
-                        // before mutation rather than drop it as empty.
-                        let Some(stripped) = t.strip_prefix(&sep) else {
-                            return Err(TaggingError::PreserveUnresolvable {
-                                field: "subtitle",
-                                path: path.to_path_buf(),
-                            });
-                        };
-                        // Preserve the subtitle verbatim (no trim): an all-preserve
-                        // job must not rewrite the file, so the recovered suffix
-                        // keeps its exact bytes. Only an all-whitespace suffix is
-                        // treated as "no subtitle", not an error.
-                        let sub = stripped.to_string();
-                        (!sub.trim().is_empty()).then_some(sub)
+                        if let Some(stripped) = t.strip_prefix(&sep) {
+                            // Preserve the subtitle verbatim (no trim): an
+                            // all-preserve job must not rewrite the file, so
+                            // the recovered suffix keeps its exact bytes. Only
+                            // an all-whitespace suffix is treated as "no
+                            // subtitle", not an error.
+                            let sub = stripped.to_string();
+                            return Ok((title, (!sub.trim().is_empty()).then_some(sub)));
+                        }
+                        // A decorated album masks the base title (a leading
+                        // series bracket, a trailing parenthetical qualifier).
+                        // With a written title the caller's title is the
+                        // authority for the pair, so the undecorated base is
+                        // matched against `©nam`: an exact match is the
+                        // established "no subtitle" form, and a
+                        // `base - subtitle` title carries the subtitle
+                        // forward. Pairs that stay ambiguous still refuse
+                        // before mutation rather than drop tag data.
+                        if title_written {
+                            if let Some(base) = undecorated_album_base(album) {
+                                if t == base {
+                                    return Ok((title, None));
+                                }
+                                let base_sep = format!("{base} - ");
+                                if let Some(stripped) = t.strip_prefix(&base_sep) {
+                                    let sub = stripped.to_string();
+                                    return Ok((title, (!sub.trim().is_empty()).then_some(sub)));
+                                }
+                            }
+                        }
+                        return Err(TaggingError::PreserveUnresolvable {
+                            field: "subtitle",
+                            path: path.to_path_buf(),
+                        });
                     }
                     // The subtitle-only state (a `©nam` with no `©alb`): the
                     // title is known to be absent, so `©nam` is the subtitle
@@ -859,12 +925,20 @@ impl Tagger {
                     // `©nam` is indistinguishable from this state and is
                     // treated as subtitle-only.
                     (None, Some(t)) => Some(t.clone()),
-                    // An album without a title: the subtitle cannot be
-                    // established — refuse.
-                    (Some(_), None) => Err(TaggingError::PreserveUnresolvable {
-                        field: "subtitle",
-                        path: path.to_path_buf(),
-                    })?,
+                    // An album without a title: there is no `©nam` to
+                    // recover a subtitle from. With a written title the pair
+                    // is rebuilt from that title, so nothing is lost and the
+                    // subtitle is absent; otherwise refuse.
+                    (Some(_), None) => {
+                        if title_written {
+                            None
+                        } else {
+                            return Err(TaggingError::PreserveUnresolvable {
+                                field: "subtitle",
+                                path: path.to_path_buf(),
+                            });
+                        }
+                    }
                     (None, None) => None,
                 }
             }
@@ -3508,33 +3582,151 @@ mod tests {
     }
 
     #[test]
-    fn policy_preserve_subtitle_with_inconsistent_nam_fails_before_mutation() {
+    fn policy_title_write_preserves_subtitle_as_absent_on_decorated_album() {
+        // A common retail shape: `©alb` is a decorated form of `©nam`
+        // (`"Title (Unabridged)"`, a series-bracketed album), not the
+        // documented `"title - subtitle"` pair. The undecorated album equals
+        // `©nam`, so the subtitle is established as absent and both atoms
+        // become the written title instead of failing the job.
+        let cases = [
+            ("Old Title", "Old Title (Unabridged)"),
+            ("Descent", "[Durango Chronicles 02] - Descent"),
+        ];
+        for (nam, album) in cases {
+            let temp_dir = TempDir::new().unwrap();
+            let path = create_minimal_m4b(&temp_dir);
+            let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+            tag.set_title(nam);
+            tag.set_album(album);
+            tag.write_to_path(&path).unwrap();
+
+            let tagger = Tagger::new();
+            let policies = crate::job::WritePolicies {
+                title: crate::job::TitlePolicy::Write,
+                subtitle: crate::job::SubtitlePolicy::Preserve,
+                ..all_write_policies()
+            };
+            tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+            let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+            assert_eq!(tag.title(), Some("New Title"), "©nam for album {album:?}");
+            assert_eq!(tag.album(), Some("New Title"), "©alb for album {album:?}");
+        }
+    }
+
+    #[test]
+    fn policy_title_write_keeps_subtitle_behind_a_decorated_album() {
+        // A decorated album masks the base title but not the subtitle: when
+        // `©nam` extends the undecorated base by the documented separator, the
+        // preserved subtitle must carry forward. It is never dropped just
+        // because the title is written.
         let temp_dir = TempDir::new().unwrap();
         let path = create_minimal_m4b(&temp_dir);
-        // `©nam` does not extend `©alb` by the documented ` - ` separator.
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("Exoplanet - A Field Guide");
+        tag.set_album("Exoplanet (Unabridged)");
+        tag.write_to_path(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title(), Some("New Title - A Field Guide"));
+        assert_eq!(tag.album(), Some("New Title"));
+    }
+
+    #[test]
+    fn policy_title_write_refuses_ambiguous_title_album_pair() {
+        // Neither an exact match nor a recognized decoration: the pair cannot
+        // establish a subtitle, so a title write must still refuse before
+        // mutation rather than drop whatever the file carries.
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("Completely Different Name");
+        tag.set_album("Base Title");
+        tag.write_to_path(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::PreserveUnresolvable { field: "subtitle", .. }));
+        assert_eq!(std::fs::read(&path).unwrap(), before, "refusal must not mutate the file");
+    }
+
+    #[test]
+    fn undecorated_album_base_recognizes_only_known_decorations() {
+        assert_eq!(undecorated_album_base("Exoplanet (Unabridged)"), Some("Exoplanet"));
+        assert_eq!(undecorated_album_base("[Durango Chronicles 02] - Descent"), Some("Descent"));
+        assert_eq!(
+            undecorated_album_base("[Durango Chronicles 02] - Descent (Unabridged)"),
+            Some("Descent")
+        );
+        // No recognized decoration: the caller must not guess a base.
+        assert_eq!(undecorated_album_base("Exoplanet"), None);
+        assert_eq!(undecorated_album_base("(Unabridged)"), None);
+        assert_eq!(undecorated_album_base("Title (incomplete"), None);
+        assert_eq!(undecorated_album_base("Book [Unabridged]"), None);
+    }
+
+    #[test]
+    fn policy_title_write_preserves_subtitle_as_absent_on_album_only() {
+        // An album with no title carries no subtitle text at all. The written
+        // title rebuilds both atoms, so there is nothing to erase and the job
+        // must not fail.
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_album("Old Title (Unabridged)");
+        tag.write_to_path(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title(), Some("New Title"));
+        assert_eq!(tag.album(), Some("New Title"));
+    }
+
+    #[test]
+    fn policy_clear_title_preserve_subtitle_with_inconsistent_nam_refuses() {
+        // Without a written title the `©nam`/`©alb` pair is the only source
+        // for the preserved subtitle: an inconsistent pair must still refuse
+        // before mutation rather than erase tag data.
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
         let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
         tag.set_title("Completely Different Name");
         tag.set_album("Base Title");
         tag.write_to_path(&path).unwrap();
 
         let tagger = Tagger::new();
-        // Writing the title (a valid write) rebuilds the `©nam`/`©alb` pair;
-        // the preserved subtitle must be re-established from the existing
-        // atoms, but the inconsistent pair cannot, so it fails before any atom
-        // is mutated. (When both components are preserved the pair is left
-        // untouched, so this check applies only to the rebuild path.)
         let policies = crate::job::WritePolicies {
-            title: crate::job::TitlePolicy::Write,
+            title: crate::job::TitlePolicy::Clear,
             subtitle: crate::job::SubtitlePolicy::Preserve,
-            authors: crate::job::FieldPolicy::Preserve,
-            narrators: crate::job::FieldPolicy::Preserve,
-            series: crate::job::FieldPolicy::Preserve,
-            description: crate::job::FieldPolicy::Preserve,
-            genres: crate::job::FieldPolicy::Preserve,
-            year: crate::job::FieldPolicy::Preserve,
+            ..all_write_policies()
         };
         let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
         assert!(matches!(err, TaggingError::PreserveUnresolvable { field: "subtitle", .. }));
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title().unwrap(), "Completely Different Name");
+        assert_eq!(tag.album().unwrap(), "Base Title");
     }
 
     #[test]

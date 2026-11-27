@@ -88,9 +88,12 @@ All notable changes to this project will be documented in this file. See [standa
   components of the shared `©nam`/`©alb` pair: writing one preserves the
   other, and clearing one removes only that component — clearing the title
   leaves the subtitle as the sole surviving component: it is written alone to
-  `©nam`, and `©alb` is removed because no base title survives. A preserved title or subtitle that
-  cannot be established from the file's existing atoms fails before any atom
-  is mutated. A `write` without a non-blank effective value is rejected.
+  `©nam`, and `©alb` is removed because no base title survives. A preserved
+  title or subtitle that cannot be established from the file's existing atoms
+  fails before any atom is mutated; preserving both title and subtitle leaves
+  the pair untouched, and a written title resolves a decorated album through
+  its undecorated base. A `write` without a non-blank effective value is
+  rejected.
   `preserve` fields keep the file's existing values even when the effective
   metadata lacks them, so an omitted policy is never an implicit clear.
 - Chapter embedding into M4B files using native mp4ameta library
@@ -105,6 +108,16 @@ All notable changes to this project will be documented in this file. See [standa
   - Retry logic honors the `Retry-After` header on 429s
 
 ### Fixed
+- A `--job` that writes the title while preserving the subtitle no longer
+  fails on files whose `©alb` is a decorated form of the title, for example
+  `"Title (Unabridged)"` or a series-bracketed album. A recognized leading
+  series bracket (`"[Series 02] - Title"`) or trailing parenthetical
+  qualifier is stripped, and the undecorated base decides: an exact `©nam`
+  match means no subtitle, and a `base - subtitle` `©nam` keeps the subtitle.
+  An album with no `©nam` carries no subtitle to keep. A pair that remains
+  ambiguous, and title `clear` plus subtitle `preserve` over an inconsistent
+  pair, still fail before mutation; preserving both components leaves the
+  atoms untouched.
 - Chapterless input groups (split MP3/M4A without embedded chapters and without provider chapters) now get one generated chapter per input track, titled `Chapter 01`, `Chapter 02`, … and embedded in the merged M4B, matching the pre-rewrite `ChaptersFromFileTracks` behaviour. Chapters and the `chapters.txt` sidecar are written even when no provider metadata was available.
 - Audnexus lookups now fetch chapter markers from `/books/{asin}/chapters` (the book endpoint never returns them), honor `isAccurate`, and carry the configured region on both requests.
 - Chapter embedding now writes the QuickTime chapter track (`chap` reference) alongside the Nero `chpl` list via mp4ameta, so Apple/AVFoundation players see chapter markers.
