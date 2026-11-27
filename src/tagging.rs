@@ -104,30 +104,130 @@ fn truncate_chapter_title(title: &str) -> String {
 ///
 /// Two shapes are recognized: a leading series bracket (`"[Series 02] - "`)
 /// and a trailing parenthetical qualifier (`" (Unabridged)"`), applied at most
-/// once each. `None` means the album carries no recognized decoration, so an
-/// unrelated album is never guessed at; the caller must still match the base
-/// against `©nam` before trusting it.
+/// once each. Any trailing balanced parenthetical group is stripped, not just
+/// a list of known qualifiers. `None` means the album carries no recognized
+/// decoration (or its terminal group is unbalanced), so an unrelated album is
+/// never guessed at; the caller must still match the base against `©nam`
+/// before trusting it.
 fn undecorated_album_base(album: &str) -> Option<&str> {
-    let mut base = album;
-    let mut stripped = false;
+    let after_prefix = album_without_series_prefix(album).unwrap_or(album);
+    if has_unbalanced_terminal_group(after_prefix) {
+        return None;
+    }
+    album_without_terminal_group(after_prefix).or_else(|| album_without_series_prefix(album))
+}
 
-    if let Some(after_bracket) = base.strip_prefix('[') {
-        if let Some(pos) = after_bracket.find("] - ") {
-            base = &after_bracket[pos + "] - ".len()..];
-            stripped = true;
+/// Match `t` (`©nam`) against the undecorated bases of `album`, in order:
+/// the series-prefix-only-stripped base, the terminal-group-only-stripped
+/// base, then the fully stripped base (duplicates dropped). A candidate
+/// whose base still carries an unbalanced terminal group — its parens do
+/// not balance — is a fragment, not a decoration, and is excluded before
+/// matching. The first base that
+/// equals `t` establishes an absent subtitle; the first base that `t`
+/// extends by the documented `" - "` separator returns the recovered
+/// subtitle verbatim. `None` refuses the pair.
+fn match_decorated_album_candidates(album: &str, t: &str) -> Option<Option<String>> {
+    let mut candidates: Vec<&str> = Vec::new();
+    for candidate in [
+        album_without_series_prefix(album),
+        album_without_terminal_group(album),
+        undecorated_album_base(album),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|base| parens_balanced(base))
+    {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
         }
     }
+    for base in candidates {
+        if t == base {
+            return Some(None);
+        }
+        if let Some(stripped) = t.strip_prefix(&format!("{base} - ")) {
+            let sub = stripped.to_string();
+            return Some((!sub.trim().is_empty()).then_some(sub));
+        }
+    }
+    None
+}
 
-    if base.ends_with(')') {
-        if let Some(pos) = base.rfind(" (") {
-            if pos > 0 {
-                base = &base[..pos];
-                stripped = true;
+/// The album with only the leading series bracket (`"[Series 02] - "`)
+/// stripped.
+fn album_without_series_prefix(album: &str) -> Option<&str> {
+    let after = album.strip_prefix('[')?;
+    let pos = after.find("] - ")?;
+    let base = &after[pos + "] - ".len()..];
+    (!base.trim().is_empty()).then_some(base)
+}
+
+/// The album with only the trailing balanced parenthetical group stripped.
+/// The terminal group is the one whose `(` pairs with the final `)`; inner
+/// groups are depth increments, not the qualifier. A base that carries a
+/// paren it never closes is a fragment of unbalanced text, not a decoration:
+/// `None`.
+fn album_without_terminal_group(album: &str) -> Option<&str> {
+    let pos = paired_terminal_group_open(album)?;
+    if pos == 0 || album.as_bytes()[pos - 1] != b' ' {
+        return None;
+    }
+    let base = &album[..pos - 1];
+    if !parens_balanced(base) {
+        return None;
+    }
+    (!base.trim().is_empty()).then_some(base)
+}
+
+/// True when `album` ends with a space-separated ` (` + `)` shape that
+/// cannot be stripped as a balanced terminal group: the suffix is a
+/// fragment of unbalanced text, not a decoration.
+fn has_unbalanced_terminal_group(album: &str) -> bool {
+    album.rfind(" (").is_some()
+        && album.ends_with(')')
+        && album_without_terminal_group(album).is_none()
+}
+
+/// Index of the `(` that pairs with the final `)` — scanning backwards from
+/// the end, where every `)` only raises the required depth, so inner groups
+/// are consumed and the first `(` that brings the depth to zero is the one
+/// that pairs with the terminal `)` — or `None` when `album` does not end
+/// with a `)` that any `(` pairs with.
+fn paired_terminal_group_open(album: &str) -> Option<usize> {
+    if !album.ends_with(')') {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (i, c) in album.char_indices().rev() {
+        match c {
+            '(' => {
+                depth += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
             }
+            ')' => depth -= 1,
+            _ => {}
         }
     }
+    None
+}
 
-    (stripped && !base.trim().is_empty()).then_some(base)
+/// True when `text`'s parens balance: the depth never goes negative and the
+/// final depth is zero.
+fn parens_balanced(text: &str) -> bool {
+    let mut depth = 0i32;
+    for c in text.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return false;
+        }
+    }
+    depth == 0
 }
 
 /// Describe every chapter that starts at or beyond `file_duration`.
@@ -896,22 +996,19 @@ impl Tagger {
                         // A decorated album masks the base title (a leading
                         // series bracket, a trailing parenthetical qualifier).
                         // With a written title the caller's title is the
-                        // authority for the pair, so the undecorated base is
+                        // authority for the pair, so a stripped base is
                         // matched against `©nam`: an exact match is the
                         // established "no subtitle" form, and a
                         // `base - subtitle` title carries the subtitle
-                        // forward. Pairs that stay ambiguous still refuse
-                        // before mutation rather than drop tag data.
+                        // forward. Candidates are the bases with only the
+                        // series prefix stripped, only the trailing
+                        // parenthetical stripped, and both stripped, tried in
+                        // that order so the least-stripped match wins; a
+                        // title that matches none refuses before mutation
+                        // rather than drop tag data.
                         if title_written {
-                            if let Some(base) = undecorated_album_base(album) {
-                                if t == base {
-                                    return Ok((title, None));
-                                }
-                                let base_sep = format!("{base} - ");
-                                if let Some(stripped) = t.strip_prefix(&base_sep) {
-                                    let sub = stripped.to_string();
-                                    return Ok((title, (!sub.trim().is_empty()).then_some(sub)));
-                                }
+                            if let Some(subtitle) = match_decorated_album_candidates(album, t) {
+                                return Ok((title, subtitle));
                             }
                         }
                         return Err(TaggingError::PreserveUnresolvable {
@@ -3641,6 +3738,112 @@ mod tests {
     }
 
     #[test]
+    fn policy_title_write_recovers_subtitle_from_single_decorated_album() {
+        // A `©alb` that carries only one decoration must not fail recovery
+        // just because the other decoration is absent: the series-prefix-only
+        // base (Finding 2) and the fully stripped base (Finding 3, same code
+        // path) both match `©nam` and recover the subtitle.
+        let cases = [
+            ("The Crossing (Part One) - A Field Guide", "[Series 02] - The Crossing (Part One)"),
+            ("Exoplanet (Book One) - A Field Guide", "[Series 02] - Exoplanet (Book One)"),
+        ];
+        for (nam, album) in cases {
+            let temp_dir = TempDir::new().unwrap();
+            let path = create_minimal_m4b(&temp_dir);
+            let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+            tag.set_title(nam);
+            tag.set_album(album);
+            tag.write_to_path(&path).unwrap();
+
+            let tagger = Tagger::new();
+            let policies = crate::job::WritePolicies {
+                title: crate::job::TitlePolicy::Write,
+                subtitle: crate::job::SubtitlePolicy::Preserve,
+                ..all_write_policies()
+            };
+            tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+            let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+            assert_eq!(tag.title(), Some("New Title - A Field Guide"), "©nam for album {album:?}");
+            assert_eq!(tag.album(), Some("New Title"), "©alb for album {album:?}");
+        }
+    }
+
+    #[test]
+    fn policy_title_write_keeps_subtitle_behind_a_nested_decorated_album() {
+        // A nested trailing group is a decoration when its outer `(` pairs
+        // with the final `)`: the inner group is a depth increment, so the
+        // pair must not refuse just because the qualifier nests.
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("Book - A Field Guide");
+        tag.set_album("Book (Part One (2001))");
+        tag.write_to_path(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title(), Some("New Title - A Field Guide"));
+        assert_eq!(tag.album(), Some("New Title"));
+    }
+
+    #[test]
+    fn policy_title_write_refuses_unbalanced_terminal_group_album() {
+        // An unbalanced terminal group is not a recognized decoration: the
+        // stripped base must not authorize the rewrite, and the pair refuses
+        // before mutation.
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("Exoplanet");
+        tag.set_album("Exoplanet (Unabridged) - Different Book)");
+        tag.write_to_path(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::PreserveUnresolvable { field: "subtitle", .. }));
+        assert_eq!(std::fs::read(&path).unwrap(), before, "refusal must not mutate the file");
+    }
+
+    #[test]
+    fn policy_title_write_refuses_unbalanced_group_behind_series_prefix() {
+        // The series-prefix-only candidate must not bypass the unbalanced
+        // terminal-group refusal: the prefix is stripped, but the remainder
+        // still carries a terminal group it never closes, so the candidate
+        // is excluded and the pair refuses before mutation.
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("Exoplanet (Unabridged) - Book) - A Field Guide");
+        tag.set_album("[Series 02] - Exoplanet (Unabridged) - Book)");
+        tag.write_to_path(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::PreserveUnresolvable { field: "subtitle", .. }));
+        assert_eq!(std::fs::read(&path).unwrap(), before, "refusal must not mutate the file");
+    }
+
+    #[test]
     fn policy_title_write_refuses_ambiguous_title_album_pair() {
         // Neither an exact match nor a recognized decoration: the pair cannot
         // establish a subtitle, so a title write must still refuse before
@@ -3665,18 +3868,32 @@ mod tests {
     }
 
     #[test]
-    fn undecorated_album_base_recognizes_only_known_decorations() {
+    fn undecorated_album_base_strips_series_bracket_and_trailing_group() {
         assert_eq!(undecorated_album_base("Exoplanet (Unabridged)"), Some("Exoplanet"));
         assert_eq!(undecorated_album_base("[Durango Chronicles 02] - Descent"), Some("Descent"));
         assert_eq!(
             undecorated_album_base("[Durango Chronicles 02] - Descent (Unabridged)"),
             Some("Descent")
         );
-        // No recognized decoration: the caller must not guess a base.
+        // Any trailing balanced parenthetical group is stripped, not just a
+        // list of known qualifiers.
+        assert_eq!(undecorated_album_base("Book (Disc 2)"), Some("Book"));
+        // No decoration: the caller must not guess a base.
         assert_eq!(undecorated_album_base("Exoplanet"), None);
         assert_eq!(undecorated_album_base("(Unabridged)"), None);
         assert_eq!(undecorated_album_base("Title (incomplete"), None);
         assert_eq!(undecorated_album_base("Book [Unabridged]"), None);
+        // An unbalanced terminal group is a fragment, not a decoration: the
+        // pair must stay refused rather than be stripped to a guess.
+        assert_eq!(undecorated_album_base("Exoplanet (Unabridged) - Different Book)"), None);
+        assert_eq!(undecorated_album_base("[Series 02] - Exoplanet (Unabridged) - Book)"), None);
+        // A nested group: the `(` pairing with the final `)` is the outer
+        // qualifier's, so the inner group is consumed as a depth increment
+        // and the whole balanced group is stripped.
+        assert_eq!(undecorated_album_base("Book (Part One (2001))"), Some("Book"));
+        // Genuinely unbalanced nested inputs stay refused.
+        assert_eq!(undecorated_album_base("Book (Part One"), None);
+        assert_eq!(undecorated_album_base("Book (Part One (2001)"), None);
     }
 
     #[test]
@@ -3701,6 +3918,31 @@ mod tests {
         let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
         assert_eq!(tag.title(), Some("New Title"));
         assert_eq!(tag.album(), Some("New Title"));
+    }
+
+    #[test]
+    fn policy_clear_title_preserve_subtitle_on_album_only_refuses() {
+        // An album with no `©nam` carries no subtitle to recover, so a
+        // subtitle `preserve` must refuse before mutation. `title: clear` is
+        // the exercising case: `title: preserve` short-circuits via
+        // `both_preserve` and never reaches the album-only arm, so only a
+        // non-preserve title policy gets the refusal.
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_album("Old Title (Unabridged)");
+        tag.write_to_path(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Clear,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::PreserveUnresolvable { field: "subtitle", .. }));
+        assert_eq!(std::fs::read(&path).unwrap(), before, "refusal must not mutate the file");
     }
 
     #[test]

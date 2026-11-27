@@ -110,7 +110,8 @@ All notable changes to this project will be documented in this file. See [standa
 ### Fixed
 - A `--job` that writes the title while preserving the subtitle no longer
   fails on files whose `©alb` is a decorated form of the title, for example
-  `"Title (Unabridged)"` or a series-bracketed album. A recognized leading
+  `"Title (Unabridged)"` or a series-bracketed album. The decorated-base
+  recovery runs when the title is written. A recognized leading
   series bracket (`"[Series 02] - Title"`) or trailing parenthetical
   qualifier is stripped, and the undecorated base decides: an exact `©nam`
   match means no subtitle, and a `base - subtitle` `©nam` keeps the subtitle.
