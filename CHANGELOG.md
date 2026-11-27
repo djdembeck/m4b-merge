@@ -105,6 +105,13 @@ All notable changes to this project will be documented in this file. See [standa
   - Retry logic honors the `Retry-After` header on 429s
 
 ### Fixed
+- A `--job` that writes the title while preserving the subtitle no longer
+  fails on files whose `©alb` is a decorated form of the title rather than
+  the documented base title (e.g. `"Title (Unabridged)"` or a
+  series-bracketed album). The written title is the caller's authority for
+  the `©nam`/`©alb` pair, so an unrecoverable preserved subtitle is treated
+  as absent and the written title becomes both atoms; without a written
+  title an inconsistent pair still refuses before mutation.
 - Chapterless input groups (split MP3/M4A without embedded chapters and without provider chapters) now get one generated chapter per input track, titled `Chapter 01`, `Chapter 02`, … and embedded in the merged M4B, matching the pre-rewrite `ChaptersFromFileTracks` behaviour. Chapters and the `chapters.txt` sidecar are written even when no provider metadata was available.
 - Audnexus lookups now fetch chapter markers from `/books/{asin}/chapters` (the book endpoint never returns them), honor `isAccurate`, and carry the configured region on both requests.
 - Chapter embedding now writes the QuickTime chapter track (`chap` reference) alongside the Nero `chpl` list via mp4ameta, so Apple/AVFoundation players see chapter markers.

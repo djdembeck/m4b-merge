@@ -186,7 +186,11 @@ Field semantics:
   a diagnosed error before mutation, because the state has no base title to
   preserve. `preserve` recovers the component from the existing tags; a file
   whose tags cannot establish it fails before mutation rather than erasing
-  data.
+  data — except a preserved subtitle paired with a written title: the written
+  title is the caller's authority for the pair, so when the existing atoms do
+  not establish a subtitle (no `©nam`, or an album that is not the documented
+  base title, e.g. `"Title (Unabridged)"` or a series-bracketed album) the
+  subtitle is absent and the written title becomes both `©nam` and `©alb`.
 - `authors`, `narrators`, `series`, `description`, `genres`, `year` —
   `preserve` (default), `write`, or `clear`. A `write` requires the effective
   value to be non-blank, and fails the job if it is not. `preserve` fields
