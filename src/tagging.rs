@@ -187,7 +187,9 @@ fn album_without_series_prefix(album: &str) -> Option<&str> {
 /// is a fragment of unbalanced text, not a decoration: `None`. The balance
 /// guard judges only the remainder beyond the series prefix, so an
 /// unmatched paren inside the series bracket does not disqualify a
-/// well-formed terminal group.
+/// well-formed terminal group. A group that decorates nothing — the title
+/// portion before it is blank — is not a qualifier on a real title, so the
+/// pair must refuse: `None` as well.
 fn album_without_terminal_group(album: &str) -> Option<&str> {
     // `remainder` is a suffix of `album`; `prefix` is the series bracket's
     // byte length, so the opener index maps straight back into `album`.
@@ -199,7 +201,12 @@ fn album_without_terminal_group(album: &str) -> Option<&str> {
     if pos == 0 || remainder.as_bytes()[pos - 1] != b' ' {
         return None;
     }
-    if !parens_balanced(&remainder[..pos - 1]) {
+    // The title portion is what the group decorates. Blank (nothing but
+    // whitespace before the group) means the group is the whole name, not a
+    // qualifier on a real title: with a series prefix the base would keep
+    // only that prefix, so the pair must refuse rather than rewrite.
+    let title = &remainder[..pos - 1];
+    if title.trim().is_empty() || !parens_balanced(title) {
         return None;
     }
     let base = &album[..prefix + pos - 1];
@@ -3856,6 +3863,33 @@ mod tests {
         let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
         tag.set_title("Exoplanet (Unabridged) - Book) - A Field Guide");
         tag.set_album("[Series 02] - Exoplanet (Unabridged) - Book)");
+        tag.write_to_path(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::PreserveUnresolvable { field: "subtitle", .. }));
+        assert_eq!(std::fs::read(&path).unwrap(), before, "refusal must not mutate the file");
+    }
+
+    #[test]
+    fn policy_title_write_refuses_blank_title_portion_before_terminal_group() {
+        // A trailing group that decorates nothing: with a series prefix the
+        // title portion is blank (only the prefix's own trailing space), so
+        // the group is not a qualifier on a real title. The series-prefix-only
+        // base must not authorize the rewrite — pre-fix it matched `©nam` as
+        // `base - subtitle` (prefix's trailing space plus the separator) and
+        // rewrote the file — so the pair refuses before mutation.
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("[Series (Vol. 2] -  - A Field Guide");
+        tag.set_album("[Series (Vol. 2] -  (Unabridged)");
         tag.write_to_path(&path).unwrap();
         let before = std::fs::read(&path).unwrap();
 
