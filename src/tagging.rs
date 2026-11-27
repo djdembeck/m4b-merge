@@ -105,16 +105,26 @@ fn truncate_chapter_title(title: &str) -> String {
 /// Two shapes are recognized: a leading series bracket (`"[Series 02] - "`)
 /// and a trailing parenthetical qualifier (`" (Unabridged)"`), applied at most
 /// once each. Any trailing balanced parenthetical group is stripped, not just
-/// a list of known qualifiers. `None` means the album carries no recognized
-/// decoration (or its terminal group is unbalanced), so an unrelated album is
-/// never guessed at; the caller must still match the base against `©nam`
-/// before trusting it.
+/// a list of known qualifiers. The series prefix is parsed once on the
+/// original album, then the terminal group is stripped from the
+/// prefix-stripped remainder: a bracketed title that carries its own `] - `
+/// is never mistaken for the series prefix, and parens inside the series
+/// bracket never disqualify a terminal group whose own remainder is
+/// well-formed. `None` means the album carries no recognized decoration
+/// (or its terminal group is unbalanced), so an unrelated album is never
+/// guessed at; the caller must still match the base against `©nam` before
+/// trusting it.
 fn undecorated_album_base(album: &str) -> Option<&str> {
-    let after_prefix = album_without_series_prefix(album).unwrap_or(album);
-    if ends_with_unpaired_close(after_prefix) {
+    // The prefix is parsed once; the unpaired-close guard judges only the
+    // remainder beyond it, so an unmatched paren inside the series bracket
+    // does not disqualify a well-formed terminal group.
+    let remainder = album_without_series_prefix(album).unwrap_or(album);
+    if ends_with_unpaired_close(remainder) {
         return None;
     }
-    album_without_terminal_group(after_prefix).or_else(|| album_without_series_prefix(album))
+    album_without_terminal_group(album)
+        .and_then(|base| album_without_series_prefix(base).or(Some(base)))
+        .or_else(|| album_without_series_prefix(album))
 }
 
 /// Match `t` (`©nam`) against the undecorated bases of `album`, in order:
@@ -173,8 +183,11 @@ fn album_without_series_prefix(album: &str) -> Option<&str> {
 /// bracket is recognized, only a group whose opener starts after that
 /// bracket may be stripped — the bracket's own `(` belongs to the series
 /// name — so the detection runs on the series-stripped remainder and the
-/// base keeps the prefix. A base that carries a paren it never closes is a
-/// fragment of unbalanced text, not a decoration: `None`.
+/// base keeps the prefix. A remainder that carries a paren it never closes
+/// is a fragment of unbalanced text, not a decoration: `None`. The balance
+/// guard judges only the remainder beyond the series prefix, so an
+/// unmatched paren inside the series bracket does not disqualify a
+/// well-formed terminal group.
 fn album_without_terminal_group(album: &str) -> Option<&str> {
     // `remainder` is a suffix of `album`; `prefix` is the series bracket's
     // byte length, so the opener index maps straight back into `album`.
@@ -186,10 +199,10 @@ fn album_without_terminal_group(album: &str) -> Option<&str> {
     if pos == 0 || remainder.as_bytes()[pos - 1] != b' ' {
         return None;
     }
-    let base = &album[..prefix + pos - 1];
-    if !parens_balanced(base) {
+    if !parens_balanced(&remainder[..pos - 1]) {
         return None;
     }
+    let base = &album[..prefix + pos - 1];
     (!base.trim().is_empty()).then_some(base)
 }
 
@@ -3962,6 +3975,39 @@ mod tests {
     }
 
     #[test]
+    fn policy_title_write_recovers_subtitle_behind_bracketed_title_in_terminal_group() {
+        // The terminal group's content carries a `] - `, so re-parsing the
+        // series prefix on the already-stripped remainder finds it inside the
+        // bracketed title and swallows the real base: the fully stripped base
+        // is never emitted and the pair refuses. Stripping the terminal group
+        // from the original album, then the prefix from that base, recovers
+        // the subtitle in both scenarios.
+        for (album, nam) in [
+            ("[Series 02] - [Book] (Edition [2025] - Unabridged)", "[Book] - A Field Guide"),
+            ("[Series 02] - [The Book] (Edition [US] - 2024)", "[The Book] - A Field Guide"),
+        ] {
+            let temp_dir = TempDir::new().unwrap();
+            let path = create_minimal_m4b(&temp_dir);
+            let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+            tag.set_title(nam);
+            tag.set_album(album);
+            tag.write_to_path(&path).unwrap();
+
+            let tagger = Tagger::new();
+            let policies = crate::job::WritePolicies {
+                title: crate::job::TitlePolicy::Write,
+                subtitle: crate::job::SubtitlePolicy::Preserve,
+                ..all_write_policies()
+            };
+            tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+            let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+            assert_eq!(tag.title(), Some("New Title - A Field Guide"));
+            assert_eq!(tag.album(), Some("New Title"));
+        }
+    }
+
+    #[test]
     fn policy_title_write_refuses_ambiguous_title_album_pair() {
         // Neither an exact match nor a recognized decoration: the pair cannot
         // establish a subtitle, so a title write must still refuse before
@@ -4404,5 +4450,31 @@ mod tests {
         tagger.clear_cover(&path).unwrap();
         let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
         assert!(tag.artwork().is_none());
+    }
+    #[test]
+    fn policy_title_write_recovers_subtitle_behind_unmatched_paren_in_series_prefix() {
+        // The series bracket carries an unmatched `(` (from `(Vol. 2]`), which
+        // previously made the balance guard reject the terminal group
+        // `(Unabridged)` because the guard ran on the full base including the
+        // prefix. Now the guard judges only the remainder beyond the prefix,
+        // so the terminal group is stripped and the subtitle is recovered.
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("Book - A Field Guide");
+        tag.set_album("[Series (Vol. 2] - Book (Unabridged)");
+        tag.write_to_path(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap();
+
+        let tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title(), Some("New Title - A Field Guide"));
+        assert_eq!(tag.album(), Some("New Title"));
     }
 }
