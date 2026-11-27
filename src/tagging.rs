@@ -260,12 +260,15 @@ fn paired_terminal_group_open(album: &str) -> Option<usize> {
 /// that — an emoticon (`"Smile :-) Today"`) or any other title text may
 /// carry one, and the stripped base still has to match `©nam` before it is
 /// trusted — so only an unclosed opener disqualifies the title portion.
+/// `depth` counts openers still awaiting a close and never goes negative: a
+/// stray `)` is ignored instead of being credited to a later `(`, so it
+/// cannot mask an opener that is never closed.
 fn has_unclosed_open(text: &str) -> bool {
     let mut depth = 0i32;
     for c in text.chars() {
         match c {
             '(' => depth += 1,
-            ')' => depth -= 1,
+            ')' if depth > 0 => depth -= 1,
             _ => {}
         }
     }
@@ -3963,6 +3966,30 @@ mod tests {
     }
 
     #[test]
+    fn policy_title_write_refuses_unclosed_open_behind_emoticon() {
+        // The stray `)` of an emoticon must not be credited to a later `(`:
+        // the opener in `(Part` is never closed, so the qualifier was cut out
+        // of a malformed group and the pair refuses before mutation.
+        let temp_dir = TempDir::new().unwrap();
+        let path = create_minimal_m4b(&temp_dir);
+        let mut tag = mp4ameta::Tag::read_from_path(&path).unwrap();
+        tag.set_title("Smile :-) Today (Part - A Field Guide");
+        tag.set_album("Smile :-) Today (Part (Unabridged)");
+        tag.write_to_path(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let tagger = Tagger::new();
+        let policies = crate::job::WritePolicies {
+            title: crate::job::TitlePolicy::Write,
+            subtitle: crate::job::SubtitlePolicy::Preserve,
+            ..all_write_policies()
+        };
+        let err = tagger.write_metadata_with_policies(&path, &meta(), &policies).unwrap_err();
+        assert!(matches!(err, TaggingError::PreserveUnresolvable { field: "subtitle", .. }));
+        assert_eq!(std::fs::read(&path).unwrap(), before, "refusal must not mutate the file");
+    }
+
+    #[test]
     fn policy_title_write_refuses_terminal_group_opening_inside_series_bracket() {
         // The series bracket's own `(` belongs to the series name: a terminal
         // group whose opener is inside the bracket is not a decoration, so
@@ -4131,6 +4158,9 @@ mod tests {
         // An unclosed `(` in the title portion means the qualifier was cut
         // out of a larger malformed group, so it stays refused.
         assert_eq!(undecorated_album_base("Book (Part (Unabridged)"), None);
+        // A stray `)` is not credited to a later `(`: the opener after the
+        // emoticon is still unclosed, so the qualifier stays refused.
+        assert_eq!(undecorated_album_base("Smile :-) Today (Part (Unabridged)"), None);
     }
 
     #[test]
